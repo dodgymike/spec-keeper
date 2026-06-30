@@ -57,6 +57,8 @@ curl -s $J -X POST $B/projects/corsearch/reservations -d '{"namespace":"migratio
 ```
 
 Full agent recipe book: **`AGENTS_API.md`**.
+Migrating an existing repo's `SPEC.md` onto the server? See **`INTEGRATION_GUIDE.md`** and
+`scripts/migrate-repo.sh <slug> <path/to/SPEC.md>`.
 
 ## Architecture
 
