@@ -159,6 +159,20 @@ curl -s -X POST $B/projects/corsearch/decisions -H 'Content-Type: application/js
 curl -s $B/projects/corsearch/decisions
 ```
 
+## Register agents (per project)
+
+The agent registry is **scoped to a project** — each project has its own roster, so two projects can
+both have a `spec-keeper`. (The migration scripts do this for you; here's the call.)
+
+```bash
+curl -s -X POST $B/projects/corsearch/agents \
+  -d '{"slug":"spec-keeper","display_name":"Spec Keeper"}' -H 'Content-Type: application/json'
+curl -s $B/projects/corsearch/agents        # this project's roster
+```
+
+Registration is metadata + idempotent (upsert by slug within the project); task ownership still works
+with any slug string, registered or not.
+
 ## Track the mandated chain (spec-keeper → … → security)
 
 Record each pass of a task through the agent chain, with a justification required for any skip.

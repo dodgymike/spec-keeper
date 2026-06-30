@@ -86,7 +86,7 @@ esac
 # 3. Register the agent roster (idempotent upsert).
 echo "Registering agents: $AGENTS"
 for a in $AGENTS; do
-  c="$(code_of -H "$JSON_HDR" -X POST "$BASE/agents" \
+  c="$(code_of -H "$JSON_HDR" -X POST "$BASE/projects/$SLUG/agents" \
     -d "{\"slug\":\"$a\",\"display_name\":\"$a\"}")"
   case "$c" in 2*|409) ;; *) echo "ERROR: agent '$a' -> HTTP $c." >&2; exit 1 ;; esac
 done

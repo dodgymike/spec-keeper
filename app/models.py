@@ -103,19 +103,29 @@ class Project(Base):
 
 
 class Agent(Base):
-    """Registry of actors (agents/humans). Ownership is by slug string so
-    ad-hoc agents work without pre-registration; this table is for metadata."""
+    """Per-project registry of actors (agents/humans). Scoped to a project so
+    each project has its own roster (two projects can both have a `spec-keeper`).
+    Ownership of a task is still by slug string, so ad-hoc agents work without
+    pre-registration; this table is metadata + the project association."""
 
     __tablename__ = "agents"
+    __table_args__ = (
+        UniqueConstraint("project_id", "slug", name="uq_agent_project_slug"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     public_id: Mapped[str] = mapped_column(
         PGUUID(as_uuid=False), default=_uuid, unique=True, nullable=False
     )
-    slug: Mapped[str] = mapped_column(sa.Text, unique=True, nullable=False)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    slug: Mapped[str] = mapped_column(sa.Text, nullable=False)
     display_name: Mapped[str | None] = mapped_column(sa.Text)
     kind: Mapped[str] = mapped_column(sa.Text, default="agent", nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
+
+    project: Mapped["Project"] = relationship()
 
 
 class Epic(Base):

@@ -51,10 +51,14 @@ class AgentIn(Schema):
 
 class AgentOut(Schema):
     public_id = fields.Str(dump_only=True)
+    project = fields.Method("get_project", dump_only=True)
     slug = fields.Str()
     display_name = fields.Str(allow_none=True)
     kind = fields.Str()
     created_at = fields.DateTime(dump_only=True)
+
+    def get_project(self, obj):
+        return obj.project.slug if obj.project else None
 
 
 # --------------------------------------------------------------------------- #

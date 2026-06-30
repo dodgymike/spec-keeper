@@ -56,7 +56,7 @@ esac
 echo "Registering agents..."
 for agent in spec-keeper implementer reviewer security; do
   code="$(curl -s -o /dev/null -w '%{http_code}' $JSON \
-    -X POST "$BASE/agents" \
+    -X POST "$BASE/projects/spec-server/agents" \
     -d "{\"slug\":\"$agent\",\"display_name\":\"$agent\"}")"
   case "$code" in
     2*) echo "  $agent registered." ;;
