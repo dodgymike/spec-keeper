@@ -115,10 +115,21 @@ curl -s -X POST $B/projects/corsearch/tasks/RULEPERF-1/notes \
   -H 'Content-Type: application/json' \
   -d '{"body":"DLQ root cause is the Athena CSV race; see request id abc","author":"alice"}'
 
-curl -s $B/projects/corsearch/tasks/RULEPERF-1/notes     # list, oldest first
+curl -s $B/projects/corsearch/tasks/RULEPERF-1/notes     # one task's notes, oldest first
 ```
 
 Adding a note also emits a `note` event into the project's stream.
+
+**List notes across the whole project** (newest first), with filters:
+
+```bash
+curl -s "$B/projects/corsearch/notes"                       # every task's notes
+curl -s "$B/projects/corsearch/notes?author=feature-runner" # by author
+curl -s "$B/projects/corsearch/notes?task=RULEPERF-1"       # one task
+curl -s "$B/projects/corsearch/notes?since=2026-06-30T17:00:00&limit=50"
+```
+
+Each row carries its `task`, `author`, `body`, and `created_at`.
 
 ## Status keywords
 

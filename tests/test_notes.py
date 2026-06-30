@@ -40,3 +40,26 @@ def test_adding_a_note_emits_an_event(client, project):
     client.post(f"{BASE}/N-4/notes", json={"body": "hello", "author": "bob"})
     evs = client.get("/api/v1/projects/demo/events?event_type=note").get_json()
     assert any("hello" in e["message"] for e in evs)
+
+
+def test_project_wide_notes_listing_and_filters(client, project):
+    _task(client, "N-5")
+    _task(client, "N-6")
+    client.post(f"{BASE}/N-5/notes", json={"body": "alpha", "author": "alice"})
+    client.post(f"{BASE}/N-6/notes", json={"body": "beta", "author": "bob"})
+    client.post(f"{BASE}/N-6/notes", json={"body": "gamma", "author": "alice"})
+
+    P = "/api/v1/projects/demo/notes"
+    # all notes, newest first, each carries its task
+    alln = client.get(P).get_json()
+    assert len(alln) == 3
+    assert alln[0]["body"] == "gamma"            # newest first
+    assert {n["task"] for n in alln} == {"N-5", "N-6"}
+
+    # filter by author
+    alice = client.get(f"{P}?author=alice").get_json()
+    assert sorted(n["body"] for n in alice) == ["alpha", "gamma"]
+
+    # filter by task
+    n6 = client.get(f"{P}?task=N-6").get_json()
+    assert sorted(n["body"] for n in n6) == ["beta", "gamma"]

@@ -114,6 +114,25 @@ class NoteOut(Schema):
     created_at = fields.DateTime(dump_only=True)
 
 
+class ProjectNoteOut(Schema):
+    """A note with its task context, for the project-wide notes feed."""
+    task = fields.Method("get_task", dump_only=True)
+    author = fields.Str(allow_none=True)
+    body = fields.Str()
+    created_at = fields.DateTime(dump_only=True)
+
+    def get_task(self, obj):
+        return obj.task.display_id if obj.task else None
+
+
+class NoteQuery(Schema):
+    author = fields.Str(metadata={"description": "Filter to one author/agent."})
+    task = fields.Str(metadata={"description": "Filter to one task (key or public_id)."})
+    since = fields.DateTime(metadata={"description": "Only notes at/after this time (ISO 8601)."})
+    limit = fields.Int(load_default=200, validate=validate.Range(min=1, max=1000))
+    offset = fields.Int(load_default=0, validate=validate.Range(min=0))
+
+
 class TaskOut(Schema):
     public_id = fields.Str(dump_only=True)
     display_id = fields.Str(dump_only=True)

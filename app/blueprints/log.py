@@ -8,13 +8,15 @@ from flask_smorest import Blueprint
 
 from ..extensions import db
 from ..helpers import get_project_or_404, get_task_or_404, require_api_key
-from ..models import Decision, Event
+from ..models import Decision, Event, Task, TaskNote
 from ..schemas import (
     DecisionIn,
     DecisionOut,
     EventIn,
     EventOut,
     EventQuery,
+    NoteQuery,
+    ProjectNoteOut,
 )
 from ..services import log_event
 
@@ -63,6 +65,37 @@ class EventsCollection(MethodView):
         )
         db.session.commit()
         return event
+
+
+@blp.route("/notes")
+class ProjectNotes(MethodView):
+    @blp.arguments(NoteQuery, location="query")
+    @blp.response(200, ProjectNoteOut(many=True))
+    def get(self, args, slug):
+        """List notes across all of a project's tasks (newest first).
+
+        Filter with ``author``, ``task`` (key or public_id), ``since`` (ISO time),
+        and paginate with ``limit``/``offset``."""
+        require_api_key()
+        project = get_project_or_404(slug)
+        query = (
+            sa.select(TaskNote)
+            .join(Task, Task.id == TaskNote.task_id)
+            .where(Task.project_id == project.id)
+        )
+        if "author" in args:
+            query = query.where(TaskNote.author == args["author"])
+        if "task" in args:
+            task = get_task_or_404(project.id, args["task"])
+            query = query.where(TaskNote.task_id == task.id)
+        if "since" in args:
+            query = query.where(TaskNote.created_at >= args["since"])
+        query = (
+            query.order_by(TaskNote.created_at.desc(), TaskNote.id.desc())
+            .offset(args["offset"])
+            .limit(args["limit"])
+        )
+        return db.session.execute(query).scalars().all()
 
 
 @blp.route("/decisions")
