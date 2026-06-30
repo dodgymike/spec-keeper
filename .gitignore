@@ -15,6 +15,9 @@ venv/
 pgdata/
 *.sqlite3
 
+# Database backups (keep these off git; they can be large and hold real data)
+backups/
+
 # Scratch
 /scratch/
 *.tmp
