@@ -39,7 +39,7 @@ from ..schemas import (
     TaskPatch,
     TaskQuery,
 )
-from ..services import claim_next_task, close_active_lease
+from ..services import claim_next_task, close_active_lease, log_event
 
 blp = Blueprint(
     "tasks", __name__, url_prefix="/api/v1/projects/<slug>/tasks",
@@ -85,7 +85,11 @@ class TasksCollection(MethodView):
                 sa.or_(Task.title.ilike(like), Task.description.ilike(like))
             )
 
-        query = query.order_by(Task.position, Task.id).limit(args["limit"])
+        query = (
+            query.order_by(Task.position, Task.id)
+            .offset(args["offset"])
+            .limit(args["limit"])
+        )
         return db.session.execute(query).scalars().all()
 
     @blp.arguments(TaskIn)
@@ -224,6 +228,9 @@ class TaskComplete(MethodView):
                 repo=data.get("repo"), test_summary=data.get("test_summary"),
             ))
         close_active_lease(task.id, LeaseState.completed)
+        log_event(project.id, "completed", task_id=task.id,
+                  message=f"completed {task.display_id}",
+                  payload={k: v for k, v in data.items() if v})
         db.session.commit()
         return task, 200, etag_headers(task)
 

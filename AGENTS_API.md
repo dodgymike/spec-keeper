@@ -138,6 +138,27 @@ The parser understands the observed dialects: `[ ] [~] [x] [-]` checkboxes, `**K
 epic headings (`### EPIC NAME — desc`), trailing `(BE, P0, blocked)` metadata, and `_Proof: <cmd>_`
 lines. Tasks are keyed by their human ID, so import upserts rather than duplicates.
 
+## Log your work and record decisions
+
+The append-only event stream replaces `AGENT_LOG.md`; decisions replace `DECISIONS.md`. Claim,
+complete, and reserve calls emit events automatically — you only POST events for free-form notes.
+
+```bash
+# Free-form note:
+curl -s -X POST $B/projects/corsearch/events \
+  -d '{"event_type":"note","agent":"alice","message":"DLQ drained; root cause was X"}' \
+  -H 'Content-Type: application/json'
+
+# Read the stream (newest first; filter by type/agent/task, paginate with limit/offset):
+curl -s "$B/projects/corsearch/events?event_type=completed&limit=20"
+
+# Record a decision (also emits a 'decision' event):
+curl -s -X POST $B/projects/corsearch/decisions -H 'Content-Type: application/json' -d '{
+  "key":"DEC-7","title":"Adopt Aurora","decision":"Use Aurora Serverless v2.",
+  "context":"Spiky load.","consequences":"Cold-start latency on scale-to-zero."}'
+curl -s $B/projects/corsearch/decisions
+```
+
 ## Conventions agents must honour
 
 - Claim before you work; complete (or release) when done — never leave a task `in_progress` with no

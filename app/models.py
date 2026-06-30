@@ -20,6 +20,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -356,3 +357,56 @@ class Lease(Base):
     acquired_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(nullable=False)
     released_at: Mapped[datetime | None] = mapped_column()
+
+
+# --------------------------------------------------------------------------- #
+# Append-only log (replaces AGENT_LOG.md) and decision records (DECISIONS.md)
+# --------------------------------------------------------------------------- #
+class Event(Base):
+    """Append-only event stream. The API never exposes update/delete; history is
+    immutable. Auto-emitted on claim/complete/reserve, plus free-form notes."""
+
+    __tablename__ = "events"
+    __table_args__ = (
+        Index("ix_events_project_time", "project_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+    agent: Mapped[str | None] = mapped_column(sa.Text)
+    event_type: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    message: Mapped[str | None] = mapped_column(sa.Text)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
+
+
+class Decision(Base):
+    """ADR-style decision record (replaces DECISIONS.md)."""
+
+    __tablename__ = "decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    public_id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False), default=_uuid, unique=True, nullable=False
+    )
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+    key: Mapped[str | None] = mapped_column(sa.Text)  # e.g. DEC-1
+    agent: Mapped[str | None] = mapped_column(sa.Text)
+    title: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    context: Mapped[str | None] = mapped_column(sa.Text)
+    decision: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    consequences: Mapped[str | None] = mapped_column(sa.Text)
+    supersedes_id: Mapped[int | None] = mapped_column(
+        ForeignKey("decisions.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)

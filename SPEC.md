@@ -69,17 +69,31 @@ file-and-server in parallel before going server-only. Implemented in `app/specmd
 - [x] **PORT-5 · `POST /export/diff` dry-run** (BE). Reports added/removed/changed vs a posted file.
   _Proof: a single flipped task shows as `1 changed`._
 
+### EPIC LOG — Append-only log + decisions (shipped 2026-06-30)
+
+`app/models.py` (Event, Decision) + `app/blueprints/log.py`. Events auto-emitted on
+claim/complete/reserve/decision.
+
+- [x] **LOG-1 · `events` table + `/events` endpoints** (BE). Append-only stream (replaces
+  `AGENT_LOG.md`); filter by task/agent/type, paginated. _Proof: `pytest -k event` — claim/complete/
+  reserve emit events; manual note round-trips._
+- [x] **LOG-2 · `decisions` table + `/decisions` endpoints** (BE). ADR-style records (replaces
+  `DECISIONS.md`); recording one also emits an event. _Proof: `pytest -k decision`._
+
+### EPIC HARDEN (partial) — reaper + pagination (shipped 2026-06-30)
+
+- [x] **HARDEN-2 · Lease expiry reaper** (BE). An abandoned (expired-lease) in_progress task is
+  reclaimed by the next `claim-next`; the stale lease is retired so one-active-lease holds. _Proof:
+  `pytest -k expired_lease`._
+- [x] **HARDEN-4 · Pagination (`limit`/`offset`) on task + event lists** (BE). _Proof:
+  `pytest -k pagination`._
+
 ---
 
 ## To Do
 
 ### EPIC LOG — Append-only log, decisions, chain tracking
 
-- [ ] **LOG-1 · `events` table + `/events` endpoints** (BE). Append-only agent-log stream (replaces
-  `AGENT_LOG.md`); filter by task/agent/type. _Proof: POST event → GET stream contains it; UPDATE on
-  events is rejected._
-- [ ] **LOG-2 · `decisions` table + `/decisions` endpoints** (BE). ADR-style records (replaces
-  `DECISIONS.md`). _Proof: POST decision → GET returns title._
 - [ ] **LOG-3 · Chain-run + step tracking** (BE). Track the mandated chain per task; a skipped step
   requires a justification. _Proof: skip without justification → 422._
 
@@ -88,12 +102,8 @@ file-and-server in parallel before going server-only. Implemented in `app/specmd
 - [ ] **HARDEN-1 · Alembic migrations** (BE). Replace `create_all` with versioned migrations
   (enums, partial indexes, a `version`-bump trigger as defence-in-depth). _Proof: `alembic upgrade
   head` on an empty DB builds the full schema; downgrade works._
-- [ ] **HARDEN-2 · Lease expiry reaper** (BE). A claimed task whose lease expired becomes claimable
-  again. _Proof: a test with a 0s TTL re-claims an abandoned task._
 - [ ] **HARDEN-3 · Idempotency-Key on claim/reserve** (BE). A retried POST after a network blip does
   not double-allocate. _Proof: same key twice → one allocation._
-- [ ] **HARDEN-4 · Pagination (`limit`/`cursor`) on all list endpoints** (BE). _Proof: list with a
-  small page size returns a cursor that fetches the next page._
 
 ### EPIC DOGFOOD — Migrate the server onto itself
 

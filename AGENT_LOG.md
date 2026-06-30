@@ -17,3 +17,16 @@ to the server's `/events` endpoint.
 - Chain note: this initial scaffold was built directly (greenfield), not through the per-task chain;
   the chain becomes mandatory for all subsequent tasks (PORT/LOG/HARDEN/DOGFOOD epics). Justification
   for the one-time skip: there was no prior code or backlog to claim against.
+
+## 2026-06-30 — Post-MVP: git + PORT + LOG + HARDEN(partial)
+
+- Initialized git; MVP committed on `main`; post-MVP work on branch `post-mvp-port-log-harden`.
+- **PORT epic (committed `8bc5c96`):** `app/specmd.py` parser/renderer + `app/blueprints/ports.py`
+  (`/import`, `/export`, `/export/diff`). Round-trip fidelity proven; validated on the real 568-line
+  feed-reader `SPEC.md` (43 tasks, idempotent re-import).
+- **LOG epic:** `Event` + `Decision` models, `app/blueprints/log.py` (`/events`, `/decisions`).
+  Events auto-emitted on claim/complete/reserve/decision.
+- **HARDEN (partial):** lease-expiry reaper (abandoned tasks re-claimable; stale lease retired) +
+  `limit`/`offset` pagination on task/event lists.
+- Tests: `pytest -q` → **25 passed** (15 MVP + 4 PORT + 4 LOG + 2 HARDEN).
+- Still open: LOG-3 (chain tracking), HARDEN-1 (Alembic), HARDEN-3 (idempotency keys), DOGFOOD epic.

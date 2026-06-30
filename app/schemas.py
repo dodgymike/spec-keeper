@@ -166,6 +166,7 @@ class TaskQuery(Schema):
     tag = fields.Str()
     q = fields.Str(metadata={"description": "Free-text match on title/description."})
     limit = fields.Int(load_default=200, validate=validate.Range(min=1, max=1000))
+    offset = fields.Int(load_default=0, validate=validate.Range(min=0))
 
 
 class ClaimNextIn(Schema):
@@ -236,3 +237,52 @@ class CounterOut(Schema):
 
 class MessageOut(Schema):
     message = fields.Str()
+
+
+# --------------------------------------------------------------------------- #
+# Events (append-only log) and decisions
+# --------------------------------------------------------------------------- #
+class EventIn(Schema):
+    event_type = fields.Str(load_default="note")
+    agent = fields.Str(allow_none=True)
+    task_key = fields.Str(allow_none=True)
+    message = fields.Str(allow_none=True)
+    payload = fields.Dict(load_default=dict)
+
+
+class EventOut(Schema):
+    event_type = fields.Str()
+    agent = fields.Str(allow_none=True)
+    task_id = fields.Int(allow_none=True)
+    message = fields.Str(allow_none=True)
+    payload = fields.Dict()
+    created_at = fields.DateTime(dump_only=True)
+
+
+class EventQuery(Schema):
+    event_type = fields.Str()
+    agent = fields.Str()
+    task = fields.Str(metadata={"description": "Task key or public_id."})
+    limit = fields.Int(load_default=200, validate=validate.Range(min=1, max=1000))
+    offset = fields.Int(load_default=0, validate=validate.Range(min=0))
+
+
+class DecisionIn(Schema):
+    key = fields.Str(allow_none=True, metadata={"description": "e.g. DEC-7"})
+    title = fields.Str(required=True)
+    decision = fields.Str(required=True)
+    context = fields.Str(allow_none=True)
+    consequences = fields.Str(allow_none=True)
+    agent = fields.Str(allow_none=True)
+    task_key = fields.Str(allow_none=True)
+
+
+class DecisionOut(Schema):
+    public_id = fields.Str(dump_only=True)
+    key = fields.Str(allow_none=True)
+    title = fields.Str()
+    decision = fields.Str()
+    context = fields.Str(allow_none=True)
+    consequences = fields.Str(allow_none=True)
+    agent = fields.Str(allow_none=True)
+    created_at = fields.DateTime(dump_only=True)

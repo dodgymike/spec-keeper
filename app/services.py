@@ -22,6 +22,7 @@ from .extensions import db
 from .models import (
     CLAIMABLE_STATUSES,
     Epic,
+    Event,
     Lease,
     LeaseState,
     Priority,
@@ -31,6 +32,17 @@ from .models import (
     utcnow,
 )
 from .specmd import ParsedSpec
+
+
+def log_event(project_id: int, event_type: str, agent=None, task_id=None,
+              message=None, payload=None) -> Event:
+    """Append an immutable event to the project's stream."""
+    event = Event(
+        project_id=project_id, event_type=event_type, agent=agent,
+        task_id=task_id, message=message, payload=payload or {},
+    )
+    db.session.add(event)
+    return event
 
 # Lower index == higher priority. Tasks with no priority sort last.
 _PRIORITY_ORDER = {Priority.P0: 0, Priority.P1: 1, Priority.P2: 2, Priority.P3: 3}
@@ -62,6 +74,9 @@ def reserve_number(project_id: int, namespace: str, reserved_by=None,
         note=note,
     )
     db.session.add(reservation)
+    log_event(project_id, "reserved", agent=reserved_by, task_id=task_id,
+              message=f"reserved {namespace} #{value}",
+              payload={"namespace": namespace, "value": value})
     db.session.flush()
     return reservation
 
@@ -84,13 +99,27 @@ def claim_next_task(project_id: int, agent: str, epic_id=None,
     """Atomically claim the next claimable (todo) task. Returns the task, or
     None if none are available. The row is locked with FOR UPDATE SKIP LOCKED
     so concurrent callers never collide."""
+    now = utcnow()
     claimable = [s for s in CLAIMABLE_STATUSES]
+    # A task is claimable if it is todo and unowned (or owned by us), OR it is
+    # in_progress but its lease has expired (the reaper path — an abandoned task
+    # returns to the pool automatically).
     query = (
         sa.select(Task)
         .where(Task.project_id == project_id)
-        .where(Task.status.in_(claimable))
-        # only claim unowned tasks (or tasks whose lease we already hold)
-        .where(sa.or_(Task.owner.is_(None), Task.owner == agent))
+        .where(
+            sa.or_(
+                sa.and_(
+                    Task.status.in_(claimable),
+                    sa.or_(Task.owner.is_(None), Task.owner == agent),
+                ),
+                sa.and_(
+                    Task.status == TaskStatus.in_progress,
+                    Task.lease_expires_at.is_not(None),
+                    Task.lease_expires_at < now,
+                ),
+            )
+        )
     )
     if epic_id is not None:
         query = query.where(Task.epic_id == epic_id)
@@ -111,8 +140,12 @@ def claim_next_task(project_id: int, agent: str, epic_id=None,
     if task is None:
         return None
 
-    ttl = lease_ttl or current_app.config["LEASE_DEFAULT_TTL"]
+    ttl = current_app.config["LEASE_DEFAULT_TTL"] if lease_ttl is None else lease_ttl
     expires = utcnow() + timedelta(seconds=ttl)
+
+    # If we are reclaiming an abandoned (expired) task, retire its stale lease
+    # first so the one-active-lease invariant holds.
+    close_active_lease(task.id, LeaseState.expired)
 
     task.status = TaskStatus.in_progress
     task.owner = agent
@@ -122,6 +155,8 @@ def claim_next_task(project_id: int, agent: str, epic_id=None,
     lease = Lease(task_id=task.id, agent=agent, state=LeaseState.active,
                   expires_at=expires)
     db.session.add(lease)
+    log_event(project_id, "claimed", agent=agent, task_id=task.id,
+              message=f"{agent} claimed {task.display_id}")
     db.session.flush()
     return task
 
