@@ -60,6 +60,24 @@ Full agent recipe book: **`AGENTS_API.md`**.
 Migrating an existing repo's `SPEC.md` onto the server? See **`INTEGRATION_GUIDE.md`** and
 `scripts/migrate-repo.sh <slug> <path/to/SPEC.md>`.
 
+## What's included
+
+- **Tasks** — CRUD, atomic `claim-next`, `complete`, `release`, `status`, relations, commit refs;
+  per-task `owner`/lease; optimistic locking (`version`/`If-Match` → 412).
+- **Atomic number reservation** — collision-proof per-namespace counters.
+- **Per-project agent registry** — each project has its own roster (two projects can both have a
+  `spec-keeper`).
+- **SPEC.md round-trip** — import an existing `SPEC.md`, export the DB back to one (`app/specmd.py` +
+  `blueprints/ports.py`); the migration bridge.
+- **Append-only event log + decision records** — replace `AGENT_LOG.md` / `DECISIONS.md`; events are
+  auto-emitted on claim/complete/reserve.
+- **Chain-run tracking** — record a task's pass through the mandated agent chain; a skipped step
+  needs a justification.
+- **Idempotency-Key** replay on `claim-next`/`reserve`; **lease reaper** (abandoned tasks become
+  re-claimable); **pagination** on list endpoints.
+- **Alembic migrations**, **OpenAPI 3** + Swagger UI, **Docker** compose, and a **scheduled daily
+  backup** (`scripts/backup.sh` via a launchd LaunchAgent).
+
 ## Architecture
 
 | Piece | File |
@@ -68,13 +86,18 @@ Migrating an existing repo's `SPEC.md` onto the server? See **`INTEGRATION_GUIDE
 | Env config | `app/config.py` |
 | SQLAlchemy models (the schema) | `app/models.py` |
 | Marshmallow schemas (validation **and** OpenAPI source of truth) | `app/schemas.py` |
-| Atomic claim + reserve | `app/services.py` |
-| REST blueprints | `app/blueprints/` |
-| Tests (incl. concurrency) | `tests/` |
+| Atomic claim + reserve, event-log helper | `app/services.py` |
+| Idempotency-Key store | `app/idempotency.py` |
+| `SPEC.md` import/export parser + renderer | `app/specmd.py` |
+| REST blueprints (projects · agents · epics · tasks · reservations · ports · log · chains) | `app/blueprints/` |
+| Alembic migrations (run on boot) | `migrations/` |
+| Tests (concurrency + round-trip + idempotency) | `tests/` |
+| Backup / migrate / schedule scripts | `scripts/` |
 
-Key tables: `projects`, `agents`, `epics`, `tasks` (status enum, priority, component, `owner`,
-`version`, lease), `tags`, `task_relations`, `commit_refs`, `counters` + `reservations` (atomic
-numbering), `leases` (one active per task).
+Key tables: `projects`, `agents` (project-scoped), `epics`, `tasks` (status enum, priority,
+component, `owner`, `version`, lease, `section`), `tags`, `task_relations`, `commit_refs`,
+`counters` + `reservations` (atomic numbering), `leases` (one active per task), `events`,
+`decisions`, `chain_runs` + `chain_steps`, `idempotency_keys`.
 
 ## Running the tests
 
@@ -85,8 +108,11 @@ indexes), so tests run against a real PostgreSQL:
 docker compose exec db psql -U spec -d specserver -c "CREATE DATABASE specserver_test;"
 docker compose exec -T -e TEST_DATABASE_URL=postgresql+psycopg://spec:spec@db:5432/specserver_test \
   app python -m pytest -q
-# -> 15 passed
+# -> 35 passed
 ```
+
+On boot the container runs `alembic upgrade head` (adopting a legacy `create_all` database by
+stamping it first); the test suite builds its schema directly from the models.
 
 ## Configuration (`.env`)
 
@@ -96,12 +122,23 @@ docker compose exec -T -e TEST_DATABASE_URL=postgresql+psycopg://spec:spec@db:54
 | `LEASE_DEFAULT_TTL` | `1800` | Claimed-task lease seconds |
 | `API_KEYS` | _(empty)_ | Comma-separated bearer tokens. Empty ⇒ auth off (local-only). |
 
-## Status & roadmap
+## Backups
 
-The **MVP** (this code) is shipped and tested. Planned next, tracked in `SPEC.md`:
-`SPEC.md` import/export round-trip (`PORT`), append-only events + decisions + chain tracking
-(`LOG`), production hardening — Alembic, lease reaper, idempotency keys, pagination (`HARDEN`), and
-migrating this project's own backlog onto the server (`DOGFOOD`).
+Data lives in the Docker `pgdata` volume (survives restarts/reboots, destroyed by
+`docker compose down -v`). Snapshot it any time, or schedule a daily dump:
+
+```bash
+scripts/backup.sh                      # one-off -> backups/specserver-<ts>.sql.gz (keeps newest 14)
+scripts/install-backup-schedule.sh     # daily 03:00 via launchd
+# restore: gunzip -c backups/specserver-latest.sql.gz | docker compose exec -T db psql -U spec -d specserver
+```
+
+## Status
+
+All planned epics are shipped and tested (**35 passing**): MVP, `PORT` (SPEC.md round-trip), `LOG`
+(events + decisions + chain tracking), `HARDEN` (Alembic, lease reaper, idempotency, pagination),
+and `DOGFOOD` — this server now hosts **its own** backlog. The current backlog lives on the running
+server (project slug `spec-server`); `SPEC.md` is its readable mirror.
 
 This repo is itself developed with the SPEC-driven multi-agent workflow it hosts — see `CLAUDE.md`
-and `.claude/agents/`.
+and `.claude/agents/`. To adopt it in another repo, see `INTEGRATION_GUIDE.md`.
