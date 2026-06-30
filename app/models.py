@@ -410,3 +410,58 @@ class Decision(Base):
         ForeignKey("decisions.id", ondelete="SET NULL")
     )
     created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
+
+
+# --------------------------------------------------------------------------- #
+# Chain runs and steps (LOG-3): track a task's mandated agent chain execution.
+# --------------------------------------------------------------------------- #
+class ChainRun(Base):
+    """A single execution of the mandated agent chain for one task."""
+
+    __tablename__ = "chain_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    public_id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False), default=_uuid, unique=True, nullable=False
+    )
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    task_id: Mapped[int] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    started_by: Mapped[str | None] = mapped_column(sa.Text)
+    # values: running / passed / failed / aborted
+    status: Mapped[str] = mapped_column(sa.Text, default="running", nullable=False)
+    started_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column()
+
+    steps: Mapped[list["ChainStep"]] = relationship(
+        cascade="all, delete-orphan",
+        order_by="ChainStep.step_order",
+    )
+
+
+class ChainStep(Base):
+    """One step (agent) within a chain run."""
+
+    __tablename__ = "chain_steps"
+    __table_args__ = (
+        UniqueConstraint("run_id", "step_name", name="uq_chainstep_run_name"),
+        CheckConstraint(
+            "status <> 'skipped' OR skip_justification IS NOT NULL",
+            name="ck_chainstep_skip_justified",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("chain_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    step_name: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    step_order: Mapped[int] = mapped_column(default=0, nullable=False)
+    agent: Mapped[str | None] = mapped_column(sa.Text)
+    # values: pending / running / passed / failed / skipped
+    status: Mapped[str] = mapped_column(sa.Text, default="pending", nullable=False)
+    skip_justification: Mapped[str | None] = mapped_column(sa.Text)
+    output_ref: Mapped[str | None] = mapped_column(sa.Text)

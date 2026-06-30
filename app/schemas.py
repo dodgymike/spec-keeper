@@ -286,3 +286,46 @@ class DecisionOut(Schema):
     consequences = fields.Str(allow_none=True)
     agent = fields.Str(allow_none=True)
     created_at = fields.DateTime(dump_only=True)
+
+
+# --------------------------------------------------------------------------- #
+# Chain runs and steps (LOG-3)
+# --------------------------------------------------------------------------- #
+STEP_STATUS_VALUES = ["pending", "running", "passed", "failed", "skipped"]
+RUN_STATUS_VALUES = ["running", "passed", "failed", "aborted"]
+
+
+class ChainRunIn(Schema):
+    started_by = fields.Str(allow_none=True)
+
+
+class ChainStepOut(Schema):
+    step_name = fields.Str()
+    step_order = fields.Int()
+    agent = fields.Str(allow_none=True)
+    status = fields.Str()
+    skip_justification = fields.Str(allow_none=True)
+    output_ref = fields.Str(allow_none=True)
+
+
+class ChainRunOut(Schema):
+    public_id = fields.Str(dump_only=True)
+    status = fields.Str()
+    started_by = fields.Str(allow_none=True)
+    started_at = fields.DateTime(dump_only=True)
+    finished_at = fields.DateTime(allow_none=True, dump_only=True)
+    steps = fields.List(fields.Nested(ChainStepOut), dump_only=True)
+
+
+class ChainStepIn(Schema):
+    # Optional in the body: the endpoint fills it from the URL path when omitted.
+    step_name = fields.Str(load_default=None)
+    step_order = fields.Int(load_default=0)
+    agent = fields.Str(allow_none=True)
+    status = fields.Str(required=True, validate=validate.OneOf(STEP_STATUS_VALUES))
+    skip_justification = fields.Str(allow_none=True)
+    output_ref = fields.Str(allow_none=True)
+
+
+class ChainRunPatch(Schema):
+    status = fields.Str(validate=validate.OneOf(RUN_STATUS_VALUES))

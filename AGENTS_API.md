@@ -159,6 +159,41 @@ curl -s -X POST $B/projects/corsearch/decisions -H 'Content-Type: application/js
 curl -s $B/projects/corsearch/decisions
 ```
 
+## Track the mandated chain (spec-keeper → … → security)
+
+Record each pass of a task through the agent chain, with a justification required for any skip.
+
+```bash
+# Start a run for a task:
+RUN=$(curl -s -X POST $B/projects/corsearch/tasks/RULEPERF-1/chain-runs \
+  -d '{"started_by":"feature-runner"}' -H 'Content-Type: application/json' \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['public_id'])")
+
+# Record each step (PUT is an upsert by step name):
+curl -s -X PUT $B/projects/corsearch/chain-runs/$RUN/steps/implementer \
+  -d '{"status":"passed","step_order":2,"agent":"implementer"}' -H 'Content-Type: application/json'
+
+# A skipped step MUST carry a justification, else 422:
+curl -s -X PUT $B/projects/corsearch/chain-runs/$RUN/steps/security \
+  -d '{"status":"skipped","skip_justification":"docs-only change"}' -H 'Content-Type: application/json'
+
+# Close the run:
+curl -s -X PATCH $B/projects/corsearch/chain-runs/$RUN -d '{"status":"passed"}' -H 'Content-Type: application/json'
+```
+
+## Make claim/reserve safe to retry (idempotency)
+
+If a network blip makes you unsure whether a `claim-next` or `reservations` POST landed, retry it
+with the same `Idempotency-Key` header — the server replays the original result instead of claiming
+a second task or burning a second number.
+
+```bash
+curl -s -X POST $B/projects/corsearch/tasks/claim-next \
+  -H 'Idempotency-Key: claim-2026-06-30-001' -H 'Content-Type: application/json' \
+  -d '{"agent":"alice"}'
+# Re-sending the identical request with the same key returns the SAME task.
+```
+
 ## Conventions agents must honour
 
 - Claim before you work; complete (or release) when done — never leave a task `in_progress` with no

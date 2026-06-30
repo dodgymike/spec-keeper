@@ -13,6 +13,8 @@ task state.
   (`http://localhost:8080/api/v1`). Mutate tasks through the API, never by hand-editing a file.
 - **Pre-migration:** `SPEC.md` at the repo root. Edit it directly; keep the checkbox legend
   (`[ ]` todo · `[~]` in progress · `[x]` done · `[-]` superseded).
+- **Migration:** running `scripts/dogfood.sh` performs the migration (creates the `spec-server`
+  project and imports `SPEC.md`), after which the server is authoritative.
 
 Read `AGENTS_API.md` for the full recipe book. Confirm the server is up first:
 `curl -sf localhost:8080/readyz`.

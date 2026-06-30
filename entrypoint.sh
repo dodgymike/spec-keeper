@@ -22,8 +22,20 @@ else:
     raise SystemExit("[entrypoint] database never became ready")
 PY
 
-echo "[entrypoint] ensuring schema (flask init-db)..."
-FLASK_APP=wsgi:app flask init-db
+echo "[entrypoint] applying migrations (alembic upgrade head)..."
+# Adopt a legacy DB that was built by create_all (tables exist, but no
+# alembic_version table) by stamping it at head before upgrading.
+python - <<'PY'
+import os, subprocess
+import sqlalchemy as sa
+
+engine = sa.create_engine(os.environ["DATABASE_URL"])
+tables = set(sa.inspect(engine).get_table_names())
+if "alembic_version" not in tables and "projects" in tables:
+    print("[entrypoint] legacy create_all schema detected; stamping head")
+    subprocess.run(["alembic", "stamp", "head"], check=True)
+PY
+alembic upgrade head
 
 echo "[entrypoint] starting: $*"
 exec "$@"

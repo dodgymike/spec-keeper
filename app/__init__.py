@@ -17,6 +17,7 @@ def create_app(config_object: type = Config) -> Flask:
 
     # Import models so SQLAlchemy is aware of them before create_all / queries.
     from . import models  # noqa: F401
+    from . import idempotency  # noqa: F401  (HARDEN-3: registers IdempotencyKey)
 
     # Plain Flask blueprint (health probes) — not part of the OpenAPI surface.
     from .blueprints.health import bp as health_bp
@@ -24,6 +25,7 @@ def create_app(config_object: type = Config) -> Flask:
 
     # flask-smorest blueprints (documented in OpenAPI).
     from .blueprints.agents import blp as agents_blp
+    from .blueprints.chains import blp as chains_blp  # LOG-3
     from .blueprints.epics import blp as epics_blp
     from .blueprints.log import blp as log_blp
     from .blueprints.ports import blp as ports_blp
@@ -38,6 +40,7 @@ def create_app(config_object: type = Config) -> Flask:
     api.register_blueprint(reservations_blp)
     api.register_blueprint(ports_blp)
     api.register_blueprint(log_blp)
+    api.register_blueprint(chains_blp)
 
     _register_cli(app)
     return app
