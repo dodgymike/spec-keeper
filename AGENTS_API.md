@@ -105,6 +105,21 @@ curl -s -H 'Content-Type: application/json' \
 ```
 `supersedes` also sets the target's status to `superseded` and links it back.
 
+## Notes (comments on a task)
+
+Attach timestamped free-text notes to a task — investigation findings, context, hand-off detail.
+They're append-only and show up on the task (`GET .../tasks/<id>` includes a `notes` array).
+
+```bash
+curl -s -X POST $B/projects/corsearch/tasks/RULEPERF-1/notes \
+  -H 'Content-Type: application/json' \
+  -d '{"body":"DLQ root cause is the Athena CSV race; see request id abc","author":"alice"}'
+
+curl -s $B/projects/corsearch/tasks/RULEPERF-1/notes     # list, oldest first
+```
+
+Adding a note also emits a `note` event into the project's stream.
+
 ## Status keywords
 
 ```bash

@@ -27,6 +27,7 @@ from ..models import (
     RelationKind,
     Tag,
     Task,
+    TaskNote,
     TaskRelation,
     TaskStatus,
     utcnow,
@@ -36,6 +37,8 @@ from ..schemas import (
     CommitIn,
     CompleteIn,
     MessageOut,
+    NoteIn,
+    NoteOut,
     RelationIn,
     ReleaseIn,
     StatusIn,
@@ -307,6 +310,31 @@ class TaskCommits(MethodView):
             db.session.add(CommitRef(task_id=task.id, **data))
         db.session.commit()
         return task
+
+
+@blp.route("/<ident>/notes")
+class TaskNotes(MethodView):
+    @blp.response(200, NoteOut(many=True))
+    def get(self, slug, ident):
+        """List a task's notes, oldest first."""
+        require_api_key()
+        project = get_project_or_404(slug)
+        task = get_task_or_404(project.id, ident)
+        return task.notes
+
+    @blp.arguments(NoteIn)
+    @blp.response(201, NoteOut)
+    def post(self, data, slug, ident):
+        """Add a timestamped note (comment) to a task."""
+        require_api_key()
+        project = get_project_or_404(slug)
+        task = get_task_or_404(project.id, ident)
+        note = TaskNote(task_id=task.id, body=data["body"], author=data.get("author"))
+        db.session.add(note)
+        log_event(project.id, "note", agent=data.get("author"), task_id=task.id,
+                  message=f"note on {task.display_id}: {data['body'][:120]}")
+        db.session.commit()
+        return note
 
 
 @blp.route("/<ident>/relations")

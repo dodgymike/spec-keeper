@@ -226,6 +226,10 @@ class Task(Base):
     commits: Mapped[list["CommitRef"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
     )
+    notes: Mapped[list["TaskNote"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan",
+        order_by="TaskNote.created_at",
+    )
 
     @property
     def display_id(self) -> str:
@@ -296,6 +300,22 @@ class CommitRef(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
 
     task: Mapped[Task] = relationship(back_populates="commits")
+
+
+class TaskNote(Base):
+    """A timestamped free-text note (comment) on a task. Append-only history."""
+
+    __tablename__ = "task_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    author: Mapped[str | None] = mapped_column(sa.Text)  # agent slug
+    body: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
+
+    task: Mapped[Task] = relationship(back_populates="notes")
 
 
 # --------------------------------------------------------------------------- #

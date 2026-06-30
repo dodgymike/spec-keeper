@@ -103,6 +103,17 @@ class CommitRefOut(Schema):
     created_at = fields.DateTime(dump_only=True)
 
 
+class NoteIn(Schema):
+    body = fields.Str(required=True, metadata={"description": "The note text."})
+    author = fields.Str(allow_none=True, metadata={"description": "Agent slug who wrote it."})
+
+
+class NoteOut(Schema):
+    author = fields.Str(allow_none=True)
+    body = fields.Str()
+    created_at = fields.DateTime(dump_only=True)
+
+
 class TaskOut(Schema):
     public_id = fields.Str(dump_only=True)
     display_id = fields.Str(dump_only=True)
@@ -122,6 +133,7 @@ class TaskOut(Schema):
     version = fields.Int(dump_only=True, metadata={"description": "Optimistic-lock token; send back as If-Match."})
     tags = fields.Method("get_tags", dump_only=True)
     commits = fields.List(fields.Nested(CommitRefOut), dump_only=True)
+    notes = fields.List(fields.Nested(NoteOut), dump_only=True)
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
     completed_at = fields.DateTime(allow_none=True, dump_only=True)
