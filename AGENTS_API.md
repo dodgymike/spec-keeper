@@ -120,16 +120,29 @@ curl -s $B/projects/corsearch/tasks/RULEPERF-1/notes     # one task's notes, old
 
 Adding a note also emits a `note` event into the project's stream.
 
-**List notes across the whole project** (newest first), with filters:
+**Epic-level notes** (a journal about an epic, not just its tasks):
 
 ```bash
-curl -s "$B/projects/corsearch/notes"                       # every task's notes
+curl -s -X POST $B/projects/corsearch/epics/RULEPERF/notes \
+  -H 'Content-Type: application/json' \
+  -d '{"body":"descoped the ablation sub-epic for v1","author":"planner"}'
+curl -s $B/projects/corsearch/epics/RULEPERF/notes      # this epic's notes
+```
+
+**List notes across the whole project** (newest first), with filters. The feed merges task and
+epic notes; each row is tagged with `scope` (`task`/`epic`) and its `task` or `epic` key:
+
+```bash
+curl -s "$B/projects/corsearch/notes"                       # all notes (tasks + epics)
+curl -s "$B/projects/corsearch/notes?scope=epic"            # epic notes only
+curl -s "$B/projects/corsearch/notes?scope=task"            # task notes only
 curl -s "$B/projects/corsearch/notes?author=feature-runner" # by author
 curl -s "$B/projects/corsearch/notes?task=RULEPERF-1"       # one task
+curl -s "$B/projects/corsearch/notes?epic=RULEPERF"         # one epic
 curl -s "$B/projects/corsearch/notes?since=2026-06-30T17:00:00&limit=50"
 ```
 
-Each row carries its `task`, `author`, `body`, and `created_at`.
+Each row carries `scope`, `task`, `epic`, `author`, `body`, and `created_at`.
 
 ## Status keywords
 

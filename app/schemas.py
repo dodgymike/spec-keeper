@@ -115,19 +115,25 @@ class NoteOut(Schema):
 
 
 class ProjectNoteOut(Schema):
-    """A note with its task context, for the project-wide notes feed."""
-    task = fields.Method("get_task", dump_only=True)
+    """A note in the project-wide feed: tagged with its scope and source key
+    (`task` or `epic`, whichever it belongs to)."""
+    scope = fields.Str()  # "task" | "epic"
+    task = fields.Str(allow_none=True)
+    epic = fields.Str(allow_none=True)
     author = fields.Str(allow_none=True)
     body = fields.Str()
     created_at = fields.DateTime(dump_only=True)
 
-    def get_task(self, obj):
-        return obj.task.display_id if obj.task else None
-
 
 class NoteQuery(Schema):
+    scope = fields.Str(
+        load_default="all",
+        validate=validate.OneOf(["task", "epic", "all"]),
+        metadata={"description": "Which notes to include (default all)."},
+    )
     author = fields.Str(metadata={"description": "Filter to one author/agent."})
     task = fields.Str(metadata={"description": "Filter to one task (key or public_id)."})
+    epic = fields.Str(metadata={"description": "Filter to one epic (key)."})
     since = fields.DateTime(metadata={"description": "Only notes at/after this time (ISO 8601)."})
     limit = fields.Int(load_default=200, validate=validate.Range(min=1, max=1000))
     offset = fields.Int(load_default=0, validate=validate.Range(min=0))

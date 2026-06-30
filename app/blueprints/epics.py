@@ -7,8 +7,9 @@ from flask_smorest import Blueprint, abort
 
 from ..extensions import db
 from ..helpers import get_epic_or_404, get_project_or_404, require_api_key
-from ..models import Epic
-from ..schemas import EpicIn, EpicOut, EpicPatch
+from ..models import Epic, EpicNote
+from ..schemas import EpicIn, EpicOut, EpicPatch, NoteIn, NoteOut
+from ..services import log_event
 
 blp = Blueprint(
     "epics", __name__, url_prefix="/api/v1/projects/<slug>/epics",
@@ -68,3 +69,28 @@ class EpicItem(MethodView):
             setattr(epic, k, v)
         db.session.commit()
         return epic
+
+
+@blp.route("/<key>/notes")
+class EpicNotes(MethodView):
+    @blp.response(200, NoteOut(many=True))
+    def get(self, slug, key):
+        """List an epic's notes, oldest first."""
+        require_api_key()
+        project = get_project_or_404(slug)
+        epic = get_epic_or_404(project.id, key)
+        return epic.notes
+
+    @blp.arguments(NoteIn)
+    @blp.response(201, NoteOut)
+    def post(self, data, slug, key):
+        """Add a timestamped note to an epic (epic-level journal/reporting)."""
+        require_api_key()
+        project = get_project_or_404(slug)
+        epic = get_epic_or_404(project.id, key)
+        note = EpicNote(epic_id=epic.id, body=data["body"], author=data.get("author"))
+        db.session.add(note)
+        log_event(project.id, "note", agent=data.get("author"),
+                  message=f"note on epic {epic.key}: {data['body'][:120]}")
+        db.session.commit()
+        return note

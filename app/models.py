@@ -153,6 +153,10 @@ class Epic(Base):
 
     project: Mapped[Project] = relationship(back_populates="epics")
     tasks: Mapped[list["Task"]] = relationship(back_populates="epic")
+    notes: Mapped[list["EpicNote"]] = relationship(
+        back_populates="epic", cascade="all, delete-orphan",
+        order_by="EpicNote.created_at",
+    )
 
 
 class Task(Base):
@@ -316,6 +320,22 @@ class TaskNote(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
 
     task: Mapped[Task] = relationship(back_populates="notes")
+
+
+class EpicNote(Base):
+    """A timestamped free-text note on an epic (epic-level journal/reporting)."""
+
+    __tablename__ = "epic_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    epic_id: Mapped[int] = mapped_column(
+        ForeignKey("epics.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    author: Mapped[str | None] = mapped_column(sa.Text)  # agent slug
+    body: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
+
+    epic: Mapped[Epic] = relationship(back_populates="notes")
 
 
 # --------------------------------------------------------------------------- #

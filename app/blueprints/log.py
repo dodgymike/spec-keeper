@@ -8,7 +8,7 @@ from flask_smorest import Blueprint
 
 from ..extensions import db
 from ..helpers import get_project_or_404, get_task_or_404, require_api_key
-from ..models import Decision, Event, Task, TaskNote
+from ..models import Decision, Epic, EpicNote, Event, Task, TaskNote
 from ..schemas import (
     DecisionIn,
     DecisionOut,
@@ -72,30 +72,59 @@ class ProjectNotes(MethodView):
     @blp.arguments(NoteQuery, location="query")
     @blp.response(200, ProjectNoteOut(many=True))
     def get(self, args, slug):
-        """List notes across all of a project's tasks (newest first).
+        """List notes across a project (newest first), tagged by scope.
 
-        Filter with ``author``, ``task`` (key or public_id), ``since`` (ISO time),
-        and paginate with ``limit``/``offset``."""
+        ``scope`` selects ``task``, ``epic``, or ``all`` (default). Filter with
+        ``author``, ``task`` (key/public_id), ``epic`` (key), ``since`` (ISO
+        time); paginate with ``limit``/``offset``."""
         require_api_key()
         project = get_project_or_404(slug)
-        query = (
-            sa.select(TaskNote)
-            .join(Task, Task.id == TaskNote.task_id)
-            .where(Task.project_id == project.id)
-        )
-        if "author" in args:
-            query = query.where(TaskNote.author == args["author"])
-        if "task" in args:
-            task = get_task_or_404(project.id, args["task"])
-            query = query.where(TaskNote.task_id == task.id)
-        if "since" in args:
-            query = query.where(TaskNote.created_at >= args["since"])
-        query = (
-            query.order_by(TaskNote.created_at.desc(), TaskNote.id.desc())
-            .offset(args["offset"])
-            .limit(args["limit"])
-        )
-        return db.session.execute(query).scalars().all()
+        scope = args["scope"]
+        cap = args["offset"] + args["limit"]
+        rows: list[dict] = []
+
+        want_task = scope in ("task", "all") and "epic" not in args
+        want_epic = scope in ("epic", "all") and "task" not in args
+
+        if want_task:
+            q = (
+                sa.select(TaskNote, Task.key, Task.public_id)
+                .join(Task, Task.id == TaskNote.task_id)
+                .where(Task.project_id == project.id)
+            )
+            if "author" in args:
+                q = q.where(TaskNote.author == args["author"])
+            if "task" in args:
+                t = get_task_or_404(project.id, args["task"])
+                q = q.where(TaskNote.task_id == t.id)
+            if "since" in args:
+                q = q.where(TaskNote.created_at >= args["since"])
+            q = q.order_by(TaskNote.created_at.desc(), TaskNote.id.desc()).limit(cap)
+            for n, key, pub in db.session.execute(q):
+                rows.append({"scope": "task", "task": key or pub, "epic": None,
+                             "author": n.author, "body": n.body,
+                             "created_at": n.created_at})
+
+        if want_epic:
+            q = (
+                sa.select(EpicNote, Epic.key)
+                .join(Epic, Epic.id == EpicNote.epic_id)
+                .where(Epic.project_id == project.id)
+            )
+            if "author" in args:
+                q = q.where(EpicNote.author == args["author"])
+            if "epic" in args:
+                q = q.where(Epic.key == args["epic"])
+            if "since" in args:
+                q = q.where(EpicNote.created_at >= args["since"])
+            q = q.order_by(EpicNote.created_at.desc(), EpicNote.id.desc()).limit(cap)
+            for n, key in db.session.execute(q):
+                rows.append({"scope": "epic", "task": None, "epic": key,
+                             "author": n.author, "body": n.body,
+                             "created_at": n.created_at})
+
+        rows.sort(key=lambda r: r["created_at"], reverse=True)
+        return rows[args["offset"]: args["offset"] + args["limit"]]
 
 
 @blp.route("/decisions")

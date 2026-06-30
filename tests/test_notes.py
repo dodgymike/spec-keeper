@@ -63,3 +63,35 @@ def test_project_wide_notes_listing_and_filters(client, project):
     # filter by task
     n6 = client.get(f"{P}?task=N-6").get_json()
     assert sorted(n["body"] for n in n6) == ["beta", "gamma"]
+
+
+def test_epic_notes_and_unified_feed(client, project):
+    client.post("/api/v1/projects/demo/epics", json={"key": "EP", "title": "Epic"})
+    r = client.post("/api/v1/projects/demo/epics/EP/notes",
+                    json={"body": "epic-level note", "author": "lead"})
+    assert r.status_code == 201
+    enotes = client.get("/api/v1/projects/demo/epics/EP/notes").get_json()
+    assert [n["body"] for n in enotes] == ["epic-level note"]
+
+    _task(client, "T-9")
+    client.post(f"{BASE}/T-9/notes", json={"body": "task-level note"})
+
+    P = "/api/v1/projects/demo/notes"
+    alln = client.get(P).get_json()  # scope=all (default)
+    tagged = {(n["scope"], n["epic"], n["task"]) for n in alln}
+    assert ("epic", "EP", None) in tagged
+    assert ("task", None, "T-9") in tagged
+
+    epiconly = client.get(f"{P}?scope=epic").get_json()
+    assert [n["body"] for n in epiconly] == ["epic-level note"]
+    assert all(n["scope"] == "epic" for n in epiconly)
+
+    taskonly = client.get(f"{P}?scope=task").get_json()
+    assert all(n["scope"] == "task" for n in taskonly)
+    assert "task-level note" in [n["body"] for n in taskonly]
+
+
+def test_epic_note_requires_body(client, project):
+    client.post("/api/v1/projects/demo/epics", json={"key": "EP2", "title": "E2"})
+    assert client.post("/api/v1/projects/demo/epics/EP2/notes",
+                       json={"author": "x"}).status_code == 422
