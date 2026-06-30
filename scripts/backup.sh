@@ -45,6 +45,12 @@ fi
 # Keep a stable 'latest' pointer for convenience.
 ln -sf "$(basename "$FILE")" "$OUT_DIR/${DB}-latest.sql.gz"
 
+# Retention: keep only the newest $KEEP timestamped dumps (default 14).
+KEEP="${KEEP:-14}"
+ls -1t "$OUT_DIR"/${DB}-[0-9]*.sql.gz 2>/dev/null | tail -n "+$((KEEP + 1))" | while read -r old; do
+  rm -f "$old" && echo "  pruned old backup: $(basename "$old")"
+done
+
 echo "Backup OK: $FILE ($(du -h "$FILE" | cut -f1))"
 echo "Tables captured:"
 gunzip -c "$FILE" | grep -c '^CREATE TABLE' | sed 's/^/  CREATE TABLE statements: /'

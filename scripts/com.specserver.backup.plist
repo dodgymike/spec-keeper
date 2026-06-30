@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent: a daily Spec Server database backup at 03:00 local time.
+
+  Reference copy (committed). The live copy is installed at
+  ~/Library/LaunchAgents/com.specserver.backup.plist by scripts/install-backup-schedule.sh.
+  Paths are absolute and machine-specific (this machine: /Users/mrdavis/source/spec-server).
+
+  Change the schedule by editing StartCalendarInterval (e.g. add more <dict> entries
+  for multiple times a day), then reinstall.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.specserver.backup</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/mrdavis/source/spec-server/scripts/scheduled-backup.sh</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mrdavis/source/spec-server/backups/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mrdavis/source/spec-server/backups/launchd.err.log</string>
+</dict>
+</plist>
