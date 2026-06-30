@@ -57,7 +57,7 @@ echo "Registering agents..."
 for agent in spec-keeper implementer reviewer security; do
   code="$(curl -s -o /dev/null -w '%{http_code}' $JSON \
     -X POST "$BASE/agents" \
-    -d "{\"slug\":\"$agent\",\"name\":\"$agent\"}")"
+    -d "{\"slug\":\"$agent\",\"display_name\":\"$agent\"}")"
   case "$code" in
     2*) echo "  $agent registered." ;;
     409) echo "  $agent already registered (ok)." ;;

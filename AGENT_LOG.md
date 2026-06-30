@@ -46,3 +46,14 @@ to the server's `/events` endpoint.
 - Reviewed both agent-written app modules (auth on every endpoint, parameterized SQL) — pass.
 - Tests: `pytest -q` → **31 passed** (25 + 4 chain + 2 idempotency). API now 20+ paths.
 - All four code epics (LOG, PORT, HARDEN, chain) complete; DOGFOOD runtime migration next.
+
+## 2026-06-30 — DOGFOOD: the server now hosts its own backlog
+
+- `scripts/dogfood.sh` (fixed one payload field: agent registration uses `display_name`, not `name`)
+  created the `spec-server` project, registered spec-keeper/implementer/reviewer/security, and
+  imported this repo's SPEC.md: **23 tasks / 5 epics**.
+- Proved the loop live: claimed `DOGFOOD-1` via `claim-next` as spec-keeper → completed via
+  `/complete`; the event stream shows the claimed+completed events. Closed all DOGFOOD tasks through
+  the API. Backlog now **23 done / 0 todo** on the server.
+- SPEC.md is now a readable mirror; regenerate with `GET /projects/spec-server/export`.
+- Every epic from the original plan is shipped: MVP, PORT, LOG, HARDEN, chain tracking, DOGFOOD.

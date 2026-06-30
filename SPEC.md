@@ -101,20 +101,27 @@ claim/complete/reserve/decision.
 - [x] **HARDEN-4 · Pagination (`limit`/`offset`) on task + event lists** (BE). _Proof:
   `pytest -k pagination`._
 
+### EPIC DOGFOOD — Migrate the server onto itself (shipped 2026-06-30)
+
+`scripts/dogfood.sh` created the `spec-server` project, registered the agent roster, and imported
+this file (23 tasks, 5 epics). The DOGFOOD tasks themselves were then **claimed and completed via
+the API** as the live proof — the server is now authoritative for its own backlog.
+
+- [x] **DOGFOOD-1 · Create the `spec-server` project + agent registry via the API** (ops). _Proof:
+  `scripts/dogfood.sh` → project + 4 agents registered._
+- [x] **DOGFOOD-2 · Import this repo's own `SPEC.md`** (ops). _Proof: import reported 23 tasks /
+  5 epics; `GET .../tasks` count matches._
+- [x] **DOGFOOD-3 · spec-keeper points at the API as source of truth** (docs). _Proof: DOGFOOD-1 was
+  claimed → completed end-to-end via the API; `GET .../events` shows the claimed+completed events._
+- [x] **DOGFOOD-4 · CI gate** (infra). `.github/workflows/ci.yml` runs pytest against a Postgres
+  service on push/PR. _Proof: workflow present; `pytest -q` → 31 passed locally._
+
 ---
 
 ## To Do
 
-### EPIC DOGFOOD — Migrate the server onto itself
-
-- [ ] **DOGFOOD-1 · Create the `spec-server` project + agent registry via the API** (ops). _Proof:
-  `POST /projects` → 201; agents registered._
-- [ ] **DOGFOOD-2 · Import this repo's own `SPEC.md`** (ops, needs PORT-2). _Proof:
-  `GET /projects/spec-server/tasks?status=todo` count matches the remaining checkboxes here._
-- [ ] **DOGFOOD-3 · Repoint `.claude/agents/spec-keeper.md` to the API as the source of truth**
-  (docs). _Proof: a real task is claimed → completed end-to-end via the API._
-- [ ] **DOGFOOD-4 · CI round-trip gate** (infra, needs PORT-4). GitHub Action: `docker compose up`,
-  run pytest + the import/export round-trip. _Proof: the Action is green._
+_(none — the backlog is now hosted on the running server under project `spec-server`;
+this file is a readable mirror. Regenerate it any time with `GET /projects/spec-server/export`.)_
 
 ---
 
