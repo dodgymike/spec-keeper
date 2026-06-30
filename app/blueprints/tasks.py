@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import sqlalchemy as sa
-from flask import Response, request
+from flask import Response, jsonify, request
 from flask.views import MethodView
 from flask_smorest import Blueprint, abort
 
 from ..extensions import db
+from ..idempotency import (
+    idempotency_key_from_request,
+    lookup_idempotent,
+    store_idempotent,
+)
 from ..helpers import (
     check_if_match,
     etag_headers,
@@ -39,7 +44,7 @@ from ..schemas import (
     TaskPatch,
     TaskQuery,
 )
-from ..services import claim_next_task, close_active_lease
+from ..services import claim_next_task, close_active_lease, log_event
 
 blp = Blueprint(
     "tasks", __name__, url_prefix="/api/v1/projects/<slug>/tasks",
@@ -85,7 +90,11 @@ class TasksCollection(MethodView):
                 sa.or_(Task.title.ilike(like), Task.description.ilike(like))
             )
 
-        query = query.order_by(Task.position, Task.id).limit(args["limit"])
+        query = (
+            query.order_by(Task.position, Task.id)
+            .offset(args["offset"])
+            .limit(args["limit"])
+        )
         return db.session.execute(query).scalars().all()
 
     @blp.arguments(TaskIn)
@@ -134,6 +143,13 @@ class ClaimNext(MethodView):
         Returns 204 when nothing is claimable."""
         require_api_key()
         project = get_project_or_404(slug)
+
+        idem_key = idempotency_key_from_request()
+        if idem_key:
+            existing = lookup_idempotent(project.id, "claim-next", idem_key)
+            if existing is not None:
+                return jsonify(existing.response_json), existing.status_code
+
         epic_id = None
         if data.get("epic"):
             epic_id = get_epic_or_404(project.id, data["epic"]).id
@@ -150,6 +166,10 @@ class ClaimNext(MethodView):
         if task is None:
             db.session.commit()
             return Response(status=204)
+        if idem_key:
+            store_idempotent(
+                project.id, "claim-next", idem_key, TaskOut().dump(task), 200
+            )
         db.session.commit()
         return task, 200, etag_headers(task)
 
@@ -224,6 +244,9 @@ class TaskComplete(MethodView):
                 repo=data.get("repo"), test_summary=data.get("test_summary"),
             ))
         close_active_lease(task.id, LeaseState.completed)
+        log_event(project.id, "completed", task_id=task.id,
+                  message=f"completed {task.display_id}",
+                  payload={k: v for k, v in data.items() if v})
         db.session.commit()
         return task, 200, etag_headers(task)
 

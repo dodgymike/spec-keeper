@@ -114,6 +114,86 @@ curl -s -H 'Content-Type: application/json' \
 ```
 Statuses: `todo`, `in_progress`, `blocked`, `deferred`, `done`, `superseded`, `cancelled`.
 
+## Migrate a SPEC.md in and out (round-trip)
+
+Adopt incrementally: import an existing `SPEC.md`, run file-and-server in parallel, then go
+server-only. Bodies are raw `text/markdown`.
+
+```bash
+# Import a repo's SPEC.md into the server (idempotent — safe to re-run):
+curl -s -X POST $B/projects/corsearch/import \
+  --data-binary @SPEC.md -H 'Content-Type: text/markdown'
+# -> {"message":"imported: 43 task(s) created, 0 updated; ..."}
+
+# Render the backlog back to a SPEC.md mirror:
+curl -s $B/projects/corsearch/export > SPEC.md
+
+# Dry-run: what would change vs a local SPEC.md (adoption safety)?
+curl -s -X POST $B/projects/corsearch/export/diff \
+  --data-binary @SPEC.md -H 'Content-Type: text/markdown'
+# -> {"message":"diff vs posted: 0 new ([]), 0 only-in-server ([]), 1 changed (['API-2'])."}
+```
+
+The parser understands the observed dialects: `[ ] [~] [x] [-]` checkboxes, `**KEY · Title**`,
+epic headings (`### EPIC NAME — desc`), trailing `(BE, P0, blocked)` metadata, and `_Proof: <cmd>_`
+lines. Tasks are keyed by their human ID, so import upserts rather than duplicates.
+
+## Log your work and record decisions
+
+The append-only event stream replaces `AGENT_LOG.md`; decisions replace `DECISIONS.md`. Claim,
+complete, and reserve calls emit events automatically — you only POST events for free-form notes.
+
+```bash
+# Free-form note:
+curl -s -X POST $B/projects/corsearch/events \
+  -d '{"event_type":"note","agent":"alice","message":"DLQ drained; root cause was X"}' \
+  -H 'Content-Type: application/json'
+
+# Read the stream (newest first; filter by type/agent/task, paginate with limit/offset):
+curl -s "$B/projects/corsearch/events?event_type=completed&limit=20"
+
+# Record a decision (also emits a 'decision' event):
+curl -s -X POST $B/projects/corsearch/decisions -H 'Content-Type: application/json' -d '{
+  "key":"DEC-7","title":"Adopt Aurora","decision":"Use Aurora Serverless v2.",
+  "context":"Spiky load.","consequences":"Cold-start latency on scale-to-zero."}'
+curl -s $B/projects/corsearch/decisions
+```
+
+## Track the mandated chain (spec-keeper → … → security)
+
+Record each pass of a task through the agent chain, with a justification required for any skip.
+
+```bash
+# Start a run for a task:
+RUN=$(curl -s -X POST $B/projects/corsearch/tasks/RULEPERF-1/chain-runs \
+  -d '{"started_by":"feature-runner"}' -H 'Content-Type: application/json' \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['public_id'])")
+
+# Record each step (PUT is an upsert by step name):
+curl -s -X PUT $B/projects/corsearch/chain-runs/$RUN/steps/implementer \
+  -d '{"status":"passed","step_order":2,"agent":"implementer"}' -H 'Content-Type: application/json'
+
+# A skipped step MUST carry a justification, else 422:
+curl -s -X PUT $B/projects/corsearch/chain-runs/$RUN/steps/security \
+  -d '{"status":"skipped","skip_justification":"docs-only change"}' -H 'Content-Type: application/json'
+
+# Close the run:
+curl -s -X PATCH $B/projects/corsearch/chain-runs/$RUN -d '{"status":"passed"}' -H 'Content-Type: application/json'
+```
+
+## Make claim/reserve safe to retry (idempotency)
+
+If a network blip makes you unsure whether a `claim-next` or `reservations` POST landed, retry it
+with the same `Idempotency-Key` header — the server replays the original result instead of claiming
+a second task or burning a second number.
+
+```bash
+curl -s -X POST $B/projects/corsearch/tasks/claim-next \
+  -H 'Idempotency-Key: claim-2026-06-30-001' -H 'Content-Type: application/json' \
+  -d '{"agent":"alice"}'
+# Re-sending the identical request with the same key returns the SAME task.
+```
+
 ## Conventions agents must honour
 
 - Claim before you work; complete (or release) when done — never leave a task `in_progress` with no

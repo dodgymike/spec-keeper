@@ -111,6 +111,7 @@ class TaskOut(Schema):
     component = fields.Str(allow_none=True)
     proof_cmd = fields.Str(allow_none=True)
     status_note = fields.Str(allow_none=True)
+    section = fields.Str()
     owner = fields.Str(allow_none=True)
     lease_expires_at = fields.DateTime(allow_none=True, dump_only=True)
     position = fields.Float()
@@ -137,6 +138,7 @@ class TaskIn(Schema):
     priority = fields.Str(allow_none=True, validate=validate.OneOf(PRIORITY_VALUES))
     component = fields.Str(allow_none=True)
     proof_cmd = fields.Str(allow_none=True)
+    section = fields.Str(load_default="backlog")
     position = fields.Float(load_default=1000.0)
     created_by = fields.Str(allow_none=True)
     tags = fields.List(fields.Str(), load_default=list)
@@ -150,6 +152,7 @@ class TaskPatch(Schema):
     priority = fields.Str(allow_none=True, validate=validate.OneOf(PRIORITY_VALUES))
     component = fields.Str(allow_none=True)
     proof_cmd = fields.Str(allow_none=True)
+    section = fields.Str()
     position = fields.Float()
     owner = fields.Str(allow_none=True)
     epic_key = fields.Str(allow_none=True)
@@ -163,6 +166,7 @@ class TaskQuery(Schema):
     tag = fields.Str()
     q = fields.Str(metadata={"description": "Free-text match on title/description."})
     limit = fields.Int(load_default=200, validate=validate.Range(min=1, max=1000))
+    offset = fields.Int(load_default=0, validate=validate.Range(min=0))
 
 
 class ClaimNextIn(Schema):
@@ -233,3 +237,95 @@ class CounterOut(Schema):
 
 class MessageOut(Schema):
     message = fields.Str()
+
+
+# --------------------------------------------------------------------------- #
+# Events (append-only log) and decisions
+# --------------------------------------------------------------------------- #
+class EventIn(Schema):
+    event_type = fields.Str(load_default="note")
+    agent = fields.Str(allow_none=True)
+    task_key = fields.Str(allow_none=True)
+    message = fields.Str(allow_none=True)
+    payload = fields.Dict(load_default=dict)
+
+
+class EventOut(Schema):
+    event_type = fields.Str()
+    agent = fields.Str(allow_none=True)
+    task_id = fields.Int(allow_none=True)
+    message = fields.Str(allow_none=True)
+    payload = fields.Dict()
+    created_at = fields.DateTime(dump_only=True)
+
+
+class EventQuery(Schema):
+    event_type = fields.Str()
+    agent = fields.Str()
+    task = fields.Str(metadata={"description": "Task key or public_id."})
+    limit = fields.Int(load_default=200, validate=validate.Range(min=1, max=1000))
+    offset = fields.Int(load_default=0, validate=validate.Range(min=0))
+
+
+class DecisionIn(Schema):
+    key = fields.Str(allow_none=True, metadata={"description": "e.g. DEC-7"})
+    title = fields.Str(required=True)
+    decision = fields.Str(required=True)
+    context = fields.Str(allow_none=True)
+    consequences = fields.Str(allow_none=True)
+    agent = fields.Str(allow_none=True)
+    task_key = fields.Str(allow_none=True)
+
+
+class DecisionOut(Schema):
+    public_id = fields.Str(dump_only=True)
+    key = fields.Str(allow_none=True)
+    title = fields.Str()
+    decision = fields.Str()
+    context = fields.Str(allow_none=True)
+    consequences = fields.Str(allow_none=True)
+    agent = fields.Str(allow_none=True)
+    created_at = fields.DateTime(dump_only=True)
+
+
+# --------------------------------------------------------------------------- #
+# Chain runs and steps (LOG-3)
+# --------------------------------------------------------------------------- #
+STEP_STATUS_VALUES = ["pending", "running", "passed", "failed", "skipped"]
+RUN_STATUS_VALUES = ["running", "passed", "failed", "aborted"]
+
+
+class ChainRunIn(Schema):
+    started_by = fields.Str(allow_none=True)
+
+
+class ChainStepOut(Schema):
+    step_name = fields.Str()
+    step_order = fields.Int()
+    agent = fields.Str(allow_none=True)
+    status = fields.Str()
+    skip_justification = fields.Str(allow_none=True)
+    output_ref = fields.Str(allow_none=True)
+
+
+class ChainRunOut(Schema):
+    public_id = fields.Str(dump_only=True)
+    status = fields.Str()
+    started_by = fields.Str(allow_none=True)
+    started_at = fields.DateTime(dump_only=True)
+    finished_at = fields.DateTime(allow_none=True, dump_only=True)
+    steps = fields.List(fields.Nested(ChainStepOut), dump_only=True)
+
+
+class ChainStepIn(Schema):
+    # Optional in the body: the endpoint fills it from the URL path when omitted.
+    step_name = fields.Str(load_default=None)
+    step_order = fields.Int(load_default=0)
+    agent = fields.Str(allow_none=True)
+    status = fields.Str(required=True, validate=validate.OneOf(STEP_STATUS_VALUES))
+    skip_justification = fields.Str(allow_none=True)
+    output_ref = fields.Str(allow_none=True)
+
+
+class ChainRunPatch(Schema):
+    status = fields.Str(validate=validate.OneOf(RUN_STATUS_VALUES))

@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import sqlalchemy as sa
+from flask import jsonify
 from flask.views import MethodView
 from flask_smorest import Blueprint
 
 from ..extensions import db
 from ..helpers import get_project_or_404, get_task_or_404, require_api_key
+from ..idempotency import (
+    idempotency_key_from_request,
+    lookup_idempotent,
+    store_idempotent,
+)
 from ..models import Counter, Reservation
 from ..schemas import CounterOut, ReservationIn, ReservationOut
 from ..services import reserve_number
@@ -43,6 +49,13 @@ class ReservationsCollection(MethodView):
         values — no two agents can ever be handed the same number."""
         require_api_key()
         project = get_project_or_404(slug)
+
+        idem_key = idempotency_key_from_request()
+        if idem_key:
+            existing = lookup_idempotent(project.id, "reserve", idem_key)
+            if existing is not None:
+                return jsonify(existing.response_json), existing.status_code
+
         task_id = None
         if data.get("task_key"):
             task_id = get_task_or_404(project.id, data["task_key"]).id
@@ -53,6 +66,10 @@ class ReservationsCollection(MethodView):
             task_id=task_id,
             note=data.get("note"),
         )
+        if idem_key:
+            store_idempotent(
+                project.id, "reserve", idem_key, ReservationOut().dump(reservation), 201
+            )
         db.session.commit()
         return reservation
 
