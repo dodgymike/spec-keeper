@@ -86,6 +86,32 @@ fields (id, title, status, priority, component, epic, proof), not byte-for-byte 
 
 ---
 
+## 1b. Update your sub-agent configs (do this as part of the migration)
+
+Importing the backlog is **not enough** — your repo's `.claude/agents/*.md` still tell agents to read
+and **edit `SPEC.md` directly**. Update **all** of them so no agent hand-edits the file behind the
+server's back (which would silently diverge from the source of truth):
+
+- **`spec-keeper.md` — the critical one.** It typically says "Only edit SPEC.md" and "FLIP its
+  checkbox to `[x]`". Rewrite it to drive the API: claim with `claim-next`, finish with `complete`,
+  reserve numbers with `reservations`, add follow-ups with `POST .../tasks`. The already-migrated
+  **`spec-server/.claude/agents/spec-keeper.md`** is the reference template — copy its approach and
+  swap in your project slug.
+- **`planner.md`, `implementer.md`, `reviewer.md`, `test-engineer.md`, `documentation.md`,
+  `feature-runner.md`, `deep-diver.md`, and any other agent** that "reads SPEC.md": point them at the
+  backlog API (`GET /projects/<slug>/tasks`, `GET /projects/<slug>/tasks/<id>`) instead of parsing the
+  file. Reviewers should check the diff against the claimed task, not against `SPEC.md`.
+- **Sweep the whole directory** and fix every hit:
+  ```bash
+  grep -ril 'SPEC\.md' .claude/agents/      # every file listed needs updating
+  ```
+  Each match should either move to the API, or explicitly note "`SPEC.md` is now a generated mirror —
+  do not edit it." No agent should still treat `SPEC.md` as writable.
+
+Until this sweep is done, keep `SPEC.md` authoritative and treat the server as a parallel copy.
+
+---
+
 ## 2. Start using the server (the new atomic loop)
 
 Replace these three file operations with API calls; everything else in your `CLAUDE.md` stays:
