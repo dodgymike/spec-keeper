@@ -25,6 +25,7 @@ def create_app(config_object: type = Config) -> Flask:
     # flask-smorest blueprints (documented in OpenAPI).
     from .blueprints.agents import blp as agents_blp
     from .blueprints.epics import blp as epics_blp
+    from .blueprints.ports import blp as ports_blp
     from .blueprints.projects import blp as projects_blp
     from .blueprints.reservations import blp as reservations_blp
     from .blueprints.tasks import blp as tasks_blp
@@ -34,6 +35,7 @@ def create_app(config_object: type = Config) -> Flask:
     api.register_blueprint(epics_blp)
     api.register_blueprint(tasks_blp)
     api.register_blueprint(reservations_blp)
+    api.register_blueprint(ports_blp)
 
     _register_cli(app)
     return app

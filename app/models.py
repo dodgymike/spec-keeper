@@ -189,6 +189,7 @@ class Task(Base):
     component: Mapped[str | None] = mapped_column(sa.Text)  # FE/BE/ML/AWS/...
     proof_cmd: Mapped[str | None] = mapped_column(sa.Text)
     status_note: Mapped[str | None] = mapped_column(sa.Text)  # blocked/deferred reason
+    section: Mapped[str] = mapped_column(sa.Text, default="backlog", nullable=False)
 
     owner: Mapped[str | None] = mapped_column(sa.Text)  # agent slug holding it
     lease_expires_at: Mapped[datetime | None] = mapped_column()

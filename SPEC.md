@@ -51,27 +51,27 @@ logs/decisions/chain-tracking/import-export to phase 2+.
   chain, repointed to the API), `SPEC.md`, `README.md`, `AGENTS_API.md`. _Proof: this file + the
   agent roster exist and describe the API-driven workflow._
 
+### EPIC PORT — SPEC.md round-trip / migration bridge (shipped 2026-06-30)
+
+Import an existing `SPEC.md` into the DB and render the DB back to a `SPEC.md`, so a repo can run
+file-and-server in parallel before going server-only. Implemented in `app/specmd.py` +
+`app/blueprints/ports.py`. Validated against the real 568-line feed-reader `SPEC.md` (43 tasks).
+
+- [x] **PORT-1 · Parser: `SPEC.md` → structured tasks** (BE). Checkbox states `[ ] [~] [x] [-]`,
+  epic-scoped IDs, inline `(component, priority, status)` metadata, `_Proof:_` lines, continuation
+  lines. _Proof: `pytest -k parse`._
+- [x] **PORT-2 · `POST /projects/{slug}/import`** (BE). Idempotent upsert keyed on task key.
+  _Proof: importing the same file twice yields 0 new tasks._
+- [x] **PORT-3 · Renderer: DB → `SPEC.md`** (BE). Canonical render grouped by section → epic → task.
+  _Proof: export contains `- [x] FOUND-1 · …`._
+- [x] **PORT-4 · Round-trip fidelity** (BE). `parse(render(parse(x)))` is stable. _Proof:
+  `pytest -k roundtrip`._
+- [x] **PORT-5 · `POST /export/diff` dry-run** (BE). Reports added/removed/changed vs a posted file.
+  _Proof: a single flipped task shows as `1 changed`._
+
 ---
 
 ## To Do
-
-### EPIC PORT — SPEC.md round-trip (the migration bridge)
-
-> Goal: incremental adoption. Import an existing `SPEC.md` into the DB and render the DB back to a
-> `SPEC.md`, so a repo can run file-and-server in parallel before going server-only.
-
-- [ ] **PORT-1 · Parser: `SPEC.md` → structured tasks** (BE). Parse sections → epics → phases →
-  tasks; checkbox states, epic-scoped IDs, inline metadata (component, priority, status keywords),
-  `_Proof:_` lines, commit SHAs, test summaries. _Proof: `pytest -k parse` on a fixture yields the
-  expected task count + statuses._
-- [ ] **PORT-2 · `POST /projects/{slug}/import`** (BE). Idempotent upsert of the parsed tree keyed on
-  task key. _Proof: importing the same file twice yields no duplicate tasks._
-- [ ] **PORT-3 · Renderer: DB → `SPEC.md`** (BE). Group section → epic → phase → task; reconstruct
-  checkbox states and metadata. _Proof: render contains `- [x] MVP-1` for a completed task._
-- [ ] **PORT-4 · Round-trip fidelity** (BE). `import(export(import(fixture)))` is stable. _Proof:
-  `pytest -k roundtrip` — re-imported export yields an identical normalized tree._
-- [ ] **PORT-5 · `GET /export/diff` dry-run** (BE). Show what export would change vs a posted
-  `SPEC.md` (adoption safety). _Proof: a changed task shows in the diff, an unchanged one does not._
 
 ### EPIC LOG — Append-only log, decisions, chain tracking
 

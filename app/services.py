@@ -21,6 +21,7 @@ from flask import current_app
 from .extensions import db
 from .models import (
     CLAIMABLE_STATUSES,
+    Epic,
     Lease,
     LeaseState,
     Priority,
@@ -29,6 +30,7 @@ from .models import (
     TaskStatus,
     utcnow,
 )
+from .specmd import ParsedSpec
 
 # Lower index == higher priority. Tasks with no priority sort last.
 _PRIORITY_ORDER = {Priority.P0: 0, Priority.P1: 1, Priority.P2: 2, Priority.P3: 3}
@@ -122,6 +124,64 @@ def claim_next_task(project_id: int, agent: str, epic_id=None,
     db.session.add(lease)
     db.session.flush()
     return task
+
+
+def import_spec(project_id: int, parsed: ParsedSpec) -> dict:
+    """Idempotently upsert a parsed SPEC.md tree into the project. Tasks are
+    keyed by ``(project_id, key)`` so re-importing the same file is a no-op."""
+    created_epics = updated_epics = created_tasks = updated_tasks = 0
+
+    epics_by_key: dict[str, Epic] = {}
+    for ekey, pe in parsed.epics.items():
+        epic = db.session.execute(
+            sa.select(Epic).where(Epic.project_id == project_id, Epic.key == ekey)
+        ).scalar_one_or_none()
+        if epic is None:
+            epic = Epic(project_id=project_id, key=ekey, title=pe.title,
+                        section=pe.section, position=pe.position)
+            db.session.add(epic)
+            created_epics += 1
+        else:
+            epic.title = pe.title
+            epic.section = pe.section
+            epic.position = pe.position
+            updated_epics += 1
+        db.session.flush()
+        epics_by_key[ekey] = epic
+
+    for pt in parsed.tasks:
+        epic_id = epics_by_key[pt.epic_key].id if pt.epic_key in epics_by_key else None
+        task = db.session.execute(
+            sa.select(Task).where(Task.project_id == project_id, Task.key == pt.key)
+        ).scalar_one_or_none()
+        status = TaskStatus(pt.status)
+        priority = Priority(pt.priority) if pt.priority else None
+        if task is None:
+            task = Task(
+                project_id=project_id, key=pt.key, title=pt.title,
+                description=pt.description, status=status, priority=priority,
+                component=pt.component, proof_cmd=pt.proof_cmd,
+                section=pt.section, position=pt.position, epic_id=epic_id,
+            )
+            db.session.add(task)
+            created_tasks += 1
+        else:
+            task.title = pt.title
+            task.description = pt.description
+            task.status = status
+            task.priority = priority
+            task.component = pt.component
+            task.proof_cmd = pt.proof_cmd
+            task.section = pt.section
+            task.position = pt.position
+            task.epic_id = epic_id
+            task.version += 1
+            updated_tasks += 1
+    db.session.flush()
+    return {
+        "epics_created": created_epics, "epics_updated": updated_epics,
+        "tasks_created": created_tasks, "tasks_updated": updated_tasks,
+    }
 
 
 def close_active_lease(task_id: int, state: LeaseState) -> None:

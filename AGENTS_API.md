@@ -114,6 +114,30 @@ curl -s -H 'Content-Type: application/json' \
 ```
 Statuses: `todo`, `in_progress`, `blocked`, `deferred`, `done`, `superseded`, `cancelled`.
 
+## Migrate a SPEC.md in and out (round-trip)
+
+Adopt incrementally: import an existing `SPEC.md`, run file-and-server in parallel, then go
+server-only. Bodies are raw `text/markdown`.
+
+```bash
+# Import a repo's SPEC.md into the server (idempotent — safe to re-run):
+curl -s -X POST $B/projects/corsearch/import \
+  --data-binary @SPEC.md -H 'Content-Type: text/markdown'
+# -> {"message":"imported: 43 task(s) created, 0 updated; ..."}
+
+# Render the backlog back to a SPEC.md mirror:
+curl -s $B/projects/corsearch/export > SPEC.md
+
+# Dry-run: what would change vs a local SPEC.md (adoption safety)?
+curl -s -X POST $B/projects/corsearch/export/diff \
+  --data-binary @SPEC.md -H 'Content-Type: text/markdown'
+# -> {"message":"diff vs posted: 0 new ([]), 0 only-in-server ([]), 1 changed (['API-2'])."}
+```
+
+The parser understands the observed dialects: `[ ] [~] [x] [-]` checkboxes, `**KEY · Title**`,
+epic headings (`### EPIC NAME — desc`), trailing `(BE, P0, blocked)` metadata, and `_Proof: <cmd>_`
+lines. Tasks are keyed by their human ID, so import upserts rather than duplicates.
+
 ## Conventions agents must honour
 
 - Claim before you work; complete (or release) when done — never leave a task `in_progress` with no
