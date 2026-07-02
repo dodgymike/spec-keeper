@@ -195,5 +195,11 @@ to the server's `/events` endpoint.
   fields follow existing conventions (dump_only=True, allow_none=True, metadata with description).
 - **Security:** PASS — no sensitive fields exposed (api_token_encrypted stays hidden, JiraConfigOut
   only exposes has_token boolean), no SQL injection, no secrets in tracked files.
-- **Task status:** done (could not claim/complete via API — project `spec-server` not seeded in
-  running server DB; task marked done by convention in this log).
+- **Task status:** done (version 3). Note: the implementing agent's isolated worktree could not
+  reach the shared server (its own `docker compose` spun up a separate, unseeded stack, returning
+  404 for a task that exists on the real server), so it marked completion only in this log. The
+  orchestrator verified the real server still had JIRA-12 at `status=todo, version=1` after the
+  fact, merged the code (commit `81d73f1`) into `feat/jira-epic-integration`, re-ran the full suite
+  (119 passed) against the actual running stack at localhost:8080, and then claimed/completed
+  JIRA-12 against the real server directly (`If-Match "v1"` → v2 → v3, commit_sha
+  `2976f0375633a229828205f8876e5be6fa1e1579`, the merge commit on the integration branch).
