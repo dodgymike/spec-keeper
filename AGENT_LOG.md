@@ -177,3 +177,24 @@ to the server's `/events` endpoint.
 - **Reviewer:** PASS — scope correct (only 2 new files), best-effort/never-raise verified in all branches, idempotency holds.
 - **Security:** PASS — token decrypted only in-memory, never in error messages or events; no SQL injection; no unbounded loops; no secrets in tracked files.
 - **Task status:** done (version 3, completed via POST /complete with If-Match v2).
+
+## 2026-07-02 — JIRA-9: Wire sync into task create/complete endpoints
+
+- **Task:** Wire sync_task_created/sync_task_completed into task create/complete endpoints
+  (public_id 7af7c54a-517f-46d3-af10-30f20641258c).
+- **What was done:** Added two sync call sites in app/blueprints/tasks.py — one after task
+  creation commit (sync_task_created), one after task completion commit (sync_task_completed).
+  Both calls are strictly post-commit so the API always returns 2xx regardless of Jira outcome.
+- **Files changed:**
+  - `app/blueprints/tasks.py` — added import + 2 call sites (lines 135, 256)
+  - `tests/test_jira_sync_hook.py` (NEW) — 5 test scenarios covering create success/failure/no-config
+    and complete success/failure
+- **Test result:** 5 passed (jira_sync_hook), 117 passed (full suite), 0 failed.
+- **Commit:** 1131406
+- **Branch:** feat/jira-9-wire-endpoints (based on feat/jira-epic-integration)
+- **Reviewer:** PASS — change minimal, sync calls post-commit, no behavior change to non-Jira flows.
+- **Security:** PASS (no P0/P1) — Jira failures cannot cause non-2xx or leak exceptions. P2 note:
+  pre-existing lack of HTTP timeout in jira_client.py now surfaced in request path (follow-up task).
+- **Note:** TaskOut schema does NOT yet expose jira_issue_key/jira_sync_error (JIRA-12 pending).
+  Tests verify via direct DB queries.
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2).
