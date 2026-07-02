@@ -79,3 +79,18 @@ to the server's `/events` endpoint.
 - **Migration:** `e002jira` chains onto `e001jira`; single linear head confirmed via `alembic heads`.
 - **Columns:** `jira_issue_key` (Text, nullable) — e.g. "PROJ-123"; `jira_sync_error` (Text, nullable) — last sync error.
 - **Scope:** model-only + migration; no schema/endpoint changes (JIRA-8/9/12 depend on these columns).
+
+## 2026-07-02 — JIRA-2: Token encryption helper
+
+- **Task:** Add Fernet-based symmetric encrypt/decrypt helper module `app/crypto.py`, keyed by
+  `JIRA_TOKEN_ENCRYPTION_KEY` env var.
+- **Branch:** `feat/jira-2-token-encryption-helper`
+- **Commit:** `c3b4b0c`
+- **Files changed:**
+  - `app/crypto.py` (new) — encrypt/decrypt with EncryptionKeyMissing and DecryptionError exceptions
+  - `tests/test_crypto.py` (new) — 15 tests: round-trip, non-determinism, bad-input, missing-key, wrong-key
+  - `requirements.txt` — added `cryptography>=42.0,<44.0`
+  - `.env.example` — documented JIRA_TOKEN_ENCRYPTION_KEY with generation command
+- **Chain:** spec-keeper (claim) -> implementer -> test-engineer -> reviewer (APPROVE) -> security (PASS)
+- **Tests:** `pytest -k test_crypto` — 15 passed in 0.07s
+- **Task status:** done (version 3) via POST /complete with If-Match "v2"
