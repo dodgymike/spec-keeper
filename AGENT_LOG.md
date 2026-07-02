@@ -68,3 +68,14 @@ to the server's `/events` endpoint.
 - **Columns:** project_id (FK CASCADE, UNIQUE), base_url, email, api_token_encrypted (nullable),
   jira_project_key, enabled (bool, default false), cached_transitions (JSONB, nullable), updated_at.
 - **No API endpoint** added (model-only; JIRA-5 adds config CRUD later).
+
+## 2026-07-02 — JIRA-7: Add jira_issue_key and jira_sync_error columns to tasks table
+
+- **Task:** JIRA-7 (epic JIRA, project spec-server) — add nullable text columns for Jira sync.
+- **Branch:** `jira-7-work` (based on `feat/jira-1-jira-project-config`)
+- **Commit:** `5863426` — model columns + migration (revision `e002jira`, reserved migration:2) + 4 tests.
+- **Chain:** spec-keeper (claim via PATCH owner) → implementer → test-engineer → reviewer (pass) → security (pass).
+- **Tests:** `pytest tests/test_jira_task_columns.py` → 4/4 passed (nullable default, round-trip, update, filter).
+- **Migration:** `e002jira` chains onto `e001jira`; single linear head confirmed via `alembic heads`.
+- **Columns:** `jira_issue_key` (Text, nullable) — e.g. "PROJ-123"; `jira_sync_error` (Text, nullable) — last sync error.
+- **Scope:** model-only + migration; no schema/endpoint changes (JIRA-8/9/12 depend on these columns).
