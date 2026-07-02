@@ -159,6 +159,8 @@ class TaskOut(Schema):
     tags = fields.Method("get_tags", dump_only=True)
     commits = fields.List(fields.Nested(CommitRefOut), dump_only=True)
     notes = fields.List(fields.Nested(NoteOut), dump_only=True)
+    jira_issue_key = fields.Str(allow_none=True, dump_only=True, metadata={"description": "Linked Jira issue key, e.g. PROJ-123."})
+    jira_sync_error = fields.Str(allow_none=True, dump_only=True, metadata={"description": "Last Jira sync error message, if any."})
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
     completed_at = fields.DateTime(allow_none=True, dump_only=True)
