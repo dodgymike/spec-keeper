@@ -222,6 +222,10 @@ class Task(Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column()
 
+    # Jira integration (JIRA-7): nullable columns for bi-directional sync
+    jira_issue_key: Mapped[str | None] = mapped_column(sa.Text)  # e.g. "PROJ-123"
+    jira_sync_error: Mapped[str | None] = mapped_column(sa.Text)  # last sync error message
+
     project: Mapped[Project] = relationship(back_populates="tasks")
     epic: Mapped[Epic | None] = relationship(back_populates="tasks")
     tags: Mapped[list["Tag"]] = relationship(
