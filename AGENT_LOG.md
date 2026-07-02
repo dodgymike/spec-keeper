@@ -161,3 +161,19 @@ to the server's `/events` endpoint.
 - **Security:** PASS — no token leakage (cached data stores only id/name), no unbounded retries, SQL parameterized, DecryptionError caught in best-effort handler.
 - **Task status:** done (version 3, completed via POST /complete with If-Match v2).
 - **Design note:** Uses Jira's /project/{key}/statuses endpoint for discovery (project-wide, no issue key needed) rather than per-issue /issue/{key}/transitions. Statuses are deduplicated by id across issue types.
+
+## 2026-07-02 — JIRA-8: Jira sync service (app/jira_sync.py)
+
+- **Task:** Add best-effort Jira sync functions: `sync_task_created(task)` creates a Jira issue
+  and stores the key; `sync_task_completed(task)` transitions the issue to Done via the cached
+  transition lookup. Both are idempotent and never raise — failures go to `task.jira_sync_error`
+  + an emitted event.
+- **Files changed:**
+  - `app/jira_sync.py` (NEW) — sync_task_created, sync_task_completed, _get_enabled_config, _record_error
+  - `tests/test_jira_sync.py` (NEW) — 9 test scenarios
+- **Test result:** 9 passed (jira_sync_service), 112 passed (full suite), 0 failed.
+- **Commit:** 9d5f3d7
+- **Branch:** feat/jira-8-sync-service (based on feat/jira-epic-integration)
+- **Reviewer:** PASS — scope correct (only 2 new files), best-effort/never-raise verified in all branches, idempotency holds.
+- **Security:** PASS — token decrypted only in-memory, never in error messages or events; no SQL injection; no unbounded loops; no secrets in tracked files.
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2).
