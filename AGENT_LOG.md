@@ -57,3 +57,16 @@ to the server's `/events` endpoint.
   the API. Backlog now **23 done / 0 todo** on the server.
 - SPEC.md is now a readable mirror; regenerate with `GET /projects/spec-server/export`.
 - Every epic from the original plan is shipped: MVP, PORT, LOG, HARDEN, chain tracking, DOGFOOD.
+
+## 2026-07-02 — JIRA-3: Jira Cloud REST client module
+
+- **Agent:** feature-runner (worktree-agent-a60e3d76d79b33f4e)
+- **Task:** JIRA-3 — Add app/jira_client.py wrapping Jira Cloud REST API v3.
+- **Chain:** spec-keeper (claim) → implementer → test-engineer → reviewer → security
+- **Files changed:** app/jira_client.py (new), tests/test_jira_client.py (new), requirements.txt (+requests)
+- **Test result:** 12/12 passed (`pytest tests/test_jira_client.py --noconftest -q`)
+- **Commit:** 60fa69f
+- **Branch:** worktree-agent-a60e3d76d79b33f4e
+- **Reviewer:** PASS — scope correct, code correct, one-task atomic.
+- **Security:** PASS — token never in exceptions, no SSRF, no secrets, no injection.
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2).
