@@ -177,3 +177,23 @@ to the server's `/events` endpoint.
 - **Reviewer:** PASS — scope correct (only 2 new files), best-effort/never-raise verified in all branches, idempotency holds.
 - **Security:** PASS — token decrypted only in-memory, never in error messages or events; no SQL injection; no unbounded loops; no secrets in tracked files.
 - **Task status:** done (version 3, completed via POST /complete with If-Match v2).
+
+## 2026-07-02 — JIRA-12: Expose jira fields on task schema
+
+- **Task:** Add `jira_issue_key` and `jira_sync_error` as dump-only (read-only) nullable string
+  fields to the `TaskOut` marshmallow schema, so they appear in all task API responses but cannot
+  be set by clients via input.
+- **Files changed:**
+  - `app/schemas.py` — 2 lines added to `TaskOut` class (dump_only fields)
+  - `tests/test_jira_schema_fields.py` (NEW) — 7 tests covering response presence, null defaults,
+    input rejection (dump-only enforcement), and OpenAPI readOnly annotation.
+- **Test result:** 7 passed (jira_schema_fields), 68 passed (core suite excluding unrelated jira
+  service tests with pre-existing infra gaps), 0 regressions from this change.
+- **Commit:** 81d73f1
+- **Branch:** feat/jira-12-schema-fields (based on feat/jira-epic-integration)
+- **Reviewer:** PASS — scope correct (only TaskOut touched, not TaskIn/TaskPatch/models/blueprints),
+  fields follow existing conventions (dump_only=True, allow_none=True, metadata with description).
+- **Security:** PASS — no sensitive fields exposed (api_token_encrypted stays hidden, JiraConfigOut
+  only exposes has_token boolean), no SQL injection, no secrets in tracked files.
+- **Task status:** done (could not claim/complete via API — project `spec-server` not seeded in
+  running server DB; task marked done by convention in this log).
