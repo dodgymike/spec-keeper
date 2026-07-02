@@ -241,3 +241,25 @@ to the server's `/events` endpoint.
 - **Reviewer:** PASS after fix — found dead-code bug in else branch (sync_task_created no-ops when key exists); fixed by clearing stale error directly.
 - **Security:** PASS — no token leakage (response is counts only), project-scoped queries prevent cross-project access, parameterized SQL, auth enforced. P2 note: no batch limit (acceptable for internal use).
 - **Task status:** done (version 3, completed via POST /complete with If-Match v2).
+
+## 2026-07-02 — JIRA-10: Integration tests for end-to-end Jira sync
+
+- **Task:** Integration tests for end-to-end Jira sync (real Postgres, mocked Jira client)
+- **Agent:** feature-runner (Claude Opus 4.6)
+- **Branch:** feat/jira-10-integration-tests (based on feat/jira-epic-integration @ 5400f2a)
+- **Commit:** 5689173
+- **Files added:** tests/test_jira_sync_integration.py (9 new tests, 5 test classes)
+- **Coverage added (genuinely new vs JIRA-8/9/11):**
+  - Full lifecycle: create via HTTP -> Jira create mocked -> complete via HTTP -> Jira transition mocked
+  - Jira-down-on-create, recovers-on-complete (inline create + transition)
+  - Create succeeds, complete transition fails (error stored, API still 200)
+  - Retry endpoint fixes failed create (true e2e: create with Jira down -> retry -> fixed)
+  - Retry endpoint fixes failed complete transition (e2e)
+  - Disabled-config no-op across full lifecycle (create + complete, zero Jira calls)
+  - No-config-at-all lifecycle (same no-op behavior)
+  - Idempotent re-create: duplicate key returns 409, only one Jira call
+  - Re-invocation of sync_task_created when key already set: no second Jira call
+- **Test result:** 24 passed (pytest -k jira_sync), 142 total passed, 0 failed
+- **Reviewer:** PASS — genuinely new end-to-end coverage, correct scope (test-only), no app code modified
+- **Security:** PASS — no real secrets, all Jira calls mocked at JiraClient boundary, SQLAlchemy ORM only, fresh Fernet key per test
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2, verified via follow-up GET)
