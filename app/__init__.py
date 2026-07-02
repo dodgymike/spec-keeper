@@ -27,6 +27,7 @@ def create_app(config_object: type = Config) -> Flask:
     from .blueprints.agents import blp as agents_blp
     from .blueprints.chains import blp as chains_blp  # LOG-3
     from .blueprints.epics import blp as epics_blp
+    from .blueprints.jira_config import blp as jira_config_blp  # JIRA-5
     from .blueprints.log import blp as log_blp
     from .blueprints.ports import blp as ports_blp
     from .blueprints.projects import blp as projects_blp
@@ -41,6 +42,7 @@ def create_app(config_object: type = Config) -> Flask:
     api.register_blueprint(ports_blp)
     api.register_blueprint(log_blp)
     api.register_blueprint(chains_blp)
+    api.register_blueprint(jira_config_blp)
 
     _register_cli(app)
     return app

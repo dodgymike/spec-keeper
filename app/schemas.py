@@ -336,6 +336,34 @@ STEP_STATUS_VALUES = ["pending", "running", "passed", "failed", "skipped"]
 RUN_STATUS_VALUES = ["running", "passed", "failed", "aborted"]
 
 
+# --------------------------------------------------------------------------- #
+# Jira Config
+# --------------------------------------------------------------------------- #
+class JiraConfigIn(Schema):
+    base_url = fields.Str(required=True, metadata={"description": "Jira instance base URL, e.g. https://myco.atlassian.net"})
+    email = fields.Str(required=True, metadata={"description": "Jira user email for API auth."})
+    api_token = fields.Str(required=True, metadata={"description": "Jira API token (write-only, encrypted at rest)."})
+    jira_project_key = fields.Str(required=True, metadata={"description": "Jira project key, e.g. PROJ."})
+    enabled = fields.Bool(load_default=False)
+
+
+class JiraConfigUpdate(Schema):
+    base_url = fields.Str(metadata={"description": "Jira instance base URL."})
+    email = fields.Str(metadata={"description": "Jira user email."})
+    api_token = fields.Str(metadata={"description": "New API token (write-only, encrypted at rest)."})
+    jira_project_key = fields.Str(metadata={"description": "Jira project key."})
+    enabled = fields.Bool()
+
+
+class JiraConfigOut(Schema):
+    base_url = fields.Str()
+    email = fields.Str()
+    jira_project_key = fields.Str()
+    enabled = fields.Bool()
+    has_token = fields.Bool(metadata={"description": "Whether an API token is configured."})
+    updated_at = fields.DateTime(dump_only=True)
+
+
 class ChainRunIn(Schema):
     started_by = fields.Str(allow_none=True)
 
