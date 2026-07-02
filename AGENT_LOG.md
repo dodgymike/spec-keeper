@@ -223,4 +223,21 @@ to the server's `/events` endpoint.
   pre-existing lack of HTTP timeout in jira_client.py now surfaced in request path (follow-up task).
 - **Note:** TaskOut schema does NOT yet expose jira_issue_key/jira_sync_error (JIRA-12 pending).
   Tests verify via direct DB queries.
+
+## 2026-07-02 — JIRA-11: Manual retry endpoint for failed/missing Jira syncs
+
+- **Agent:** feature-runner (worktree-agent-a02c3ee1ec0f503bb)
+- **Task:** JIRA-11 (ce89b618-105e-4bcf-9db8-198df604dc42) — Add POST /projects/{slug}/jira/sync to retry sync for tasks with errors or missing keys.
+- **Chain:** spec-keeper (claim via PATCH) → implementer → test-engineer → reviewer → security
+- **Files changed:**
+  - app/blueprints/jira_sync_retry.py (new) — endpoint implementation
+  - app/__init__.py — register new blueprint
+  - app/schemas.py — JiraSyncRetryOut schema
+  - tests/test_jira_retry_endpoint.py (new) — 9 tests
+- **Retry-eligibility semantics:** tasks with jira_sync_error IS NOT NULL OR jira_issue_key IS NULL. For each: no key → sync_task_created; key + done → sync_task_completed; key + not done → clear stale error.
+- **Test result:** 9 passed (jira_retry_endpoint), 121 total passed
+- **Commit:** 8deb516
+- **Branch:** feat/jira-11-retry-endpoint (based on feat/jira-epic-integration)
+- **Reviewer:** PASS after fix — found dead-code bug in else branch (sync_task_created no-ops when key exists); fixed by clearing stale error directly.
+- **Security:** PASS — no token leakage (response is counts only), project-scoped queries prevent cross-project access, parameterized SQL, auth enforced. P2 note: no batch limit (acceptable for internal use).
 - **Task status:** done (version 3, completed via POST /complete with If-Match v2).
