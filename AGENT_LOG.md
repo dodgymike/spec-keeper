@@ -142,3 +142,22 @@ to the server's `/events` endpoint.
 - **Reviewer:** PASS — scope correct, one-task atomic, token never leaks.
 - **Security:** PASS — token encrypted before storage, never in responses, no logging, no SQL injection, no secrets in tracked files. P2 advisory: input validation (non-blocking).
 - **Task status:** done (version 3, completed via POST /complete with If-Match v2).
+
+---
+
+## JIRA-6 — Transition cache warmup for Jira config
+
+- **Date:** 2026-07-02
+- **Agent:** feature-runner
+- **Task:** Implement transition cache warmup that fetches Jira project statuses and caches them in jira_project_config.cached_transitions JSONB, triggered on config save/enable, with refresh-once-before-failing helper for sync service.
+- **Files changed:**
+  - `app/jira_transitions.py` (NEW) — warm_transition_cache(), find_transition(), _find_in_cache()
+  - `app/blueprints/jira_config.py` (MODIFIED) — added _try_warm_cache() trigger in POST/PUT
+  - `tests/test_jira_transition_cache.py` (NEW) — 17 tests
+- **Test result:** 17 passed (transition_cache), 103 passed (full suite), 0 failed.
+- **Commit:** 94071b8
+- **Branch:** feat/jira-6-transition-cache (based on feat/jira-epic-integration)
+- **Reviewer:** PASS — scope correct, one-task atomic, refresh-once pattern verified, no regressions.
+- **Security:** PASS — no token leakage (cached data stores only id/name), no unbounded retries, SQL parameterized, DecryptionError caught in best-effort handler.
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2).
+- **Design note:** Uses Jira's /project/{key}/statuses endpoint for discovery (project-wide, no issue key needed) rather than per-issue /issue/{key}/transitions. Statuses are deduplicated by id across issue types.
