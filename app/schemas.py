@@ -398,3 +398,11 @@ class ChainStepIn(Schema):
 
 class ChainRunPatch(Schema):
     status = fields.Str(validate=validate.OneOf(RUN_STATUS_VALUES))
+
+
+# --------------------------------------------------------------------------- #
+# Jira Sync Retry (JIRA-11)
+# --------------------------------------------------------------------------- #
+class JiraSyncRetryOut(Schema):
+    synced = fields.Int(metadata={"description": "Tasks where sync succeeded (error cleared)."})
+    failed = fields.Int(metadata={"description": "Tasks where sync still failed."})
