@@ -1,15 +1,25 @@
-"""Per-project Jira integration config CRUD (JIRA-5)."""
+"""Per-project Jira integration config CRUD (JIRA-5).
+
+Transition cache warmup (JIRA-6): when config is created with enabled=True or
+updated to enabled=True, the Jira project statuses are fetched and cached.
+Failures are logged but do not block the config save (best-effort warmup).
+"""
 from __future__ import annotations
+
+import logging
 
 import sqlalchemy as sa
 from flask.views import MethodView
 from flask_smorest import Blueprint, abort
 
-from ..crypto import encrypt
+from ..crypto import DecryptionError, encrypt
 from ..extensions import db
 from ..helpers import get_project_or_404, require_api_key
+from ..jira_transitions import TransitionCacheError, warm_transition_cache
 from ..models import JiraProjectConfig
 from ..schemas import JiraConfigIn, JiraConfigOut, JiraConfigUpdate
+
+logger = logging.getLogger(__name__)
 
 blp = Blueprint(
     "jira_config", __name__, url_prefix="/api/v1/projects",
@@ -38,6 +48,25 @@ def _config_to_out(config: JiraProjectConfig) -> dict:
         "has_token": config.api_token_encrypted is not None,
         "updated_at": config.updated_at,
     }
+
+
+def _try_warm_cache(config: JiraProjectConfig) -> None:
+    """Best-effort transition cache warmup — logs failures, never raises.
+
+    Called after POST/PUT when the config is enabled. A failure here does not
+    block the config save; the cache will be populated lazily on first sync use
+    via find_transition()'s refresh-once logic.
+    """
+    try:
+        warm_transition_cache(config)
+    except (TransitionCacheError, DecryptionError):
+        # Already logged inside warm_transition_cache (or the token is corrupt);
+        # either way, do not block the config save.
+        logger.debug(
+            "Transition cache warmup failed for project_key=%s; "
+            "will retry lazily on first sync use.",
+            config.jira_project_key,
+        )
 
 
 @blp.route("/<slug>/jira-config")
@@ -77,6 +106,11 @@ class JiraConfigResource(MethodView):
         )
         db.session.add(config)
         db.session.commit()
+
+        # JIRA-6: warm transition cache on create if enabled
+        if config.enabled:
+            _try_warm_cache(config)
+
         return _config_to_out(config)
 
     @blp.arguments(JiraConfigUpdate)
@@ -99,4 +133,9 @@ class JiraConfigResource(MethodView):
             config.enabled = data["enabled"]
 
         db.session.commit()
+
+        # JIRA-6: warm transition cache when enabled via PUT
+        if config.enabled:
+            _try_warm_cache(config)
+
         return _config_to_out(config)
