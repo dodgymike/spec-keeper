@@ -107,3 +107,21 @@ to the server's `/events` endpoint.
 - **Reviewer:** PASS — scope correct, code correct, one-task atomic.
 - **Security:** PASS — token never in exceptions, no SSRF, no secrets, no injection.
 - **Task status:** done (version 3, completed via POST /complete with If-Match v2).
+
+## 2026-07-02 — JIRA-4: closed as superseded (bookkeeping only, no code)
+
+- **Agent:** spec-keeper
+- **Task:** JIRA-4 (public_id ff785eb7-02c0-412d-a6f8-a6bc6f01991d) — "Unit tests for the Jira
+  client with mocked HTTP" was originally scoped as its own task, separate from JIRA-3.
+- **Why closed without new work:** JIRA-3 (public_id 12bfa983-b47c-4956-a145-d6c489ea3b93, done)
+  built its client and test suite together, since the two were naturally inseparable —
+  `tests/test_jira_client.py` (12/12 passing) already covers everything JIRA-4 asked for:
+  `create_issue` success/auth/payload, `get_transitions` parsing, `transition_issue`, and HTTP
+  error paths raising `JiraClientError`. Independently repeating this work in a fresh task would
+  just duplicate JIRA-3's tests, so JIRA-4 is redundant rather than actionable.
+- **Action:** No code written, no tests run by spec-keeper for this task. Claimed (PATCH
+  status=in_progress, owner=spec-keeper, If-Match "v1" -> v2), then completed via POST /complete
+  (If-Match "v2" -> v3) referencing commit `60fa69f` (JIRA-3's commit) and
+  `proof_cmd: pytest tests/test_jira_client.py --noconftest -q`, with a task note recording the
+  supersession rationale.
+- **Task status:** done (version 3).
