@@ -107,3 +107,22 @@ to the server's `/events` endpoint.
 - **Reviewer:** PASS — scope correct, code correct, one-task atomic.
 - **Security:** PASS — token never in exceptions, no SSRF, no secrets, no injection.
 - **Task status:** done (version 3, completed via POST /complete with If-Match v2).
+
+---
+
+## JIRA-5: Per-project Jira config CRUD blueprint
+
+- **Date:** 2026-07-02
+- **Agent:** feature-runner-jira5
+- **Task:** Add POST/GET/PUT /projects/{slug}/jira-config blueprint with encrypted token storage
+- **Files changed:**
+  - app/blueprints/jira_config.py (new)
+  - app/schemas.py (added JiraConfigIn, JiraConfigUpdate, JiraConfigOut)
+  - app/__init__.py (registered jira_config blueprint)
+  - tests/test_jira_config_endpoint.py (new, 10 tests)
+- **Test result:** 10 passed, 76 deselected (pytest -k jira_config_endpoint)
+- **Commit:** 74f3f50
+- **Branch:** feat/jira-5-config-crud (based on feat/jira-epic-integration)
+- **Reviewer:** PASS — scope correct, one-task atomic, token never leaks.
+- **Security:** PASS — token encrypted before storage, never in responses, no logging, no SQL injection, no secrets in tracked files. P2 advisory: input validation (non-blocking).
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2).
