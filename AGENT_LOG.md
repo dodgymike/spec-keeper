@@ -57,3 +57,14 @@ to the server's `/events` endpoint.
   the API. Backlog now **23 done / 0 todo** on the server.
 - SPEC.md is now a readable mirror; regenerate with `GET /projects/spec-server/export`.
 - Every epic from the original plan is shipped: MVP, PORT, LOG, HARDEN, chain tracking, DOGFOOD.
+
+## 2026-07-02 — JIRA-1: Add jira_project_config table
+
+- **Task:** JIRA-1 (epic JIRA, project spec-server) — add `jira_project_config` table and Alembic migration.
+- **Branch:** `feat/jira-1-jira-project-config`
+- **Commit:** `b783014` — model + migration (revision `e001jira`, reserved migration:1) + 3 tests.
+- **Chain:** spec-keeper (claim) → implementer → test-engineer → reviewer (pass) → security (pass).
+- **Tests:** `pytest -k jira_config_model` → 3/3 passed. `alembic upgrade head` applies all 5 migrations cleanly.
+- **Columns:** project_id (FK CASCADE, UNIQUE), base_url, email, api_token_encrypted (nullable),
+  jira_project_key, enabled (bool, default false), cached_transitions (JSONB, nullable), updated_at.
+- **No API endpoint** added (model-only; JIRA-5 adds config CRUD later).
