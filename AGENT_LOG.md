@@ -263,3 +263,28 @@ to the server's `/events` endpoint.
 - **Reviewer:** PASS — genuinely new end-to-end coverage, correct scope (test-only), no app code modified
 - **Security:** PASS — no real secrets, all Jira calls mocked at JiraClient boundary, SQLAlchemy ORM only, fresh Fernet key per test
 - **Task status:** done (version 3, completed via POST /complete with If-Match v2, verified via follow-up GET)
+
+## 2026-07-02 — JIRA-13: Document Jira sync (README, AGENTS_API.md, .env.example, DECISIONS.md)
+
+- **Agent:** feature-runner (worktree-agent-a1482e8045271bf70)
+- **Task:** JIRA-13 (99b49354-a830-469c-ba59-c79e3613d83d) — Documentation for the JIRA epic.
+- **Chain:** spec-keeper (claim via PATCH) → documentation (write) → reviewer (accuracy check) —
+  no implementer/test-engineer/security needed (docs-only, no app code changes).
+- **Justification for skipping implementer/test-engineer/security:** Pure documentation task; no
+  application code, no tests to write, no security surface.
+- **Files changed:**
+  - README.md — added "Jira Sync" section, updated Architecture table, What's included list,
+    Configuration table, Status section, Key tables list.
+  - AGENTS_API.md — added "Jira integration" section with endpoint recipes for jira-config
+    (POST/GET/PUT) and jira/sync (POST retry), field tables, limitations.
+  - .env.example — added explanatory note that per-project DB config is primary.
+  - DECISIONS.md — added DEC-4 through DEC-8 (push-only sync, trigger scope, best-effort inline,
+    per-project DB config with Fernet, transition cache refresh-once).
+- **Verification:** Reviewer agent cross-checked all documented field names, URL paths, and
+  behavioral claims against app/schemas.py, app/blueprints/jira_config.py,
+  app/blueprints/jira_sync_retry.py, app/jira_sync.py, app/jira_transitions.py, and app/crypto.py.
+  Live OpenAPI spec confirmed both endpoint paths exist. PASS.
+- **Commit:** abaef4b
+- **Branch:** feat/jira-13-docs (based on feat/jira-epic-integration)
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2, verified via
+  follow-up GET: status=done, completed_at=2026-07-02T21:28:43.477967).
