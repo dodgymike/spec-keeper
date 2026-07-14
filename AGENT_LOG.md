@@ -57,3 +57,234 @@ to the server's `/events` endpoint.
   the API. Backlog now **23 done / 0 todo** on the server.
 - SPEC.md is now a readable mirror; regenerate with `GET /projects/spec-server/export`.
 - Every epic from the original plan is shipped: MVP, PORT, LOG, HARDEN, chain tracking, DOGFOOD.
+
+## 2026-07-02 — JIRA-1: Add jira_project_config table
+
+- **Task:** JIRA-1 (epic JIRA, project spec-server) — add `jira_project_config` table and Alembic migration.
+- **Branch:** `feat/jira-1-jira-project-config`
+- **Commit:** `b783014` — model + migration (revision `e001jira`, reserved migration:1) + 3 tests.
+- **Chain:** spec-keeper (claim) → implementer → test-engineer → reviewer (pass) → security (pass).
+- **Tests:** `pytest -k jira_config_model` → 3/3 passed. `alembic upgrade head` applies all 5 migrations cleanly.
+- **Columns:** project_id (FK CASCADE, UNIQUE), base_url, email, api_token_encrypted (nullable),
+  jira_project_key, enabled (bool, default false), cached_transitions (JSONB, nullable), updated_at.
+- **No API endpoint** added (model-only; JIRA-5 adds config CRUD later).
+
+## 2026-07-02 — JIRA-7: Add jira_issue_key and jira_sync_error columns to tasks table
+
+- **Task:** JIRA-7 (epic JIRA, project spec-server) — add nullable text columns for Jira sync.
+- **Branch:** `jira-7-work` (based on `feat/jira-1-jira-project-config`)
+- **Commit:** `5863426` — model columns + migration (revision `e002jira`, reserved migration:2) + 4 tests.
+- **Chain:** spec-keeper (claim via PATCH owner) → implementer → test-engineer → reviewer (pass) → security (pass).
+- **Tests:** `pytest tests/test_jira_task_columns.py` → 4/4 passed (nullable default, round-trip, update, filter).
+- **Migration:** `e002jira` chains onto `e001jira`; single linear head confirmed via `alembic heads`.
+- **Columns:** `jira_issue_key` (Text, nullable) — e.g. "PROJ-123"; `jira_sync_error` (Text, nullable) — last sync error.
+- **Scope:** model-only + migration; no schema/endpoint changes (JIRA-8/9/12 depend on these columns).
+
+## 2026-07-02 — JIRA-2: Token encryption helper
+
+- **Task:** Add Fernet-based symmetric encrypt/decrypt helper module `app/crypto.py`, keyed by
+  `JIRA_TOKEN_ENCRYPTION_KEY` env var.
+- **Branch:** `feat/jira-2-token-encryption-helper`
+- **Commit:** `c3b4b0c`
+- **Files changed:**
+  - `app/crypto.py` (new) — encrypt/decrypt with EncryptionKeyMissing and DecryptionError exceptions
+  - `tests/test_crypto.py` (new) — 15 tests: round-trip, non-determinism, bad-input, missing-key, wrong-key
+  - `requirements.txt` — added `cryptography>=42.0,<44.0`
+  - `.env.example` — documented JIRA_TOKEN_ENCRYPTION_KEY with generation command
+- **Chain:** spec-keeper (claim) -> implementer -> test-engineer -> reviewer (APPROVE) -> security (PASS)
+- **Tests:** `pytest -k test_crypto` — 15 passed in 0.07s
+- **Task status:** done (version 3) via POST /complete with If-Match "v2"
+
+## 2026-07-02 — JIRA-3: Jira Cloud REST client module
+
+- **Agent:** feature-runner (worktree-agent-a60e3d76d79b33f4e)
+- **Task:** JIRA-3 — Add app/jira_client.py wrapping Jira Cloud REST API v3.
+- **Chain:** spec-keeper (claim) → implementer → test-engineer → reviewer → security
+- **Files changed:** app/jira_client.py (new), tests/test_jira_client.py (new), requirements.txt (+requests)
+- **Test result:** 12/12 passed (`pytest tests/test_jira_client.py --noconftest -q`)
+- **Commit:** 60fa69f
+- **Branch:** worktree-agent-a60e3d76d79b33f4e
+- **Reviewer:** PASS — scope correct, code correct, one-task atomic.
+- **Security:** PASS — token never in exceptions, no SSRF, no secrets, no injection.
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2).
+
+## 2026-07-02 — JIRA-4: closed as superseded (bookkeeping only, no code)
+
+- **Agent:** spec-keeper
+- **Task:** JIRA-4 (public_id ff785eb7-02c0-412d-a6f8-a6bc6f01991d) — "Unit tests for the Jira
+  client with mocked HTTP" was originally scoped as its own task, separate from JIRA-3.
+- **Why closed without new work:** JIRA-3 (public_id 12bfa983-b47c-4956-a145-d6c489ea3b93, done)
+  built its client and test suite together, since the two were naturally inseparable —
+  `tests/test_jira_client.py` (12/12 passing) already covers everything JIRA-4 asked for:
+  `create_issue` success/auth/payload, `get_transitions` parsing, `transition_issue`, and HTTP
+  error paths raising `JiraClientError`. Independently repeating this work in a fresh task would
+  just duplicate JIRA-3's tests, so JIRA-4 is redundant rather than actionable.
+- **Action:** No code written, no tests run by spec-keeper for this task. Claimed (PATCH
+  status=in_progress, owner=spec-keeper, If-Match "v1" -> v2), then completed via POST /complete
+  (If-Match "v2" -> v3) referencing commit `60fa69f` (JIRA-3's commit) and
+  `proof_cmd: pytest tests/test_jira_client.py --noconftest -q`, with a task note recording the
+  supersession rationale.
+- **Task status:** done (version 3).
+
+## 2026-07-02 — JIRA-5: Per-project Jira config CRUD blueprint
+
+- **Date:** 2026-07-02
+- **Agent:** feature-runner-jira5
+- **Task:** Add POST/GET/PUT /projects/{slug}/jira-config blueprint with encrypted token storage
+- **Files changed:**
+  - app/blueprints/jira_config.py (new)
+  - app/schemas.py (added JiraConfigIn, JiraConfigUpdate, JiraConfigOut)
+  - app/__init__.py (registered jira_config blueprint)
+  - tests/test_jira_config_endpoint.py (new, 10 tests)
+- **Test result:** 10 passed, 76 deselected (pytest -k jira_config_endpoint)
+- **Commit:** 74f3f50
+- **Branch:** feat/jira-5-config-crud (based on feat/jira-epic-integration)
+- **Reviewer:** PASS — scope correct, one-task atomic, token never leaks.
+- **Security:** PASS — token encrypted before storage, never in responses, no logging, no SQL injection, no secrets in tracked files. P2 advisory: input validation (non-blocking).
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2).
+
+---
+
+## JIRA-6 — Transition cache warmup for Jira config
+
+- **Date:** 2026-07-02
+- **Agent:** feature-runner
+- **Task:** Implement transition cache warmup that fetches Jira project statuses and caches them in jira_project_config.cached_transitions JSONB, triggered on config save/enable, with refresh-once-before-failing helper for sync service.
+- **Files changed:**
+  - `app/jira_transitions.py` (NEW) — warm_transition_cache(), find_transition(), _find_in_cache()
+  - `app/blueprints/jira_config.py` (MODIFIED) — added _try_warm_cache() trigger in POST/PUT
+  - `tests/test_jira_transition_cache.py` (NEW) — 17 tests
+- **Test result:** 17 passed (transition_cache), 103 passed (full suite), 0 failed.
+- **Commit:** 94071b8
+- **Branch:** feat/jira-6-transition-cache (based on feat/jira-epic-integration)
+- **Reviewer:** PASS — scope correct, one-task atomic, refresh-once pattern verified, no regressions.
+- **Security:** PASS — no token leakage (cached data stores only id/name), no unbounded retries, SQL parameterized, DecryptionError caught in best-effort handler.
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2).
+- **Design note:** Uses Jira's /project/{key}/statuses endpoint for discovery (project-wide, no issue key needed) rather than per-issue /issue/{key}/transitions. Statuses are deduplicated by id across issue types.
+
+## 2026-07-02 — JIRA-8: Jira sync service (app/jira_sync.py)
+
+- **Task:** Add best-effort Jira sync functions: `sync_task_created(task)` creates a Jira issue
+  and stores the key; `sync_task_completed(task)` transitions the issue to Done via the cached
+  transition lookup. Both are idempotent and never raise — failures go to `task.jira_sync_error`
+  + an emitted event.
+- **Files changed:**
+  - `app/jira_sync.py` (NEW) — sync_task_created, sync_task_completed, _get_enabled_config, _record_error
+  - `tests/test_jira_sync.py` (NEW) — 9 test scenarios
+- **Test result:** 9 passed (jira_sync_service), 112 passed (full suite), 0 failed.
+- **Commit:** 9d5f3d7
+- **Branch:** feat/jira-8-sync-service (based on feat/jira-epic-integration)
+- **Reviewer:** PASS — scope correct (only 2 new files), best-effort/never-raise verified in all branches, idempotency holds.
+- **Security:** PASS — token decrypted only in-memory, never in error messages or events; no SQL injection; no unbounded loops; no secrets in tracked files.
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2).
+
+## 2026-07-02 — JIRA-12: Expose jira fields on task schema
+
+- **Task:** Add `jira_issue_key` and `jira_sync_error` as dump-only (read-only) nullable string
+  fields to the `TaskOut` marshmallow schema, so they appear in all task API responses but cannot
+  be set by clients via input.
+- **Files changed:**
+  - `app/schemas.py` — 2 lines added to `TaskOut` class (dump_only fields)
+  - `tests/test_jira_schema_fields.py` (NEW) — 7 tests covering response presence, null defaults,
+    input rejection (dump-only enforcement), and OpenAPI readOnly annotation.
+- **Test result:** 7 passed (jira_schema_fields), 68 passed (core suite excluding unrelated jira
+  service tests with pre-existing infra gaps), 0 regressions from this change.
+- **Commit:** 81d73f1
+- **Branch:** feat/jira-12-schema-fields (based on feat/jira-epic-integration)
+- **Reviewer:** PASS — scope correct (only TaskOut touched, not TaskIn/TaskPatch/models/blueprints),
+  fields follow existing conventions (dump_only=True, allow_none=True, metadata with description).
+- **Security:** PASS — no sensitive fields exposed (api_token_encrypted stays hidden, JiraConfigOut
+  only exposes has_token boolean), no SQL injection, no secrets in tracked files.
+- **Task status:** done (version 3). Note: the implementing agent's isolated worktree could not
+  reach the shared server (its own `docker compose` spun up a separate, unseeded stack, returning
+  404 for a task that exists on the real server), so it marked completion only in this log. The
+  orchestrator verified the real server still had JIRA-12 at `status=todo, version=1` after the
+  fact, merged the code (commit `81d73f1`) into `feat/jira-epic-integration`, re-ran the full suite
+  (119 passed) against the actual running stack at localhost:8080, and then claimed/completed
+  JIRA-12 against the real server directly (`If-Match "v1"` → v2 → v3, commit_sha
+  `2976f0375633a229828205f8876e5be6fa1e1579`, the merge commit on the integration branch).
+
+## 2026-07-02 — JIRA-9: Wire sync into task create/complete endpoints
+
+- **Task:** Wire sync_task_created/sync_task_completed into task create/complete endpoints
+  (public_id 7af7c54a-517f-46d3-af10-30f20641258c).
+- **What was done:** Added two sync call sites in app/blueprints/tasks.py — one after task
+  creation commit (sync_task_created), one after task completion commit (sync_task_completed).
+  Both calls are strictly post-commit so the API always returns 2xx regardless of Jira outcome.
+- **Files changed:**
+  - `app/blueprints/tasks.py` — added import + 2 call sites (lines 135, 256)
+  - `tests/test_jira_sync_hook.py` (NEW) — 5 test scenarios covering create success/failure/no-config
+    and complete success/failure
+- **Test result:** 5 passed (jira_sync_hook), 117 passed (full suite), 0 failed.
+- **Commit:** 1131406
+- **Branch:** feat/jira-9-wire-endpoints (based on feat/jira-epic-integration)
+- **Reviewer:** PASS — change minimal, sync calls post-commit, no behavior change to non-Jira flows.
+- **Security:** PASS (no P0/P1) — Jira failures cannot cause non-2xx or leak exceptions. P2 note:
+  pre-existing lack of HTTP timeout in jira_client.py now surfaced in request path (follow-up task).
+- **Note:** TaskOut schema does NOT yet expose jira_issue_key/jira_sync_error (JIRA-12 pending).
+  Tests verify via direct DB queries.
+
+## 2026-07-02 — JIRA-11: Manual retry endpoint for failed/missing Jira syncs
+
+- **Agent:** feature-runner (worktree-agent-a02c3ee1ec0f503bb)
+- **Task:** JIRA-11 (ce89b618-105e-4bcf-9db8-198df604dc42) — Add POST /projects/{slug}/jira/sync to retry sync for tasks with errors or missing keys.
+- **Chain:** spec-keeper (claim via PATCH) → implementer → test-engineer → reviewer → security
+- **Files changed:**
+  - app/blueprints/jira_sync_retry.py (new) — endpoint implementation
+  - app/__init__.py — register new blueprint
+  - app/schemas.py — JiraSyncRetryOut schema
+  - tests/test_jira_retry_endpoint.py (new) — 9 tests
+- **Retry-eligibility semantics:** tasks with jira_sync_error IS NOT NULL OR jira_issue_key IS NULL. For each: no key → sync_task_created; key + done → sync_task_completed; key + not done → clear stale error.
+- **Test result:** 9 passed (jira_retry_endpoint), 121 total passed
+- **Commit:** 8deb516
+- **Branch:** feat/jira-11-retry-endpoint (based on feat/jira-epic-integration)
+- **Reviewer:** PASS after fix — found dead-code bug in else branch (sync_task_created no-ops when key exists); fixed by clearing stale error directly.
+- **Security:** PASS — no token leakage (response is counts only), project-scoped queries prevent cross-project access, parameterized SQL, auth enforced. P2 note: no batch limit (acceptable for internal use).
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2).
+
+## 2026-07-02 — JIRA-10: Integration tests for end-to-end Jira sync
+
+- **Task:** Integration tests for end-to-end Jira sync (real Postgres, mocked Jira client)
+- **Agent:** feature-runner (Claude Opus 4.6)
+- **Branch:** feat/jira-10-integration-tests (based on feat/jira-epic-integration @ 5400f2a)
+- **Commit:** 5689173
+- **Files added:** tests/test_jira_sync_integration.py (9 new tests, 5 test classes)
+- **Coverage added (genuinely new vs JIRA-8/9/11):**
+  - Full lifecycle: create via HTTP -> Jira create mocked -> complete via HTTP -> Jira transition mocked
+  - Jira-down-on-create, recovers-on-complete (inline create + transition)
+  - Create succeeds, complete transition fails (error stored, API still 200)
+  - Retry endpoint fixes failed create (true e2e: create with Jira down -> retry -> fixed)
+  - Retry endpoint fixes failed complete transition (e2e)
+  - Disabled-config no-op across full lifecycle (create + complete, zero Jira calls)
+  - No-config-at-all lifecycle (same no-op behavior)
+  - Idempotent re-create: duplicate key returns 409, only one Jira call
+  - Re-invocation of sync_task_created when key already set: no second Jira call
+- **Test result:** 24 passed (pytest -k jira_sync), 142 total passed, 0 failed
+- **Reviewer:** PASS — genuinely new end-to-end coverage, correct scope (test-only), no app code modified
+- **Security:** PASS — no real secrets, all Jira calls mocked at JiraClient boundary, SQLAlchemy ORM only, fresh Fernet key per test
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2, verified via follow-up GET)
+
+## 2026-07-02 — JIRA-13: Document Jira sync (README, AGENTS_API.md, .env.example, DECISIONS.md)
+
+- **Agent:** feature-runner (worktree-agent-a1482e8045271bf70)
+- **Task:** JIRA-13 (99b49354-a830-469c-ba59-c79e3613d83d) — Documentation for the JIRA epic.
+- **Chain:** spec-keeper (claim via PATCH) → documentation (write) → reviewer (accuracy check) —
+  no implementer/test-engineer/security needed (docs-only, no app code changes).
+- **Justification for skipping implementer/test-engineer/security:** Pure documentation task; no
+  application code, no tests to write, no security surface.
+- **Files changed:**
+  - README.md — added "Jira Sync" section, updated Architecture table, What's included list,
+    Configuration table, Status section, Key tables list.
+  - AGENTS_API.md — added "Jira integration" section with endpoint recipes for jira-config
+    (POST/GET/PUT) and jira/sync (POST retry), field tables, limitations.
+  - .env.example — added explanatory note that per-project DB config is primary.
+  - DECISIONS.md — added DEC-4 through DEC-8 (push-only sync, trigger scope, best-effort inline,
+    per-project DB config with Fernet, transition cache refresh-once).
+- **Verification:** Reviewer agent cross-checked all documented field names, URL paths, and
+  behavioral claims against app/schemas.py, app/blueprints/jira_config.py,
+  app/blueprints/jira_sync_retry.py, app/jira_sync.py, app/jira_transitions.py, and app/crypto.py.
+  Live OpenAPI spec confirmed both endpoint paths exist. PASS.
+- **Commit:** abaef4b
+- **Branch:** feat/jira-13-docs (based on feat/jira-epic-integration)
+- **Task status:** done (version 3, completed via POST /complete with If-Match v2, verified via
+  follow-up GET: status=done, completed_at=2026-07-02T21:28:43.477967).

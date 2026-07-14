@@ -8,6 +8,10 @@ alembic>=1.13,<2.0
 psycopg[binary]>=3.1,<4.0
 gunicorn>=21.2
 python-dotenv>=1.0
+requests>=2.31,<3.0
+
+# Cryptography (Fernet encryption for Jira token storage — JIRA-2)
+cryptography>=42.0,<44.0
 
 # Test/dev (kept here so the image can run the suite; small footprint)
 pytest>=8.0

@@ -247,6 +247,107 @@ curl -s -X POST $B/projects/corsearch/tasks/claim-next \
 # Re-sending the identical request with the same key returns the SAME task.
 ```
 
+## Jira integration (per-project, optional)
+
+The server can push task lifecycle events to Jira Cloud. Sync fires automatically on task create
+(creates a Jira issue) and task complete (transitions the issue to "Done"). It is best-effort:
+failures never block the API response — they are stored on `task.jira_sync_error` and can be
+retried.
+
+### Configure Jira for a project
+
+```bash
+# Create config (POST — once per project):
+curl -s -H 'Content-Type: application/json' \
+  -X POST $B/projects/corsearch/jira-config \
+  -d '{
+    "base_url": "https://myco.atlassian.net",
+    "email": "bot@myco.com",
+    "api_token": "ATATT3xFf...",
+    "jira_project_key": "PROJ",
+    "enabled": true
+  }'
+# -> 201 {"base_url":"...","email":"...","jira_project_key":"PROJ","enabled":true,"has_token":true,"updated_at":"..."}
+```
+
+- `api_token` is write-only: encrypted with Fernet before storage, never returned in responses.
+  The response includes `has_token` (boolean) instead.
+- When `enabled` is `true` on create/update, the server warms the transition cache (fetches Jira
+  project statuses). A warmup failure is logged but does not block the config save.
+- Returns 409 if config already exists (use PUT to update).
+
+```bash
+# Read config:
+curl -s $B/projects/corsearch/jira-config
+# -> {"base_url":"...","email":"...","jira_project_key":"PROJ","enabled":true,"has_token":true,"updated_at":"..."}
+
+# Update config (PUT — partial update, all fields optional):
+curl -s -H 'Content-Type: application/json' \
+  -X PUT $B/projects/corsearch/jira-config \
+  -d '{"enabled": false}'
+# -> 200 (same shape as GET)
+```
+
+**Request fields (POST):**
+| Field | Type | Notes |
+|---|---|---|
+| `base_url` | string | **Required.** Jira instance URL, e.g. `https://myco.atlassian.net` |
+| `email` | string | **Required.** Jira user email for API auth |
+| `api_token` | string | **Required.** Jira API token (write-only, encrypted at rest) |
+| `jira_project_key` | string | **Required.** Jira project key, e.g. `PROJ` |
+| `enabled` | bool | Optional, default `false`; set `true` to activate sync |
+
+**Request fields (PUT — all optional):** Same fields as POST; only include those you want to change.
+
+**Response fields:**
+| Field | Type | Notes |
+|---|---|---|
+| `base_url` | string | |
+| `email` | string | |
+| `jira_project_key` | string | |
+| `enabled` | bool | |
+| `has_token` | bool | Whether an encrypted API token is stored |
+| `updated_at` | datetime | |
+
+### Retry failed Jira syncs
+
+```bash
+curl -s -X POST $B/projects/corsearch/jira/sync
+# -> {"synced": 3, "failed": 1}
+```
+
+Finds all tasks in the project that have `jira_sync_error` set OR are missing `jira_issue_key`
+(eligible for retry). For each:
+- No `jira_issue_key` → calls `sync_task_created` (creates the Jira issue).
+- Has `jira_issue_key` + status `done` → calls `sync_task_completed` (transitions to Done).
+- Has `jira_issue_key` + status not `done` → clears the stale error (nothing to retry yet).
+
+Returns 404 if the project has no enabled Jira config.
+
+**Response fields:**
+| Field | Type | Notes |
+|---|---|---|
+| `synced` | int | Tasks where sync succeeded (error cleared) |
+| `failed` | int | Tasks where sync still failed |
+
+### How sync appears on tasks
+
+Task responses (`GET /projects/{slug}/tasks/{id}`, `claim-next`, list endpoints) include two
+read-only fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| `jira_issue_key` | string or null | The linked Jira issue key, e.g. `PROJ-123` |
+| `jira_sync_error` | string or null | Last sync error message, if any |
+
+These are dump-only (never settable via POST/PATCH).
+
+### Current limitations
+
+- **Push-only:** Spec Server pushes to Jira; there is no pull/bidirectional sync.
+- **Trigger scope:** Sync fires on task create and task complete only — not on every status change.
+  Extending to all status transitions is tracked as JIRA-14 (deferred follow-up).
+
 ## Conventions agents must honour
 
 - Claim before you work; complete (or release) when done — never leave a task `in_progress` with no

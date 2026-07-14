@@ -47,6 +47,7 @@ from ..schemas import (
     TaskPatch,
     TaskQuery,
 )
+from ..jira_sync import sync_task_completed, sync_task_created
 from ..services import claim_next_task, close_active_lease, log_event
 
 blp = Blueprint(
@@ -131,6 +132,7 @@ class TasksCollection(MethodView):
             task.tags.append(_get_or_create_tag(project.id, key))
         db.session.add(task)
         db.session.commit()
+        sync_task_created(task)
         return task
 
 
@@ -251,6 +253,7 @@ class TaskComplete(MethodView):
                   message=f"completed {task.display_id}",
                   payload={k: v for k, v in data.items() if v})
         db.session.commit()
+        sync_task_completed(task)
         return task, 200, etag_headers(task)
 
 

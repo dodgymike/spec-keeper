@@ -159,6 +159,8 @@ class TaskOut(Schema):
     tags = fields.Method("get_tags", dump_only=True)
     commits = fields.List(fields.Nested(CommitRefOut), dump_only=True)
     notes = fields.List(fields.Nested(NoteOut), dump_only=True)
+    jira_issue_key = fields.Str(allow_none=True, dump_only=True, metadata={"description": "Linked Jira issue key, e.g. PROJ-123."})
+    jira_sync_error = fields.Str(allow_none=True, dump_only=True, metadata={"description": "Last Jira sync error message, if any."})
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
     completed_at = fields.DateTime(allow_none=True, dump_only=True)
@@ -336,6 +338,34 @@ STEP_STATUS_VALUES = ["pending", "running", "passed", "failed", "skipped"]
 RUN_STATUS_VALUES = ["running", "passed", "failed", "aborted"]
 
 
+# --------------------------------------------------------------------------- #
+# Jira Config
+# --------------------------------------------------------------------------- #
+class JiraConfigIn(Schema):
+    base_url = fields.Str(required=True, metadata={"description": "Jira instance base URL, e.g. https://myco.atlassian.net"})
+    email = fields.Str(required=True, metadata={"description": "Jira user email for API auth."})
+    api_token = fields.Str(required=True, metadata={"description": "Jira API token (write-only, encrypted at rest)."})
+    jira_project_key = fields.Str(required=True, metadata={"description": "Jira project key, e.g. PROJ."})
+    enabled = fields.Bool(load_default=False)
+
+
+class JiraConfigUpdate(Schema):
+    base_url = fields.Str(metadata={"description": "Jira instance base URL."})
+    email = fields.Str(metadata={"description": "Jira user email."})
+    api_token = fields.Str(metadata={"description": "New API token (write-only, encrypted at rest)."})
+    jira_project_key = fields.Str(metadata={"description": "Jira project key."})
+    enabled = fields.Bool()
+
+
+class JiraConfigOut(Schema):
+    base_url = fields.Str()
+    email = fields.Str()
+    jira_project_key = fields.Str()
+    enabled = fields.Bool()
+    has_token = fields.Bool(metadata={"description": "Whether an API token is configured."})
+    updated_at = fields.DateTime(dump_only=True)
+
+
 class ChainRunIn(Schema):
     started_by = fields.Str(allow_none=True)
 
@@ -370,3 +400,11 @@ class ChainStepIn(Schema):
 
 class ChainRunPatch(Schema):
     status = fields.Str(validate=validate.OneOf(RUN_STATUS_VALUES))
+
+
+# --------------------------------------------------------------------------- #
+# Jira Sync Retry (JIRA-11)
+# --------------------------------------------------------------------------- #
+class JiraSyncRetryOut(Schema):
+    synced = fields.Int(metadata={"description": "Tasks where sync succeeded (error cleared)."})
+    failed = fields.Int(metadata={"description": "Tasks where sync still failed."})
