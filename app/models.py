@@ -238,6 +238,20 @@ class Task(Base):
         back_populates="task", cascade="all, delete-orphan",
         order_by="TaskNote.created_at",
     )
+    outgoing_relations: Mapped[list["TaskRelation"]] = relationship(
+        foreign_keys="TaskRelation.src_task_id",
+        back_populates="src_task", cascade="all, delete-orphan",
+        order_by="TaskRelation.created_at",
+    )
+    incoming_relations: Mapped[list["TaskRelation"]] = relationship(
+        foreign_keys="TaskRelation.dst_task_id",
+        back_populates="dst_task", cascade="all, delete-orphan",
+        order_by="TaskRelation.created_at",
+    )
+    chain_runs: Mapped[list["ChainRun"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan",
+        order_by="ChainRun.started_at",
+    )
 
     @property
     def display_id(self) -> str:
@@ -290,6 +304,13 @@ class TaskRelation(Base):
         sa.Enum(RelationKind, name="relation_kind"), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
+
+    src_task: Mapped["Task"] = relationship(
+        foreign_keys=[src_task_id], back_populates="outgoing_relations"
+    )
+    dst_task: Mapped["Task"] = relationship(
+        foreign_keys=[dst_task_id], back_populates="incoming_relations"
+    )
 
 
 class CommitRef(Base):
@@ -494,6 +515,7 @@ class ChainRun(Base):
         cascade="all, delete-orphan",
         order_by="ChainStep.step_order",
     )
+    task: Mapped["Task"] = relationship(back_populates="chain_runs")
 
 
 class ChainStep(Base):

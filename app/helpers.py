@@ -1,6 +1,8 @@
 """Shared request helpers: lookups, optimistic-lock checks, auth."""
 from __future__ import annotations
 
+import uuid
+
 import sqlalchemy as sa
 from flask import current_app, request
 from flask_smorest import abort
@@ -44,7 +46,7 @@ def get_task_or_404(project_id: int, ident: str) -> Task:
     task = db.session.execute(
         sa.select(Task).where(Task.project_id == project_id, Task.key == ident)
     ).scalar_one_or_none()
-    if task is None:
+    if task is None and _is_uuid(ident):
         task = db.session.execute(
             sa.select(Task).where(
                 Task.project_id == project_id, Task.public_id == ident
@@ -53,6 +55,14 @@ def get_task_or_404(project_id: int, ident: str) -> Task:
     if task is None:
         abort(404, message=f"Task '{ident}' not found.")
     return task
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
 
 
 def check_if_match(task: Task) -> None:

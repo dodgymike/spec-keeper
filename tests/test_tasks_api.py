@@ -82,3 +82,55 @@ def test_supersede_relation(client, project):
     )
     old = client.get(f"{BASE}/OLD-1").get_json()
     assert old["status"] == "superseded"
+
+
+def test_get_relations_lists_both_directions(client, project):
+    _make_task(client, key="OLD-2")
+    _make_task(client, key="NEW-2")
+    client.post(
+        f"{BASE}/NEW-2/relations", json={"target": "OLD-2", "kind": "supersedes"}
+    )
+
+    src_relations = client.get(f"{BASE}/NEW-2/relations").get_json()
+    assert len(src_relations) == 1
+    assert src_relations[0]["direction"] == "outgoing"
+    assert src_relations[0]["kind"] == "supersedes"
+    assert src_relations[0]["task"] == "OLD-2"
+
+    dst_relations = client.get(f"{BASE}/OLD-2/relations").get_json()
+    assert len(dst_relations) == 1
+    assert dst_relations[0]["direction"] == "incoming"
+    assert dst_relations[0]["kind"] == "supersedes"
+    assert dst_relations[0]["task"] == "NEW-2"
+
+
+def test_get_relations_empty_when_none(client, project):
+    _make_task(client, key="LONE-1")
+    resp = client.get(f"{BASE}/LONE-1/relations")
+    assert resp.status_code == 200
+    assert resp.get_json() == []
+
+
+def test_get_relations_404_unknown_task(client, project):
+    resp = client.get(f"{BASE}/NOPE-1/relations")
+    assert resp.status_code == 404
+
+
+def test_delete_task_with_outgoing_relation(client, project):
+    """The new outgoing_relations/incoming_relations cascade is declared on both
+    sides of TaskRelation; deleting either end of an edge must not conflict."""
+    _make_task(client, key="SRC-1")
+    _make_task(client, key="DST-1")
+    rel = client.post(f"{BASE}/SRC-1/relations", json={"target": "DST-1", "kind": "blocks"})
+    assert rel.status_code == 201
+    resp = client.delete(f"{BASE}/SRC-1")
+    assert resp.status_code == 204
+
+
+def test_delete_task_with_incoming_relation(client, project):
+    _make_task(client, key="SRC-2")
+    _make_task(client, key="DST-2")
+    rel = client.post(f"{BASE}/SRC-2/relations", json={"target": "DST-2", "kind": "blocks"})
+    assert rel.status_code == 201
+    resp = client.delete(f"{BASE}/DST-2")
+    assert resp.status_code == 204

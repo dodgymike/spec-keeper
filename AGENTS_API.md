@@ -105,6 +105,16 @@ curl -s -H 'Content-Type: application/json' \
 ```
 `supersedes` also sets the target's status to `superseded` and links it back.
 
+List every relation touching a task, in both directions:
+
+```bash
+curl -s $B/projects/corsearch/tasks/RULEPERF-10/relations
+```
+Each entry has `direction` (`outgoing` if this task is the source of the edge, `incoming` if it's
+the target), `kind`, `task` (the *other* task's display id), and `created_at`. Empty array if the
+task has no relations — this is the only way to read relations back; there's no separate
+project-wide relations listing endpoint.
+
 ## Notes (comments on a task)
 
 Attach timestamped free-text notes to a task — investigation findings, context, hand-off detail.
@@ -232,6 +242,13 @@ curl -s -X PUT $B/projects/corsearch/chain-runs/$RUN/steps/security \
 
 # Close the run:
 curl -s -X PATCH $B/projects/corsearch/chain-runs/$RUN -d '{"status":"passed"}' -H 'Content-Type: application/json'
+```
+
+List every chain run for a task (oldest first, each with its steps) — useful when you know the
+task but not any run's `public_id`:
+
+```bash
+curl -s $B/projects/corsearch/tasks/RULEPERF-1/chain-runs
 ```
 
 ## Make claim/reserve safe to retry (idempotency)
