@@ -40,6 +40,7 @@ from ..schemas import (
     NoteIn,
     NoteOut,
     RelationIn,
+    RelationOut,
     ReleaseIn,
     StatusIn,
     TaskIn,
@@ -342,6 +343,37 @@ class TaskNotes(MethodView):
 
 @blp.route("/<ident>/relations")
 class TaskRelations(MethodView):
+    @blp.response(200, RelationOut(many=True))
+    def get(self, slug, ident):
+        """List every relation touching this task, both directions.
+
+        An outgoing edge means THIS task is the source (e.g. this task
+        'blocks' the listed one); an incoming edge means this task is the
+        target (e.g. the listed task 'blocks' this one).
+        """
+        require_api_key()
+        project = get_project_or_404(slug)
+        task = get_task_or_404(project.id, ident)
+        out = [
+            {
+                "direction": "outgoing",
+                "kind": rel.kind.value,
+                "task": rel.dst_task.display_id,
+                "created_at": rel.created_at,
+            }
+            for rel in task.outgoing_relations
+        ] + [
+            {
+                "direction": "incoming",
+                "kind": rel.kind.value,
+                "task": rel.src_task.display_id,
+                "created_at": rel.created_at,
+            }
+            for rel in task.incoming_relations
+        ]
+        out.sort(key=lambda r: r["created_at"])
+        return out
+
     @blp.arguments(RelationIn)
     @blp.response(201, MessageOut)
     def post(self, data, slug, ident):

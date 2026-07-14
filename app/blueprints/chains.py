@@ -37,6 +37,14 @@ def _get_run_or_404(project_id: int, run_pubid: str) -> ChainRun:
 
 @blp.route("/tasks/<ident>/chain-runs")
 class ChainRunsCollection(MethodView):
+    @blp.response(200, ChainRunOut(many=True))
+    def get(self, slug, ident):
+        """List every chain run for this task, oldest first (each with its steps)."""
+        require_api_key()
+        project = get_project_or_404(slug)
+        task = get_task_or_404(project.id, ident)
+        return task.chain_runs
+
     @blp.arguments(ChainRunIn)
     @blp.response(201, ChainRunOut)
     def post(self, data, slug, ident):

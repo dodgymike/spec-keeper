@@ -249,6 +249,15 @@ class RelationIn(Schema):
     kind = fields.Str(required=True, validate=validate.OneOf(RELATION_VALUES))
 
 
+class RelationOut(Schema):
+    """One edge from a task's perspective — direction tells you whether this task
+    is the source (outgoing) or the target (incoming) of the relation."""
+    direction = fields.Str()  # "outgoing" | "incoming"
+    kind = fields.Str()
+    task = fields.Str(metadata={"description": "Display id of the OTHER task in this edge."})
+    created_at = fields.DateTime(dump_only=True)
+
+
 class CommitIn(Schema):
     sha = fields.Str(required=True)
     repo = fields.Str(allow_none=True)

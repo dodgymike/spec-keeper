@@ -114,3 +114,24 @@ does a case-insensitive lookup; on cache miss it refreshes exactly once, then fa
 **Consequences.** Minimizes Jira API calls (one call per config save + at most one retry per
 unknown transition name). Handles Jira workflow changes gracefully (the single refresh picks up
 new statuses). Statuses deduplicated by ID across issue types.
+
+## DEC-9 — 2026-07-14 — Add GET for task relations and chain-runs (were write-only)
+
+**Context.** `POST /tasks/{ident}/relations` and `POST /tasks/{ident}/chain-runs` existed to
+*create* edges/runs, but there was no way to read them back short of a single chain-run's own
+`GET /chain-runs/{run_pubid}` (which requires already knowing its `public_id`). A full-project
+data extract (em-tracker's daily backup) surfaced this: relations created earlier in the project's
+life were completely invisible via the API, and there was no way to enumerate a task's chain-run
+history at all.
+
+**Decision.** Add `GET /tasks/{ident}/relations` (both directions, tagged `outgoing`/`incoming`
+from the requested task's perspective, each entry naming the *other* task) and
+`GET /tasks/{ident}/chain-runs` (oldest-first, each with its steps, reusing the existing
+`ChainRunOut` schema). Added `Task.outgoing_relations`/`incoming_relations`/`chain_runs`
+relationships and `TaskRelation.src_task`/`dst_task` back-populates to `models.py` — no schema
+migration needed (ORM-only, no new columns/tables).
+
+**Consequences.** Relation and chain-run data is now actually recoverable via the API instead of
+being write-only. No new project-wide "list all relations" endpoint was added — only per-task,
+matching the existing per-task shape of notes/commits. If a project-wide relations view is needed
+later, add it then rather than speculatively now.

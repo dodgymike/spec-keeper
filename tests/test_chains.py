@@ -68,3 +68,29 @@ def test_finish_run(client, project):
     body = resp.get_json()
     assert body["status"] == "passed"
     assert body["finished_at"] is not None
+
+
+def test_list_chain_runs_for_task(client, project):
+    _task(client, "CH-1")
+    first = _start_run(client, "CH-1")
+    second = _start_run(client, "CH-1")
+
+    resp = client.get(f"{BASE}/tasks/CH-1/chain-runs")
+    assert resp.status_code == 200, resp.get_json()
+    runs = resp.get_json()
+    assert len(runs) == 2
+    assert {r["public_id"] for r in runs} == {first, second}
+    # oldest first
+    assert [r["public_id"] for r in runs] == [first, second]
+
+
+def test_list_chain_runs_empty_when_none(client, project):
+    _task(client, "CH-2")
+    resp = client.get(f"{BASE}/tasks/CH-2/chain-runs")
+    assert resp.status_code == 200
+    assert resp.get_json() == []
+
+
+def test_list_chain_runs_404_unknown_task(client, project):
+    resp = client.get(f"{BASE}/tasks/NOPE-1/chain-runs")
+    assert resp.status_code == 404
