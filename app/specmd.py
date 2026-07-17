@@ -33,7 +33,7 @@ _STATUS_WORDS = {
 
 _TASK_RE = re.compile(r"^\s*[-*]\s*\[(?P<box>[ xX~\-])\]\s*(?P<body>.*)$")
 _KEY_RE = re.compile(r"^([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*)\s*(?:·|:|—|-)\s+(?P<rest>.*)$")
-_PROOF_RE = re.compile(r"_Proof:\s*(?P<cmd>.*?)_", re.IGNORECASE)
+_PROOF_RE = re.compile(r"_Proof:\s*(?P<cmd>.*)_", re.IGNORECASE)
 _PAREN_RE = re.compile(r"\(([^()]*)\)")
 
 
@@ -146,7 +146,6 @@ def _parse_task_body(box: str, body: str) -> ParsedTask:
             p.upper() in _PRIORITIES
             or p.upper() in _COMPONENTS
             or p.lower() in _STATUS_WORDS
-            or len(p.split()) <= 3
             for p in parts
         ):
             for p in parts:

@@ -1,0 +1,14 @@
+# Keep the build context small AND readable by the non-root user running the
+# build. `pgdata/` is the Postgres bind mount (docker-compose.yml) -- it is
+# root-owned, so leaving it in the context fails the build outright with
+#   "error from sender: open .../pgdata: permission denied"
+pgdata/
+
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.sql
