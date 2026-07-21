@@ -19,6 +19,12 @@
 # `local.tags` and `local.name_prefix` from the INFRA-1 skeleton. Provider
 # default_tags already stamps the mandatory tag set on every taggable resource;
 # explicit `tags = local.tags` blocks below are redundant-but-clear.
+#
+# PROD HARDENING (AUTH-8): set `enable_mfa = true` in the prod tfvars to turn on
+# OPTIONAL TOTP MFA on the human sign-in path AND advanced_security_mode=ENFORCED.
+# Default is false so dev/local stays frictionless and cost-free (advanced
+# security bills per monthly active user). The M2M client_credentials agents use
+# the machine flow and are UNAFFECTED by MFA either way. See var.enable_mfa.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -79,6 +85,27 @@ variable "ui_logout_urls" {
   ]
 }
 
+# AUTH-8 — prod hardening toggle for the HUMAN sign-in path.
+#
+# When true (prod):
+#   * The user pool enables OPTIONAL TOTP (software-token) MFA — see the
+#     mfa_configuration + software_token_mfa_configuration below.
+#   * Cognito advanced security (compromised-credential / adaptive risk
+#     detection) is switched to ENFORCED.
+#
+# Kept OFF by default so dev/local stays frictionless AND cost-free: advanced
+# security ("Plus" feature plan) is billed per monthly-active-user, so it must
+# only ever be on for prod. To harden prod, set `enable_mfa = true` in the prod
+# tfvars (see the header comment / infra/README.md prod section).
+#
+# This gates the HUMAN (PKCE) path only. The M2M client_credentials agents use
+# the machine flow and are UNAFFECTED by MFA regardless of this value.
+variable "enable_mfa" {
+  description = "Prod hardening for the human sign-in path: when true, enable OPTIONAL TOTP MFA on the user pool and set advanced_security_mode = ENFORCED. Default false keeps dev/local MFA-off and cost-free (advanced security is billed per MAU). M2M agents are unaffected either way."
+  type        = bool
+  default     = false
+}
+
 # ---------------------------------------------------------------------------
 # Locals
 # ---------------------------------------------------------------------------
@@ -132,8 +159,29 @@ resource "aws_cognito_user_pool" "this" {
     temporary_password_validity_days = 7
   }
 
-  # MFA left OFF for now (dev). Revisit for prod (SMS/TOTP) in a later task.
-  mfa_configuration = "OFF"
+  # AUTH-8 — MFA for the HUMAN (PKCE) sign-in path, gated by var.enable_mfa.
+  #
+  # Mode choice: OPTIONAL (not ON) when enabled. OPTIONAL lets already-existing
+  # users keep signing in while they enroll a TOTP authenticator on their own
+  # cadence — flipping straight to "ON" would immediately lock out every user
+  # who has not yet registered a factor. Dev/local stays "OFF" (default).
+  #
+  # Only TOTP (software_token) is enabled — no SMS, so there is no per-message
+  # SNS cost and no phone-number attribute requirement. The M2M
+  # client_credentials agents use the machine flow and never see an MFA
+  # challenge, so they are unaffected by this setting.
+  mfa_configuration = var.enable_mfa ? "OPTIONAL" : "OFF"
+
+  software_token_mfa_configuration {
+    enabled = var.enable_mfa
+  }
+
+  # AUTH-8 — Cognito advanced security (adaptive/compromised-credential risk
+  # detection). ENFORCED only in prod because it is billed per monthly active
+  # user under the Cognito "Plus" feature plan; OFF by default keeps dev free.
+  user_pool_add_ons {
+    advanced_security_mode = var.enable_mfa ? "ENFORCED" : "OFF"
+  }
 
   schema {
     name                     = "email"

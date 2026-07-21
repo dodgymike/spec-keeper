@@ -100,6 +100,30 @@ Never auto-apply changes that destroy or replace durable resources — the
 DynamoDB data tables carry `prevent_destroy` + PITR and must never be dropped
 silently.
 
+## Prod hardening (AUTH-8): Cognito MFA + advanced security
+
+The human sign-in path (Cognito Hosted UI, Authorization Code + PKCE) can be
+hardened for prod via a single toggle. In the **prod** `terraform.tfvars`:
+
+```hcl
+enable_mfa = true
+```
+
+This does two things (both OFF by default so dev/local stays frictionless and
+cost-free):
+
+- Sets the user pool `mfa_configuration = "OPTIONAL"` with TOTP
+  (`software_token_mfa_configuration`). **OPTIONAL** (not `ON`) is deliberate: it
+  lets existing users keep signing in while they enroll a TOTP authenticator,
+  rather than locking out everyone who has not yet registered a factor. TOTP
+  only — no SMS, so no per-message SNS cost.
+- Sets `advanced_security_mode = "ENFORCED"` (adaptive / compromised-credential
+  risk detection). This is billed **per monthly active user** under the Cognito
+  "Plus" feature plan, so keep it on for prod only.
+
+The M2M `client_credentials` agents use the machine flow and never receive an
+MFA challenge — they are unaffected by `enable_mfa` regardless of its value.
+
 ## Offline checks agents may run
 
 ```bash
