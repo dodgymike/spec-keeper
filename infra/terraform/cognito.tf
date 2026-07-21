@@ -181,9 +181,9 @@ variable "custom_message_lambda_arn" {
 # exec (idempotent). Toggle off where the apply environment has no cognito-idp
 # CLI access; the pool + WebAuthn config still stand up without it.
 variable "enable_managed_login_branding" {
-  description = "Create the default Managed Login (v2) branding for the human `ui` client via the AWS CLI (provider lacks the resource in 5.x). Requires cognito-idp:CreateManagedLoginBranding at apply time. Set false to skip."
+  description = "Create the default Managed Login (v2) branding for the human `ui` client via the AWS CLI (provider lacks the resource in 5.x). Requires cognito-idp:CreateManagedLoginBranding + a recent AWS CLI. Default false: the SPA uses NATIVE WebAuthn via the cognito-idp API, not the hosted Managed Login UI, so branding is unused (and older AWS CLIs reject the command)."
   type        = bool
-  default     = true
+  default     = false
 }
 
 # ---------------------------------------------------------------------------

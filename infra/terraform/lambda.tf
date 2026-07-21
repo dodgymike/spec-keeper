@@ -132,6 +132,10 @@ resource "aws_lambda_function" "app" {
       # users...) manages humans/agents in via cognito-idp admin actions (IAM in
       # iam.tf, scoped to this pool ARN). Unset would make those endpoints 501.
       COGNITO_USER_POOL_ID = aws_cognito_user_pool.this.id
+
+      # HA-2 — the invites table backing POST/GET /api/v1/admin/invites (the
+      # PreSignUp burn Lambda reads the same table). Unset => the endpoints 501.
+      INVITES_TABLE = aws_dynamodb_table.invites.name
     }
   }
 
