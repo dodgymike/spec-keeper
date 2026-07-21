@@ -116,6 +116,12 @@ def chain_step_prefix(run_pubid: str) -> str:
     return f"CRUN#{run_pubid}#STEP#"
 
 
+def chain_run_prefix() -> str:
+    """begins_with prefix for a project's chain-run item collection (runs +
+    their step children share the ``CRUN#`` prefix; filter by ``type``)."""
+    return "CRUN#"
+
+
 def idempotency_sk(endpoint: str, key: str) -> str:
     return f"IDEM#{endpoint}#{key}"
 

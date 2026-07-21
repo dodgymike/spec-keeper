@@ -361,3 +361,8 @@ class ChainStepIn(Schema):
 
 class ChainRunPatch(Schema):
     status = fields.Str(validate=validate.OneOf(RUN_STATUS_VALUES))
+
+
+class ChainRunQuery(Schema):
+    limit = fields.Int(load_default=200, validate=validate.Range(min=1, max=1000))
+    offset = fields.Int(load_default=0, validate=validate.Range(min=0))

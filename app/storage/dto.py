@@ -118,6 +118,14 @@ class CounterDTO:
 class EventDTO:
     event_type: str
     agent: str | None
+    # ``task_id`` is the Postgres-internal integer surrogate key of the related
+    # task (what ``EventOut.task_id`` dumps as an int). DynamoDB has no integer
+    # surrogate — tasks are addressed by ``public_id``/``key`` — so a Dynamo event
+    # leaves this ``None`` to keep the ``EventOut`` shape identical across backends
+    # (a uuid string cannot go through the ``fields.Int`` serializer). The task
+    # reference on DynamoDB events is carried on the item (``task_pubid``/
+    # ``task_key``) and echoed in the event ``message``/``payload`` so the activity
+    # timeline can still link an event to its task.
     task_id: int | None
     message: str | None
     payload: dict

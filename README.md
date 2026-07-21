@@ -83,9 +83,9 @@ mint a token, and `.env.example` for every knob.
   (`STORAGE_BACKEND=dynamodb`), with identical atomic-claim, atomic-reservation, and
   optimistic-lock (`If-Match`/412) guarantees on both (`app/storage/`).
 - **Append-only event log + decision records** — replace `AGENT_LOG.md` / `DECISIONS.md`; events are
-  auto-emitted on claim/complete/reserve.
+  auto-emitted on claim/complete/reserve/note/chain-run.
 - **Chain-run tracking** — record a task's pass through the mandated agent chain; a skipped step
-  needs a justification.
+  needs a justification. List a task's runs or every run in the project (with steps), paginated.
 - **Idempotency-Key** replay on `claim-next`/`reserve`; **lease reaper** (abandoned tasks become
   re-claimable); **pagination** on list endpoints.
 - **Alembic migrations**, **OpenAPI 3** + Swagger UI, **Docker** compose, and a **scheduled daily

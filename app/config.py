@@ -21,8 +21,11 @@ class Config:
     SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True}
 
     # --- Storage backend (DEC-4) ---------------------------------------
-    # Which storage adapter to use: "postgres" (reference/default) or, later,
-    # "dynamodb". Default keeps behaviour identical for local/Postgres runs.
+    # Which storage adapter to use: "postgres" (reference/default) or "dynamodb".
+    # Both are fully implemented and behave identically (parity enforced by
+    # tests/test_parity.py). Default keeps behaviour identical for local/Postgres
+    # runs; the dynamodb adapter reads DYNAMODB_TABLE / DYNAMODB_ENDPOINT_URL /
+    # AWS_* from the environment.
     STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "postgres")
 
     # --- Behaviour ------------------------------------------------------

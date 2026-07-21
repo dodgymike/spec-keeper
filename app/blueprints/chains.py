@@ -12,6 +12,7 @@ from ..schemas import (
     ChainRunIn,
     ChainRunOut,
     ChainRunPatch,
+    ChainRunQuery,
     ChainStepIn,
     ChainStepOut,
 )
@@ -24,12 +25,31 @@ blp = Blueprint(
 
 @blp.route("/tasks/<ident>/chain-runs")
 class ChainRunsCollection(MethodView):
+    @blp.arguments(ChainRunQuery, location="query")
+    @blp.response(200, ChainRunOut(many=True))
+    def get(self, args, slug, ident):
+        """List a task's chain runs (with their steps), newest first."""
+        require_api_key()
+        return current_app.storage.list_chain_runs(
+            slug, ident, limit=args["limit"], offset=args["offset"])
+
     @blp.arguments(ChainRunIn)
     @blp.response(201, ChainRunOut)
     def post(self, data, slug, ident):
         """Start a new chain run for a task."""
         require_api_key()
         return current_app.storage.create_chain_run(slug, ident, data.get("started_by"))
+
+
+@blp.route("/chain-runs")
+class ProjectChainRuns(MethodView):
+    @blp.arguments(ChainRunQuery, location="query")
+    @blp.response(200, ChainRunOut(many=True))
+    def get(self, args, slug):
+        """List every chain run in the project (with steps), newest first."""
+        require_api_key()
+        return current_app.storage.list_chain_runs(
+            slug, limit=args["limit"], offset=args["offset"])
 
 
 @blp.route("/chain-runs/<run_pubid>")

@@ -267,7 +267,18 @@ lines. Tasks are keyed by their human ID, so import upserts rather than duplicat
 ## Log your work and record decisions
 
 The append-only event stream replaces `AGENT_LOG.md`; decisions replace `DECISIONS.md`. Claim,
-complete, and reserve calls emit events automatically — you only POST events for free-form notes.
+complete, reserve, note, and chain-run calls emit events automatically — you only POST events for
+free-form notes.
+
+Auto-emitted `event_type`s include `chain_run` (a run was started; `payload={"run": "<run
+public_id>"}`) and `chain_step` (a step was upserted; `payload={"run": "<run public_id>", "step":
+"<step_name>", "status": "<status>"}`), alongside the existing `claimed`/`completed`/`reserved`/
+`note`/`decision` kinds.
+
+**Backend note:** `EventOut.task_id` is the internal integer id on Postgres, but is always `null`
+on the DynamoDB backend — DynamoDB has no integer surrogate key, so the task reference for a
+DynamoDB-backed event is carried in the event's `message`/`payload` instead. This is intentional;
+the `EventOut` shape itself is identical on both backends.
 
 ```bash
 # Free-form note:
@@ -319,6 +330,14 @@ curl -s -X PUT $B/projects/corsearch/chain-runs/$RUN/steps/security \
 
 # Close the run:
 curl -s -X PATCH $B/projects/corsearch/chain-runs/$RUN -d '{"status":"passed"}' -H 'Content-Type: application/json'
+```
+
+List chain runs, newest first (each with its steps embedded), paginated with `?limit` (default
+200, max 1000) and `?offset`:
+
+```bash
+curl -s "$B/projects/corsearch/tasks/RULEPERF-1/chain-runs"   # one task's runs
+curl -s "$B/projects/corsearch/chain-runs?limit=50"           # every run in the project
 ```
 
 ## Make claim/reserve safe to retry (idempotency)

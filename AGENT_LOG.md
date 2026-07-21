@@ -168,3 +168,8 @@ to the server's `/events` endpoint.
   `aws lambda update-function-code --zip-file fileb://build/lambda.zip` OR
   `terraform apply -var lambda_zip_path=$PWD/build/lambda.zip`. Migrations/`init-db` are a
   deploy step, never in the handler.
+
+## 2026-07-21 — SLS-12 + SLS-13 (feature-runner, code-only, uncommitted)
+- SLS-12: `list_chain_runs` on the StorageBackend Protocol + both adapters; `GET /tasks/{ident}/chain-runs` and `GET /chain-runs` (ChainRunOut, newest-first, `?limit`/`?offset`); auto-emit `chain_run`/`chain_step` events (identical shape on Postgres + DynamoDB).
+- SLS-13: DynamoDB ConsistentRead on post-write reloads + mutator pre-reads; reserve numeric-gap safe-window documented; idempotency store confirmed atomic; `EventDTO.task_id` divergence documented; `Query` `Limit` pushed into unfiltered pre-sorted GSI4 feed paths; `config.py` STORAGE_BACKEND comment de-staled.
+- Verify: Postgres-only 70 passed; cross-backend (postgres,dynamodb) 114 passed / 3 skipped. Chain: implementer → test-engineer → reviewer(PASS) → security(PASS) → documentation. NOT committed — files listed for coordinated commit.

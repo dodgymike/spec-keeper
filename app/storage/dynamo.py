@@ -145,9 +145,13 @@ class DynamoBackend:
         self.table = self._resource.Table(table)
 
     # ----- low-level helpers ------------------------------------------- #
-    def _get(self, pk: str, sk: str):
+    def _get(self, pk: str, sk: str, *, consistent: bool = False):
+        # ConsistentRead makes a same-request post-write reload strong on real
+        # AWS (base-table GetItem supports it; GSIs do not). DynamoDB Local is
+        # always strongly consistent, so this is a no-op there.
         try:
-            resp = self.table.get_item(Key={"PK": pk, "SK": sk})
+            resp = self.table.get_item(Key={"PK": pk, "SK": sk},
+                                       ConsistentRead=consistent)
         except (ClientError, BotoCoreError) as exc:  # pragma: no cover - infra
             raise BackendUnavailable(str(exc)) from exc
         return resp.get("Item")
@@ -170,6 +174,29 @@ class DynamoBackend:
             lek = resp.get("LastEvaluatedKey")
             if not lek:
                 return items
+            kwargs["ExclusiveStartKey"] = lek
+
+    def _query_first(self, n: int, **kwargs):
+        """Query returning at most ``n`` items, pushing ``Limit`` into DynamoDB
+        so a pre-sorted (e.g. newest-first) index page is not read in full.
+
+        Only safe on an already-ordered index path with NO post-filter (Limit is
+        applied by DynamoDB before any FilterExpression, so a filtered query must
+        still read the whole partition — those callers use ``_query`` instead)."""
+        items: list = []
+        kwargs = dict(kwargs)
+        if n <= 0:
+            return items
+        while True:
+            kwargs["Limit"] = n - len(items)
+            try:
+                resp = self.table.query(**kwargs)
+            except (ClientError, BotoCoreError) as exc:  # pragma: no cover
+                raise BackendUnavailable(str(exc)) from exc
+            items.extend(resp.get("Items", []))
+            lek = resp.get("LastEvaluatedKey")
+            if not lek or len(items) >= n:
+                return items[:n]
             kwargs["ExclusiveStartKey"] = lek
 
     def _transact(self, puts):
@@ -431,10 +458,11 @@ class DynamoBackend:
             item.pop("owner", None)
         return item
 
-    def _load_task_full(self, slug: str, pubid: str):
+    def _load_task_full(self, slug: str, pubid: str, *, consistent: bool = False):
         rows = self._query(
             KeyConditionExpression=Key("PK").eq(K.pk(slug))
-            & Key("SK").begins_with(K.task_prefix(pubid))
+            & Key("SK").begins_with(K.task_prefix(pubid)),
+            ConsistentRead=consistent,
         )
         base = None
         commits, notes = [], []
@@ -450,18 +478,22 @@ class DynamoBackend:
             raise NotFound(f"Task '{pubid}' not found.")
         return base, commits, notes
 
-    def _get_task_base(self, slug: str, ident: str):
-        """Resolve a task by human key (GSI3) then public_id (GetItem)."""
+    def _get_task_base(self, slug: str, ident: str, *, consistent: bool = False):
+        """Resolve a task by human key (GSI3) then public_id (GetItem).
+
+        The GSI3 key lookup is always eventually consistent (GSIs cannot be read
+        strongly), but the authoritative item is then fetched from the base table
+        where ``consistent`` yields a strong read-after-write for mutators."""
         rows = self._query(
             IndexName=K.GSI3,
             KeyConditionExpression=Key("GSI3PK").eq(K.gsi3_key_pk(slug, ident)),
         )
         if rows:
             pubid = rows[0]["SK"].split("#", 1)[1]
-            base = self._get(K.pk(slug), K.task_sk(pubid))
+            base = self._get(K.pk(slug), K.task_sk(pubid), consistent=consistent)
             if base is not None:
                 return base
-        base = self._get(K.pk(slug), K.task_sk(ident))
+        base = self._get(K.pk(slug), K.task_sk(ident), consistent=consistent)
         if base is None:
             raise NotFound(f"Task '{ident}' not found.")
         return base
@@ -496,8 +528,9 @@ class DynamoBackend:
             completed_at=_dt(base.get("completed_at")),
         )
 
-    def _dto_for(self, slug, base) -> TaskDTO:
-        base, commits, notes = self._load_task_full(slug, base["public_id"])
+    def _dto_for(self, slug, base, *, consistent: bool = False) -> TaskDTO:
+        base, commits, notes = self._load_task_full(
+            slug, base["public_id"], consistent=consistent)
         return self._task_dto(base, commits, notes)
 
     # ----- tasks: CRUD ------------------------------------------------- #
@@ -597,7 +630,7 @@ class DynamoBackend:
     def update_task(self, slug: str, ident: str, patch: dict,
                     expected_version: str | None) -> TaskDTO:
         self._project_item(slug)
-        base = self._get_task_base(slug, ident)
+        base = self._get_task_base(slug, ident, consistent=True)
         cur_v = int(_pyify(base["version"]))
         _check_version(cur_v, expected_version)
         data = dict(patch)
@@ -612,7 +645,7 @@ class DynamoBackend:
         base["updated_at"] = _now_iso()
         self._apply_task_gsi(base)
         self._put_task_versioned(base, cur_v)
-        return self._dto_for(slug, base)
+        return self._dto_for(slug, base, consistent=True)
 
     def delete_task(self, slug: str, ident: str) -> None:
         self._project_item(slug)
@@ -656,7 +689,7 @@ class DynamoBackend:
             return IdempotentOutcome()
         self._emit_event(slug, "claimed", agent=agent,
                          message=f"{agent} claimed {base.get('key') or base['public_id']}")
-        dto = self._dto_for(slug, base)
+        dto = self._dto_for(slug, base, consistent=True)
         if idempotency_key and serialize is not None:
             self._store_idem(slug, "claim-next", idempotency_key,
                              serialize(dto), 200)
@@ -751,7 +784,7 @@ class DynamoBackend:
     def complete_task(self, slug: str, ident: str, data: dict,
                       expected_version: str | None) -> TaskDTO:
         self._project_item(slug)
-        base = self._get_task_base(slug, ident)
+        base = self._get_task_base(slug, ident, consistent=True)
         cur_v = int(_pyify(base["version"]))
         _check_version(cur_v, expected_version)
         pubid = base["public_id"]
@@ -788,11 +821,11 @@ class DynamoBackend:
             self._transact(puts)
         except Conflict as exc:
             raise VersionConflict("Version conflict: re-read and retry.") from exc
-        return self._dto_for(slug, base)
+        return self._dto_for(slug, base, consistent=True)
 
     def release_task(self, slug: str, ident: str, reset_to: str) -> TaskDTO:
         self._project_item(slug)
-        base = self._get_task_base(slug, ident)
+        base = self._get_task_base(slug, ident, consistent=True)
         cur_v = int(_pyify(base["version"]))
         base["status"] = TaskStatus(reset_to).value
         base["owner"] = None
@@ -801,12 +834,12 @@ class DynamoBackend:
         base["updated_at"] = _now_iso()
         self._apply_task_gsi(base)
         self._put_task_versioned(base, cur_v)
-        return self._dto_for(slug, base)
+        return self._dto_for(slug, base, consistent=True)
 
     def set_status(self, slug: str, ident: str, status: str, note, has_note: bool,
                    expected_version: str | None) -> TaskDTO:
         self._project_item(slug)
-        base = self._get_task_base(slug, ident)
+        base = self._get_task_base(slug, ident, consistent=True)
         cur_v = int(_pyify(base["version"]))
         _check_version(cur_v, expected_version)
         base["status"] = TaskStatus(status).value
@@ -818,11 +851,11 @@ class DynamoBackend:
         base["updated_at"] = _now_iso()
         self._apply_task_gsi(base)
         self._put_task_versioned(base, cur_v)
-        return self._dto_for(slug, base)
+        return self._dto_for(slug, base, consistent=True)
 
     def add_commit(self, slug: str, ident: str, data: dict) -> TaskDTO:
         self._project_item(slug)
-        base = self._get_task_base(slug, ident)
+        base = self._get_task_base(slug, ident, consistent=True)
         pubid = base["public_id"]
         item = {
             "PK": K.pk(slug), "SK": K.commit_sk(pubid, data["sha"]),
@@ -835,7 +868,7 @@ class DynamoBackend:
             if not _is_conditional(exc):
                 raise BackendUnavailable(str(exc)) from exc  # pragma: no cover
             # duplicate (task, sha) -> dedupe silently (parity with Postgres)
-        return self._dto_for(slug, base)
+        return self._dto_for(slug, base, consistent=True)
 
     def list_task_notes(self, slug: str, ident: str) -> list[NoteDTO]:
         self._project_item(slug)
@@ -859,8 +892,8 @@ class DynamoBackend:
 
     def add_relation(self, slug: str, ident: str, target: str, kind: str) -> str:
         self._project_item(slug)
-        src = self._get_task_base(slug, ident)
-        dst = self._get_task_base(slug, target)
+        src = self._get_task_base(slug, ident, consistent=True)
+        dst = self._get_task_base(slug, target, consistent=True)
         kind_enum = RelationKind(kind)
         rel = {
             "PK": K.pk(slug),
@@ -903,6 +936,20 @@ class DynamoBackend:
             task_pubid = self._get_task_base(slug, task_key)["public_id"]
 
         # Atomic, per-item serialised increment -> distinct increasing value.
+        #
+        # Safe-window note (SLS-13): the split "ADD counter" then
+        # "TransactWriteItems(reservation + event)" cannot lose the UNIQUENESS or
+        # MONOTONICITY guarantee (invariant #2): the counter ADD is serialised by
+        # DynamoDB per item, so every caller reads back a distinct, strictly
+        # increasing value, and the audit row is written under
+        # attribute_not_exists(SK) (the UNIQUE(namespace,value) backstop). The
+        # ADD cannot be folded into the TransactWriteItems because a transaction
+        # returns no attribute values, so the just-allocated value could not be
+        # read back to build the RES#<value> SK. The ONLY failure mode of the
+        # split is a CONTIGUITY gap: if the process dies between the ADD and the
+        # transact, value N is consumed without an audit row (a skipped number,
+        # never a duplicate). Reservations are an append-only allocator where a
+        # gap is harmless, so this window is accepted rather than closed.
         try:
             resp = self.table.update_item(
                 Key={"PK": K.pk(slug), "SK": K.counter_sk(namespace)},
@@ -1012,12 +1059,22 @@ class DynamoBackend:
         task_pubid = None
         if "task" in flt:
             task_pubid = self._get_task_base(slug, flt["task"])["public_id"]
-        rows = self._query(
+        offset, limit = flt["offset"], flt["limit"]
+        has_filter = (
+            "event_type" in flt or "agent" in flt or task_pubid is not None
+        )
+        query = dict(
             IndexName=K.GSI4,
             KeyConditionExpression=Key("GSI4PK").eq(
                 K.gsi4_feed_pk(slug, K.FEED_EVENT)),
             ScanIndexForward=False,
         )
+        # GSI4 is already newest-first; with no post-filter we only need the top
+        # (offset+limit) items, so push Limit into DynamoDB instead of reading the
+        # whole feed partition. A filtered query must read it all (Limit applies
+        # before FilterExpression).
+        rows = (self._query(**query) if has_filter
+                else self._query_first(offset + limit, **query))
 
         def keep(r):
             if "event_type" in flt and r.get("event_type") != flt["event_type"]:
@@ -1029,7 +1086,6 @@ class DynamoBackend:
             return True
 
         rows = [r for r in rows if keep(r)]
-        offset, limit = flt["offset"], flt["limit"]
         rows = rows[offset:offset + limit]
         return [self._event_dto(r) for r in rows]
 
@@ -1043,21 +1099,30 @@ class DynamoBackend:
             base = self._get_task_base(slug, flt["task"])
             task_display = base.get("key") or base["public_id"]
 
+        offset, limit = flt["offset"], flt["limit"]
+        cap = offset + limit
+        has_filter = (
+            "author" in flt or "epic" in flt or "since" in flt
+            or task_display is not None
+        )
+
+        def _feed(kind):
+            # Each GSI4 feed partition is newest-first; unfiltered, the global top
+            # `cap` after merge must come from each partition's own top `cap`, so
+            # push Limit and skip reading the whole partition on large projects.
+            q = dict(
+                IndexName=K.GSI4,
+                KeyConditionExpression=Key("GSI4PK").eq(
+                    K.gsi4_feed_pk(slug, kind)),
+                ScanIndexForward=False,
+            )
+            return self._query(**q) if has_filter else self._query_first(cap, **q)
+
         rows = []
         if want_task:
-            rows += self._query(
-                IndexName=K.GSI4,
-                KeyConditionExpression=Key("GSI4PK").eq(
-                    K.gsi4_feed_pk(slug, K.FEED_TASK_NOTE)),
-                ScanIndexForward=False,
-            )
+            rows += _feed(K.FEED_TASK_NOTE)
         if want_epic:
-            rows += self._query(
-                IndexName=K.GSI4,
-                KeyConditionExpression=Key("GSI4PK").eq(
-                    K.gsi4_feed_pk(slug, K.FEED_EPIC_NOTE)),
-                ScanIndexForward=False,
-            )
+            rows += _feed(K.FEED_EPIC_NOTE)
 
         def keep(r):
             if "author" in flt and r.get("author") != flt["author"]:
@@ -1072,7 +1137,6 @@ class DynamoBackend:
 
         rows = [r for r in rows if keep(r)]
         rows.sort(key=lambda r: r["created_at"], reverse=True)
-        offset, limit = flt["offset"], flt["limit"]
         rows = rows[offset:offset + limit]
         return [ProjectNoteDTO(scope=r["scope"], task=r.get("task"),
                                epic=r.get("epic"), author=r.get("author"),
@@ -1147,7 +1211,7 @@ class DynamoBackend:
 
     def create_chain_run(self, slug: str, ident: str, started_by) -> ChainRunDTO:
         self._project_item(slug)
-        base = self._get_task_base(slug, ident)
+        base = self._get_task_base(slug, ident, consistent=True)
         run_pubid = _uuid()
         item = {
             "PK": K.pk(slug), "SK": K.chain_run_sk(run_pubid), "type": "chain_run",
@@ -1156,7 +1220,33 @@ class DynamoBackend:
             "started_at": _now_iso(), "finished_at": None,
         }
         self._put(item)
+        self._emit_event(
+            slug, "chain_run", agent=started_by, task_pubid=base["public_id"],
+            task_key=base.get("key"),
+            message=f"chain run started for {base.get('key') or base['public_id']}",
+            payload={"run": run_pubid})
         return self._chain_run_dto(slug, item)
+
+    def list_chain_runs(self, slug: str, task_ident=None, *, limit=200,
+                        offset=0) -> list[ChainRunDTO]:
+        self._project_item(slug)
+        task_pubid = None
+        if task_ident is not None:
+            task_pubid = self._get_task_base(slug, task_ident)["public_id"]
+        # The CRUN# collection holds runs + their step children; the type filter
+        # forces a full-partition read, so we sort/paginate client-side and only
+        # materialise steps (a per-run query in _chain_run_dto) for the page.
+        rows = self._query(
+            KeyConditionExpression=Key("PK").eq(K.pk(slug))
+            & Key("SK").begins_with(K.chain_run_prefix()),
+            FilterExpression=Attr("type").eq("chain_run"),
+        )
+        if task_pubid is not None:
+            rows = [r for r in rows if r.get("task") == task_pubid]
+        # started_at desc, public_id as a stable tie-break for same-instant runs.
+        rows.sort(key=lambda r: (r["started_at"], r["public_id"]), reverse=True)
+        rows = rows[offset:offset + limit]
+        return [self._chain_run_dto(slug, r) for r in rows]
 
     def get_chain_run(self, slug: str, run_pubid: str) -> ChainRunDTO:
         self._project_item(slug)
@@ -1175,7 +1265,7 @@ class DynamoBackend:
     def upsert_chain_step(self, slug: str, run_pubid: str, step_name: str,
                           data: dict) -> ChainStepDTO:
         self._project_item(slug)
-        self._chain_run_item(slug, run_pubid)
+        run = self._chain_run_item(slug, run_pubid)
         item = {
             "PK": K.pk(slug), "SK": K.chain_step_sk(run_pubid, step_name),
             "type": "chain_step", "run": run_pubid, "step_name": step_name,
@@ -1185,6 +1275,11 @@ class DynamoBackend:
             "output_ref": data.get("output_ref"),
         }
         self._put(item)
+        self._emit_event(
+            slug, "chain_step", agent=data.get("agent"),
+            task_pubid=run.get("task"),
+            message=f"chain step {step_name} -> {data['status']}",
+            payload={"run": run_pubid, "step": step_name, "status": data["status"]})
         return self._chain_step_dto(item)
 
     # ----- idempotency ------------------------------------------------- #

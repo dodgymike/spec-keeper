@@ -719,9 +719,27 @@ class PostgresBackend:
                        started_by=started_by, status="running")
         db.session.add(run)
         db.session.flush()
+        log_event(project.id, "chain_run", agent=started_by, task_id=task.id,
+                  message=f"chain run started for {task.display_id}",
+                  payload={"run": run.public_id})
+        db.session.flush()
         dto = _chain_run_dto(run)
         db.session.commit()
         return dto
+
+    def list_chain_runs(self, slug: str, task_ident=None, *, limit=200,
+                        offset=0) -> list[ChainRunDTO]:
+        project = self._project(slug)
+        query = sa.select(ChainRun).where(ChainRun.project_id == project.id)
+        if task_ident is not None:
+            task = self._task(project.id, task_ident)
+            query = query.where(ChainRun.task_id == task.id)
+        query = (
+            query.order_by(ChainRun.started_at.desc(), ChainRun.id.desc())
+            .offset(offset).limit(limit)
+        )
+        rows = db.session.execute(query).scalars().all()
+        return [_chain_run_dto(r) for r in rows]
 
     def get_chain_run(self, slug: str, run_pubid: str) -> ChainRunDTO:
         project = self._project(slug)
@@ -756,6 +774,12 @@ class PostgresBackend:
         step.status = data["status"]
         step.skip_justification = data.get("skip_justification")
         step.output_ref = data.get("output_ref")
+        db.session.flush()
+        log_event(project.id, "chain_step", agent=data.get("agent"),
+                  task_id=run.task_id,
+                  message=f"chain step {step_name} -> {data['status']}",
+                  payload={"run": run.public_id, "step": step_name,
+                           "status": data["status"]})
         db.session.flush()
         dto = _chain_step_dto(step)
         db.session.commit()
