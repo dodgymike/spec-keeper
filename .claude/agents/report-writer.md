@@ -41,6 +41,8 @@ You are the report author. You own a single self-contained HTML report that tell
 
 On completion, POST to the task you worked (notes are append-only; `author=report-writer`):
 
+> **Against the deployed server** attach the Cognito bearer token to this POST — `-H "Authorization: Bearer $TOKEN"` (mint/refresh via `scripts/agent_token.py`; needs `tasks.write`). Locally auth is off, so no header is needed.
+
 - `kind=report` — what tab you added, the images used, and the source journal notes you drew from.
 - `kind=model` — `model=<exact-id>; tokens_in=<N>; tokens_out=<N>; tokens_total=<N>`.
 

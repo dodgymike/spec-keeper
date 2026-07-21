@@ -184,6 +184,23 @@ optimistic-lock/412 contract — passes identically on both backends.
 | `API_KEYS` | _(empty)_ | Comma-separated bearer tokens (legacy static auth). Empty ⇒ auth off (local-only). Ignored if `COGNITO_ISSUER` is set. |
 | `COGNITO_ISSUER` | _(empty)_ | OIDC issuer for Cognito RS256 JWT auth (AUTH-2). When set, takes precedence over `API_KEYS`. See `AGENTS_API.md` → "Authentication" and `.env.example` for the full `COGNITO_*`/`JWKS_*`/`AUTH_SCOPE_*` knob set. |
 | `CORS_ORIGINS` | _(empty)_ | Comma-separated exact-match browser-origin allow-list for the dashboard (AUTH-7). Empty ⇒ CORS off. `*` is never honoured. |
+| `AGENT_CLIENT_SECRET_ARN` | _(empty)_ | **Agent-side, not server.** Secrets Manager ARN holding an agent's Cognito M2M `client_id`/`client_secret`/`token_endpoint`/`scopes`; read by `scripts/agent_token.py` to mint tokens against a deployed server. Prefer this over the inline `AGENT_*` fields. |
+| `AGENT_CLIENT_ID` / `AGENT_CLIENT_SECRET` / `AGENT_TOKEN_ENDPOINT` / `AGENT_SCOPES` | _(empty)_ | Inline agent client credentials for dev/CI, as an alternative to the ARN. Never commit a real `AGENT_CLIENT_SECRET`. |
+
+### Secrets & tokens
+
+- **Cognito M2M client secrets live in AWS Secrets Manager**, referenced by ARN (created by
+  `infra/terraform/cognito.tf` → output `cognito_m2m_secret_arns`). They are **never** in the repo,
+  in `*.tfvars`, in terraform outputs, or in git — grant each agent's role
+  `secretsmanager:GetSecretValue` on its own ARN only.
+- **The server needs no secret at rest.** It authenticates callers by validating their JWT against
+  Cognito's **public** JWKS (`COGNITO_JWKS_URI`); it never holds a client secret. Only agents
+  (clients) hold credentials, and only to mint tokens.
+- `.env` is **gitignored**; `.env.example` documents every knob with safe empty defaults. Set
+  Cognito/agent values in your local `.env` (or inject at deploy time), never in a committed file.
+- Minting/refreshing tokens for API calls is `scripts/agent_token.py` — it keeps the token in
+  memory, refreshes on expiry/401, and never prints the secret or token. See `AGENTS_API.md` →
+  "Authenticating to the deployed server".
 
 ## Backups
 

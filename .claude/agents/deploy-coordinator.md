@@ -61,6 +61,8 @@ What was applied (terraform targets · migrations · Lambdas redeployed, flaggin
 
 On completion, POST to the task you worked (notes are append-only; use your agent slug as `author`):
 
+> **Against the deployed server** attach the Cognito bearer token to this POST — `-H "Authorization: Bearer $TOKEN"` (mint/refresh via `scripts/agent_token.py`; needs `tasks.write`). Locally auth is off, so no header is needed.
+
 - `kind=report` — your outcome: approach, files changed, findings/evidence (concise).
 - `kind=model` — `model=<exact-id>; tokens_in=<N>; tokens_out=<N>; tokens_total=<N>`.
 

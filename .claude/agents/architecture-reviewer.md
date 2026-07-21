@@ -32,6 +32,8 @@ Return: (1) a component / data-flow map; (2) prioritized findings P0/P1/P2 each 
 
 On completion, POST to the task you worked (notes are append-only; use your agent slug as `author`):
 
+> **Against the deployed server** attach the Cognito bearer token to this POST — `-H "Authorization: Bearer $TOKEN"` (mint/refresh via `scripts/agent_token.py`; needs `tasks.write`). Locally auth is off, so no header is needed.
+
 - `kind=report` — your outcome: approach, findings, files read (concise).
 - `kind=response` — your verdict (PASS / FAIL / CHANGES-REQUESTED) + key points. Post this even
   though you do not change code — your verdict is the signal the journal and report-writer depend on.

@@ -8,6 +8,12 @@ Base URL: `http://localhost:8080/api/v1`. Every request needs `Authorization: Be
 under whichever auth mode is configured — see "Authentication" below for which kind of token
 and which scope a given call needs.
 
+**Storage backend is transparent.** `STORAGE_BACKEND` selects Postgres (default) or DynamoDB; the
+HTTP API — every route, status code, and concurrency guarantee (atomic claim, collision-proof
+reservation, `If-Match`/412 optimistic locking, lease semantics, idempotency) — is **identical on
+both**. Parity is enforced by `tests/test_parity.py`, which runs the same behaviour suite against
+both backends. Agents never need to know which backend is live.
+
 ## Authentication
 
 Auth is evaluated per request with a precedence ladder (`app/helpers.require_api_key`):
@@ -48,6 +54,45 @@ A granted scope may be either the bare name (`tasks.write`) or the full
 **Failure modes:** missing/malformed/expired/wrong-audience/wrong-issuer JWT (or a missing/wrong
 static key) → **401**; a valid, verified token that simply lacks the required scope → **403**.
 Both use the standard flask-smorest `{code, status, message}` error envelope.
+
+### Authenticating to the deployed server
+
+Locally the server runs with **auth off** — no `Authorization` header, no token, nothing to do.
+Everything below matters only against a deployed server that has `COGNITO_ISSUER` set.
+
+**Scope → route mapping** (what each call needs; see the table above for the authoritative form):
+`GET`/`HEAD` → `tasks.read`; task/epic/reservation/note/commit/log/chain mutations → `tasks.write`;
+project/agent admin (create/update a project or the agent roster) → `projects.admin`. An M2M client
+is granted the scopes it needs; request them in the `client_credentials` call.
+
+**Mint a token by hand** (the raw flow — curl the token endpoint, then Bearer the JWT):
+
+```bash
+TOKEN=$(curl -s -X POST "$AGENT_TOKEN_ENDPOINT" \
+  -u "$AGENT_CLIENT_ID:$AGENT_CLIENT_SECRET" \
+  -d grant_type=client_credentials -d scope="$AGENT_SCOPES" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+curl -s -H "Authorization: Bearer $TOKEN" "$B/projects/spec-server/tasks?status=todo"
+```
+
+**Use the helper** (recommended): `scripts/agent_token.py` does the `client_credentials` grant,
+**caches the token in memory, and refreshes it on expiry or on a 401** — so agents never juggle
+token lifetimes. It reads the client id/secret/endpoint/scopes from env (`AGENT_CLIENT_ID`,
+`AGENT_CLIENT_SECRET`, `AGENT_TOKEN_ENDPOINT`, `AGENT_SCOPES`) or, better, from a Secrets Manager
+secret ARN (`AGENT_CLIENT_SECRET_ARN` — the exact JSON blob `infra/terraform/cognito.tf` writes).
+It never prints or logs the secret or the token.
+
+```python
+from scripts.agent_token import authorized_request, get_token
+
+# One-liner: a self-refreshing Bearer token for a manual call.
+status, body = authorized_request("GET", f"{B}/projects/spec-server/tasks?status=todo")
+
+# Or grab the raw token to build your own request:
+headers = {"Authorization": f"Bearer {get_token()}"}
+```
+
+`authorized_request` retries once on a 401 after re-minting, which is exactly the token-expiry case.
 
 ## The workflow → API mapping
 

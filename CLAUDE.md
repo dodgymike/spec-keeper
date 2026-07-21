@@ -142,13 +142,34 @@ Layout:
 
 ## Concurrency invariants (do not regress these)
 
-- **Optimistic locking on tasks.** `tasks.version` is the ETag. Mutating a task can send
-  `If-Match: "v<n>"`; a mismatch returns **412**. Every task mutation increments `version`.
-- **Atomic claim.** `claim-next` uses `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`. Do not replace
-  it with a read-then-update — that reintroduces the double-claim race.
-- **Atomic reservation.** `reserve_number` uses `INSERT ... ON CONFLICT (project_id, namespace)
-  DO UPDATE SET current_value = current_value + 1 RETURNING`. A `UNIQUE(project_id, namespace,
-  value)` on `reservations` is the backstop. Do not replace with read-max-plus-one.
+Three guarantees hold on **both** backends (`STORAGE_BACKEND=postgres|dynamodb`) with identical
+observable behaviour. Each is realised by a backend-specific primitive — the Postgres reference and
+its DynamoDB equivalent are listed side by side. Never downgrade either to a read-then-write.
+See `STORAGE_ABSTRACTION_DEEPDIVE.md` §4 for the full mapping and the "Backend parity (hard rule)"
+section below for why divergence is a bug, not a "backend difference".
+
+- **Optimistic locking on tasks.** `tasks.version` is the ETag; `If-Match: "v<n>"` on a mutation
+  returns **412** on mismatch, and every task mutation increments `version`.
+  - *Postgres:* the `version` column compared in the `UPDATE ... WHERE version = :expected`.
+  - *DynamoDB:* a `ConditionExpression version = :expected` on the guarded `PutItem`/`UpdateItem`;
+    a `ConditionalCheckFailedException` → `VersionConflict` → 412.
+- **Atomic claim (exactly one winner).** `claim-next` hands each of N racing callers a distinct task.
+  - *Postgres:* `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`, then update.
+  - *DynamoDB:* a GSI1 candidate `Query` (status+priority) + a conditional `UpdateItem`
+    (`attribute_not_exists(owner) AND status = todo`), retrying the next candidate on
+    `ConditionalCheckFailed`. Two racers never both win.
+- **Atomic reservation (collision-proof numbering).** `reserve_number` returns a unique,
+  monotonically increasing value per `(project, namespace)`.
+  - *Postgres:* `INSERT ... ON CONFLICT (project_id, namespace) DO UPDATE SET current_value =
+    current_value + 1 RETURNING`, backstopped by `UNIQUE(project_id, namespace, value)`.
+  - *DynamoDB:* a per-item atomic `ADD current_value :1` on the counter item, backstopped by a
+    conditional `PutItem` on a `UNIQUE(namespace, value)` guard item.
+  - Do not replace either with read-max-plus-one.
+
+**Multi-item atomicity:** where Postgres relies on a single transaction to write several rows at
+once — `complete` (task + commit + lease + event), `supersedes` (relation + destination-task flip) —
+the DynamoDB adapter uses `TransactWriteItems` to keep the write all-or-nothing. Reservation's
+audit-row + counter + event likewise commit in one `TransactWriteItems`.
 
 ## Backend parity (hard rule)
 
@@ -173,8 +194,17 @@ MUST always have **feature parity and identical observable behaviour**. This is 
 
 - Never commit real secrets. `.env` is gitignored; `.env.example` documents the knobs.
 - The optional `API_KEYS` bearer auth is for shared deployments; the default (empty) is local-only.
+- **Cognito M2M client secrets live in AWS Secrets Manager** (referenced by ARN — see
+  `infra/terraform/cognito.tf` output `cognito_m2m_secret_arns`), **never** in the repo, `*.tfvars`,
+  terraform outputs, or git. Grant each agent's role `secretsmanager:GetSecretValue` on its own ARN.
+- **The server holds no secret at rest for JWT auth** — it validates tokens against Cognito's public
+  JWKS (`COGNITO_JWKS_URI`). Only agents (clients) hold credentials, to mint tokens via
+  `scripts/agent_token.py` (which never prints/logs the secret or token). See README → "Secrets &
+  tokens" and `AGENTS_API.md` → "Authenticating to the deployed server".
 - SQL must stay parameterized (SQLAlchemy core / bound params) — never string-format user input
-  into SQL. The security agent flags any raw f-string SQL with user data.
+  into SQL. The security agent flags any raw f-string SQL with user data. (The DynamoDB adapter
+  applies the same rule: values bind via `ExpressionAttributeValues`, never formatted into an
+  expression string.)
 
 ## Parallel-agent coordination
 
