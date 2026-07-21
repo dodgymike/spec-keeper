@@ -2,6 +2,7 @@ import { Route, Routes } from "react-router-dom";
 import { AppLayout } from "./components/AppLayout";
 import { ActivityPage } from "./pages/ActivityPage";
 import { CoordinationPage } from "./pages/CoordinationPage";
+import { ProgressPage } from "./pages/ProgressPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 
@@ -17,6 +18,7 @@ export default function App() {
         <Route path="/" element={<ProjectsPage />} />
         <Route path="/projects/:slug" element={<ProjectDetailPage />} />
         <Route path="/projects/:slug/activity" element={<ActivityPage />} />
+        <Route path="/projects/:slug/progress" element={<ProgressPage />} />
         <Route path="/coordination" element={<CoordinationPage />} />
       </Routes>
     </AppLayout>

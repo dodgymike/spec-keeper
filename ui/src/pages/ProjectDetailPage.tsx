@@ -90,6 +90,12 @@ export function ProjectDetailPage() {
             </span>
           )}
           <Link
+            to={`/projects/${encodeURIComponent(slug)}/progress`}
+            className="project-detail-page__activity-link"
+          >
+            Progress
+          </Link>
+          <Link
             to={`/projects/${encodeURIComponent(slug)}/activity`}
             className="project-detail-page__activity-link"
           >

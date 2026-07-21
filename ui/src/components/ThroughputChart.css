@@ -1,0 +1,46 @@
+.throughput-chart {
+  margin: 0;
+}
+
+.throughput-chart--empty {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.throughput-chart__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.throughput-chart__axis {
+  stroke: var(--color-border);
+  stroke-width: 1;
+}
+
+.throughput-chart__bar {
+  fill: var(--color-accent);
+}
+
+.throughput-chart__line {
+  fill: none;
+  stroke: var(--color-status-done);
+  stroke-width: 2;
+}
+
+.throughput-chart__x-label,
+.throughput-chart__y-label {
+  font-family: var(--font-family-base);
+  font-size: var(--font-size-xs);
+  fill: var(--color-text-muted);
+}
+
+.throughput-chart__x-label {
+  text-anchor: middle;
+}
+
+.throughput-chart__caption {
+  margin-top: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}

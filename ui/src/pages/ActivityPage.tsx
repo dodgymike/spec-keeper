@@ -130,6 +130,12 @@ export function ActivityPage() {
           {lastUpdated !== null && (
             <span className="activity-page__updated">Updated {formatRelativeTime(now - lastUpdated)}</span>
           )}
+          <Link
+            to={`/projects/${encodeURIComponent(slug)}/progress`}
+            className="activity-page__progress-link"
+          >
+            Progress
+          </Link>
           <button type="button" className="activity-page__refresh-button" onClick={refresh}>
             Refresh
           </button>

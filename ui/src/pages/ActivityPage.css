@@ -36,7 +36,8 @@
 }
 
 .activity-page__refresh-button,
-.activity-page__retry-button {
+.activity-page__retry-button,
+.activity-page__progress-link {
   padding: var(--space-1) var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -46,8 +47,14 @@
   cursor: pointer;
 }
 
+.activity-page__progress-link {
+  text-decoration: none;
+  display: inline-block;
+}
+
 .activity-page__refresh-button:hover,
-.activity-page__retry-button:hover {
+.activity-page__retry-button:hover,
+.activity-page__progress-link:hover {
   border-color: var(--color-accent);
 }
 
