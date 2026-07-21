@@ -150,6 +150,25 @@ Layout:
   DO UPDATE SET current_value = current_value + 1 RETURNING`. A `UNIQUE(project_id, namespace,
   value)` on `reservations` is the backstop. Do not replace with read-max-plus-one.
 
+## Backend parity (hard rule)
+
+The storage backend is **switchable** (`STORAGE_BACKEND=postgres|dynamodb`), and the two backends
+MUST always have **feature parity and identical observable behaviour**. This is non-negotiable:
+
+- Every access pattern and every guarantee above (atomic claim, collision-proof reservation,
+  optimistic locking / 412, lease semantics, idempotency, notes/relations/commits, import/export)
+  must behave the **same** on both backends — same inputs → same outputs, same status codes, same
+  error semantics. A behaviour that holds on one backend but not the other is a **bug**, not a
+  backend "difference".
+- **No feature lands on one backend only.** If you add or change anything in the storage layer,
+  implement it in BOTH adapters (Postgres reference + DynamoDB) in the same task, or the task is
+  not done.
+- The **adapter-parity test suite** (SLS-8) is the enforcement mechanism: the concurrency and
+  behaviour tests run against BOTH backends (Postgres + DynamoDB Local) and must pass on both.
+  A change that can't pass on both backends is not mergeable — fix the adapter, don't skip the test.
+- `data-reviewer` and `reliability-reviewer` explicitly check adapter parity; any divergence is at
+  least a P1 finding.
+
 ## Secrets & safety (hard rules)
 
 - Never commit real secrets. `.env` is gitignored; `.env.example` documents the knobs.

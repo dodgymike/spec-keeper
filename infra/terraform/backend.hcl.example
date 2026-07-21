@@ -1,0 +1,15 @@
+# backend.hcl.example
+# Copy to backend.hcl (gitignored) and fill in the values produced by the
+# one-time remote-state bootstrap (see ../README.md). Then:
+#
+#   terraform init -backend-config=backend.hcl
+#
+# The state bucket and lock table are created ONCE, out-of-band, before the
+# first init (chicken-and-egg). Do NOT commit backend.hcl — the bucket name may
+# encode account-specific values.
+
+bucket         = "spec-server-tfstate-REPLACE_WITH_SUFFIX"
+key            = "spec-server/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "spec-server-tflock"
+encrypt        = true

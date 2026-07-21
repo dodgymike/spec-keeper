@@ -22,3 +22,13 @@ backups/
 /scratch/
 *.tmp
 .DS_Store
+
+# Terraform (infra/) — never commit local state, provider plugins, or filled-in
+# configs. The *.example templates ARE committed.
+infra/terraform/.terraform/
+*.tfstate
+*.tfstate.*
+infra/terraform/backend.hcl
+infra/terraform/terraform.tfvars
+*.tfplan
+tfplan
