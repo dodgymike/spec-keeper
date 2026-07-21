@@ -2,8 +2,9 @@
 
 ``make_storage`` selects a ``StorageBackend`` adapter from ``STORAGE_BACKEND``
 (default ``"postgres"``), so the whole app is backend-agnostic behind
-``current_app.storage``. Postgres remains the reference/default; a DynamoDB
-adapter drops in later (SLS-3+) with no blueprint changes.
+``current_app.storage``. Postgres remains the reference/default; ``"dynamodb"``
+selects the ``DynamoBackend`` adapter (SLS-3..SLS-8) with no blueprint changes —
+the public HTTP API is identical on both backends.
 """
 from __future__ import annotations
 
@@ -33,5 +34,11 @@ def make_storage(config) -> StorageBackend:
     if backend == "postgres":
         from .postgres import PostgresBackend
         return PostgresBackend()
-    # SLS-3: app/storage/dynamo.py -> DynamoBackend (config-selected second adapter)
+    if backend == "dynamodb":
+        # SLS-3: DynamoDB adapter. Its connection settings (table, region,
+        # DYNAMODB_ENDPOINT_URL, credentials) are read from os.environ inside
+        # the storage layer (app/config.py is intentionally untouched — a
+        # parallel agent owns it), so nothing here needs plumbing from config.
+        from .dynamo import DynamoBackend
+        return DynamoBackend()
     raise ValueError(f"unknown STORAGE_BACKEND {backend!r}")

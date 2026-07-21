@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
 import sqlalchemy as sa
 
 from app.extensions import db
@@ -12,6 +13,7 @@ from app.services import claim_next_task
 BASE = "/api/v1/projects/demo"
 
 
+@pytest.mark.postgres_only
 def test_expired_lease_is_reclaimable(app, client, project):
     client.post(f"{BASE}/tasks", json={"title": "t", "key": "R-1"})
     # alice claims it

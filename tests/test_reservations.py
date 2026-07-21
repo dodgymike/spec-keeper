@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
 from app.extensions import db
 from app.models import Project
 from app.services import reserve_number
@@ -31,9 +33,13 @@ def test_counters_endpoint(client, project):
     assert {"namespace": "migration", "current_value": 2} in counters
 
 
+@pytest.mark.postgres_only
 def test_concurrent_reservations_are_collision_proof(app, client, project):
     """The 'two agents both grabbed 024' bug must be impossible: N threads
-    reserving the same namespace get N distinct, contiguous values."""
+    reserving the same namespace get N distinct, contiguous values.
+
+    Postgres-specific: drives ``reserve_number``/``db.session`` directly. The
+    cross-backend equivalent (via the HTTP API) is in ``test_parity.py``."""
     n = 20
     with app.app_context():
         project_id = db.session.execute(

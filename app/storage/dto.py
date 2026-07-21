@@ -2,7 +2,7 @@
 
 The storage layer returns these frozen dataclasses instead of live SQLAlchemy
 ORM objects, decoupling the HTTP/serialization layer from any one backend. Both
-the reference PostgreSQL adapter and (later) the DynamoDB adapter build these.
+the reference PostgreSQL adapter and the DynamoDB adapter (`dynamo.py`) build these.
 
 Attribute names are chosen to match the source fields the Marshmallow ``*Out``
 schemas dump, so ``SomeOut().dump(dto)`` produces byte-for-byte the same JSON the

@@ -3,7 +3,7 @@
 ``StorageBackend`` is the full method set the blueprints call via
 ``current_app.storage.<method>()``. It is defined as a ``typing.Protocol`` so an
 adapter need only provide matching methods (structural typing) — the reference
-``PostgresBackend`` and the future ``DynamoBackend`` both satisfy it.
+``PostgresBackend`` and the ``DynamoBackend`` (SLS-3..SLS-6) both satisfy it.
 
 Every method takes/returns backend-neutral values: primitives, ``dict`` payloads
 already validated by Marshmallow, and the frozen DTOs from ``dto.py``. Methods
