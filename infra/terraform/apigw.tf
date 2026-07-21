@@ -63,16 +63,12 @@ variable "apigw_log_retention_days" {
 }
 
 # ---------------------------------------------------------------------------
-# Shared local: the JWT audiences accepted by BOTH the API GW authorizer and the
-# app-level validator (lambda.tf reads this for COGNITO_AUDIENCE). All M2M agent
-# client_ids + the human UI client_id (cognito.tf).
+# The JWT audiences accepted by BOTH the API GW authorizer and the app-level
+# validator (lambda.tf reads it too for COGNITO_AUDIENCE) are defined in
+# cognito.tf as `local.cognito_agent_audiences` = [agents client id, UI client
+# id]. AUTH-9 replaced the old per-agent M2M client_ids with that pair.
 # ---------------------------------------------------------------------------
 locals {
-  jwt_audiences = concat(
-    [for _, c in aws_cognito_user_pool_client.agent : c.id],
-    [aws_cognito_user_pool_client.ui.id],
-  )
-
   # Public routes (no authorizer): health/readiness + the OpenAPI contract/docs.
   public_routes = [
     "GET /readyz",
@@ -115,7 +111,7 @@ resource "aws_apigatewayv2_authorizer" "jwt" {
 
   jwt_configuration {
     issuer   = "https://${aws_cognito_user_pool.this.endpoint}"
-    audience = local.jwt_audiences
+    audience = local.cognito_agent_audiences
   }
 }
 

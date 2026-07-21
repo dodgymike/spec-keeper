@@ -1,18 +1,26 @@
 # cognito.tf
 # =============================================================================
-# AUTH-1 — Cognito authentication for the Spec Server.
+# AUTH-1 / AUTH-9 — Cognito authentication for the Spec Server.
 #
-# Replaces the old static API_KEYS bearer auth with real OAuth2/JWT:
+# AUTH-9 REWORK (cost): the original design gave every AI agent its own
+# machine-to-machine (client_credentials) app client. Cognito bills ~$6/mo PER
+# M2M app client, so 5 agents => ~$30/mo, which blew the $20 budget. This file
+# now uses ordinary Cognito USER auth instead, which is MAU-priced and FREE
+# below 50k monthly active users. The handful of agent "users" cost nothing.
 #
-#   * MACHINE-TO-MACHINE (AI agents): OAuth2 `client_credentials` grant. Each
-#     agent is a confidential app client with a generated secret (kept in
-#     Secrets Manager, referenced by ARN — never in git/outputs). Agents POST to
-#     the token endpoint with client_id/client_secret + the API scopes and get a
-#     short-lived JWT access token whose `scope` claim the API Gateway authorizer
-#     (AUTH-3) and the app-level validator (AUTH-2) enforce.
+#   * AGENTS (AI coding agents): a single PUBLIC app client (`agents`, no secret)
+#     using the USER_PASSWORD / SRP auth flows. Each agent is a Cognito USER with
+#     a strong generated permanent password (kept in ONE Secrets Manager secret,
+#     referenced by ARN — never in git/outputs). Agents call InitiateAuth
+#     (USER_PASSWORD_AUTH) to mint a JWT; authorization is by GROUP membership
+#     (spec-admins / spec-writers / spec-readers) carried in the `cognito:groups`
+#     claim, which the app (AUTH-2) enforces per route/method.
 #
 #   * HUMAN (React UI): OAuth2 Authorization Code + PKCE via the Cognito Hosted
-#     UI. Public SPA client (no secret), openid/email/profile scopes.
+#     UI. Public SPA client (no secret), openid/email/profile scopes. UNCHANGED.
+#
+# There is NO OAuth2 resource server / custom scopes and NO client_credentials
+# grant anymore: agent authorization is group-based, not scope-based.
 #
 # This file is deliberately SELF-CONTAINED (its own variables + outputs) so it
 # stays merge-conflict-free with the parallel dynamodb.tf work. It only reuses
@@ -23,12 +31,11 @@
 # PROD HARDENING (AUTH-8): set `enable_mfa = true` in the prod tfvars to turn on
 # OPTIONAL TOTP MFA on the human sign-in path AND advanced_security_mode=ENFORCED.
 # Default is false so dev/local stays frictionless and cost-free (advanced
-# security bills per monthly active user). The M2M client_credentials agents use
-# the machine flow and are UNAFFECTED by MFA either way. See var.enable_mfa.
+# security bills per monthly active user). See var.enable_mfa.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Variables (scoped to AUTH-1; kept in this file on purpose)
+# Variables (scoped to AUTH-1/AUTH-9; kept in this file on purpose)
 # ---------------------------------------------------------------------------
 
 variable "cognito_domain_prefix" {
@@ -42,29 +49,22 @@ variable "cognito_domain_prefix" {
   }
 }
 
-variable "resource_server_identifier" {
-  description = "OAuth2 resource-server identifier (the API's audience/namespace for custom scopes). Becomes the prefix of every custom scope string, e.g. https://api.spec-server/tasks.read."
-  type        = string
-  default     = "https://api.spec-server"
-}
-
-variable "api_scopes" {
-  description = "Custom API scopes exposed by the resource server. Each becomes '<resource_server_identifier>/<scope_name>' in the JWT scope claim, enforced by the API Gateway authorizer + app validator."
-  type = list(object({
-    scope_name        = string
-    scope_description = string
-  }))
-  default = [
-    { scope_name = "tasks.read", scope_description = "Read tasks/specs" },
-    { scope_name = "tasks.write", scope_description = "Create/update/claim/complete tasks" },
-    { scope_name = "projects.admin", scope_description = "Administer projects, epics, reservations" },
-  ]
-}
-
 variable "agent_clients" {
-  description = "AI-agent machine-to-machine clients. One confidential client_credentials app client + one Secrets Manager secret is created per name. These are the agents that call the Spec Server API with a JWT instead of a static key."
+  description = "AI-agent USERS created in the pool. One Cognito user (with a strong generated permanent password) is created per name; all share the single public `agents` app client and are authorized by GROUP membership. `spec-keeper` and `aws-infra` are placed in spec-admins; every other agent in spec-writers."
   type        = list(string)
   default     = ["spec-keeper", "implementer", "reviewer", "security", "aws-infra"]
+}
+
+variable "agent_admins" {
+  description = "Subset of var.agent_clients placed in the spec-admins group; everyone else goes to spec-writers. Kept as a variable so the admin set is auditable/overridable without editing the role-map expression."
+  type        = list(string)
+  default     = ["spec-keeper", "aws-infra"]
+}
+
+variable "agent_username_domain" {
+  description = "DNS-style domain used to synthesize each agent user's Cognito username/email. The pool signs users in by email (username_attributes = [\"email\"]), so agent slugs like `spec-keeper` become `spec-keeper@<domain>`. Not a real mailbox — agent users never receive email (creation is SUPPRESSed). The app authenticates with the full `username` recorded in the agent-credentials secret."
+  type        = string
+  default     = "agents.spec-server.internal"
 }
 
 variable "ui_callback_urls" {
@@ -97,11 +97,8 @@ variable "ui_logout_urls" {
 # security ("Plus" feature plan) is billed per monthly-active-user, so it must
 # only ever be on for prod. To harden prod, set `enable_mfa = true` in the prod
 # tfvars (see the header comment / infra/README.md prod section).
-#
-# This gates the HUMAN (PKCE) path only. The M2M client_credentials agents use
-# the machine flow and are UNAFFECTED by MFA regardless of this value.
 variable "enable_mfa" {
-  description = "Prod hardening for the human sign-in path: when true, enable OPTIONAL TOTP MFA on the user pool and set advanced_security_mode = ENFORCED. Default false keeps dev/local MFA-off and cost-free (advanced security is billed per MAU). M2M agents are unaffected either way."
+  description = "Prod hardening for the human sign-in path: when true, enable OPTIONAL TOTP MFA on the user pool and set advanced_security_mode = ENFORCED. Default false keeps dev/local MFA-off and cost-free (advanced security is billed per MAU)."
   type        = bool
   default     = false
 }
@@ -111,9 +108,27 @@ variable "enable_mfa" {
 # ---------------------------------------------------------------------------
 
 locals {
-  # Full scope strings ("<identifier>/<scope_name>") granted to the M2M agents.
-  # aws_cognito_resource_server exposes exactly this as `scope_identifiers`.
-  m2m_scope_identifiers = aws_cognito_resource_server.api.scope_identifiers
+  # Per-agent group assignment: admins for the configured admin set, writers
+  # for everyone else. spec-readers exists for humans/read-only actors but no
+  # agent is placed in it by default.
+  agent_group_map = {
+    for name in var.agent_clients :
+    name => contains(var.agent_admins, name) ? "spec-admins" : "spec-writers"
+  }
+
+  # Full synthetic username (email alias) each agent signs in with.
+  agent_usernames = {
+    for name in var.agent_clients :
+    name => "${name}@${var.agent_username_domain}"
+  }
+
+  # The JWT audiences accepted by BOTH the API GW authorizer (apigw.tf) and the
+  # app-level validator (lambda.tf reads this for COGNITO_AUDIENCE): the public
+  # `agents` client id + the human UI client id.
+  cognito_agent_audiences = [
+    aws_cognito_user_pool_client.agents.id,
+    aws_cognito_user_pool_client.ui.id,
+  ]
 }
 
 # ---------------------------------------------------------------------------
@@ -134,11 +149,12 @@ resource "random_string" "cognito_domain_suffix" {
 resource "aws_cognito_user_pool" "this" {
   name = "${local.name_prefix}-pool"
 
-  # Humans sign in with their email address.
+  # Humans sign in with their email address; agent users use a synthetic email.
   username_attributes      = ["email"]
   auto_verified_attributes = ["email"]
 
-  # No self-service open signups by default — humans are invited by an admin.
+  # No self-service open signups — humans are invited by an admin; agent users
+  # are created by this Terraform (admin create).
   admin_create_user_config {
     allow_admin_create_user_only = true
   }
@@ -161,15 +177,11 @@ resource "aws_cognito_user_pool" "this" {
 
   # AUTH-8 — MFA for the HUMAN (PKCE) sign-in path, gated by var.enable_mfa.
   #
-  # Mode choice: OPTIONAL (not ON) when enabled. OPTIONAL lets already-existing
-  # users keep signing in while they enroll a TOTP authenticator on their own
-  # cadence — flipping straight to "ON" would immediately lock out every user
-  # who has not yet registered a factor. Dev/local stays "OFF" (default).
-  #
-  # Only TOTP (software_token) is enabled — no SMS, so there is no per-message
-  # SNS cost and no phone-number attribute requirement. The M2M
-  # client_credentials agents use the machine flow and never see an MFA
-  # challenge, so they are unaffected by this setting.
+  # Mode choice: OPTIONAL (not ON) when enabled. OPTIONAL lets existing users
+  # keep signing in while they enroll a TOTP authenticator on their own cadence
+  # — flipping straight to "ON" would immediately lock out every user who has
+  # not yet registered a factor. Dev/local stays "OFF" (default). Only TOTP
+  # (software_token) is enabled — no SMS, so no per-message SNS cost.
   mfa_configuration = var.enable_mfa ? "OPTIONAL" : "OFF"
 
   software_token_mfa_configuration {
@@ -199,57 +211,60 @@ resource "aws_cognito_user_pool" "this" {
   tags = local.tags
 }
 
-# Hosted-UI domain (backs both the human Authorization-Code flow and the
-# machine token endpoint https://<domain>/oauth2/token).
+# Hosted-UI domain (backs the human Authorization-Code flow). Agents do NOT use
+# the hosted UI or the /oauth2/token endpoint — they call InitiateAuth directly.
 resource "aws_cognito_user_pool_domain" "this" {
   domain       = "${var.cognito_domain_prefix}-${random_string.cognito_domain_suffix.result}"
   user_pool_id = aws_cognito_user_pool.this.id
 }
 
 # ---------------------------------------------------------------------------
-# Resource server + custom API scopes (the JWT `scope` claim vocabulary).
+# Groups — the authorization vocabulary carried in the `cognito:groups` JWT
+# claim. Lower precedence = higher priority, so spec-admins wins when a user is
+# in multiple groups.
 # ---------------------------------------------------------------------------
-resource "aws_cognito_resource_server" "api" {
-  identifier   = var.resource_server_identifier
-  name         = "${local.name_prefix}-api"
-  user_pool_id = aws_cognito_user_pool.this.id
-
-  dynamic "scope" {
-    for_each = var.api_scopes
-    content {
-      scope_name        = scope.value.scope_name
-      scope_description = scope.value.scope_description
-    }
+resource "aws_cognito_user_group" "this" {
+  for_each = {
+    spec-admins  = { precedence = 0, description = "Full admin: projects/epics/reservations + all task writes/reads." }
+    spec-writers = { precedence = 10, description = "Create/claim/complete/update tasks (task write + read)." }
+    spec-readers = { precedence = 20, description = "Read-only access to tasks/specs." }
   }
+
+  name         = each.key
+  user_pool_id = aws_cognito_user_pool.this.id
+  precedence   = each.value.precedence
+  description  = each.value.description
 }
 
 # ---------------------------------------------------------------------------
-# Machine-to-machine app clients (one per AI agent).
-# client_credentials only — NO user-auth flows, NO callback URLs. Secret is
-# generated and shipped straight to Secrets Manager.
+# AGENT app client — single PUBLIC client (no secret) shared by all agent users.
+# USER_PASSWORD / SRP / REFRESH auth only. NO OAuth/hosted-UI flows, NO
+# client_credentials (that grant is what billed per client). MAU-priced -> free
+# at this scale.
 # ---------------------------------------------------------------------------
-resource "aws_cognito_user_pool_client" "agent" {
-  for_each = toset(var.agent_clients)
-
-  name         = "${local.name_prefix}-m2m-${each.key}"
+resource "aws_cognito_user_pool_client" "agents" {
+  name         = "${local.name_prefix}-agents"
   user_pool_id = aws_cognito_user_pool.this.id
 
-  generate_secret                      = true
-  allowed_oauth_flows_user_pool_client = true
-  allowed_oauth_flows                  = ["client_credentials"]
-  allowed_oauth_scopes                 = local.m2m_scope_identifiers
+  generate_secret = false
+
+  # Direct-auth flows for machine agents. No hosted UI, no OAuth code/token
+  # endpoints, no client_credentials.
+  explicit_auth_flows = [
+    "ALLOW_USER_PASSWORD_AUTH",
+    "ALLOW_REFRESH_TOKEN_AUTH",
+    "ALLOW_USER_SRP_AUTH",
+  ]
+  allowed_oauth_flows_user_pool_client = false
   supported_identity_providers         = ["COGNITO"]
 
-  # Minimal: client_credentials does not use any explicit (user) auth flow.
-  explicit_auth_flows = []
-
-  # Short-lived access tokens; agents re-fetch as needed. No refresh tokens
-  # are issued for client_credentials.
-  access_token_validity = 1
-  id_token_validity     = 1
+  access_token_validity  = 1
+  id_token_validity      = 1
+  refresh_token_validity = 30
   token_validity_units {
-    access_token = "hours"
-    id_token     = "hours"
+    access_token  = "hours"
+    id_token      = "hours"
+    refresh_token = "days"
   }
 
   enable_token_revocation       = true
@@ -258,6 +273,7 @@ resource "aws_cognito_user_pool_client" "agent" {
 
 # ---------------------------------------------------------------------------
 # Human SPA client — Authorization Code + PKCE. Public client (no secret).
+# UNCHANGED by AUTH-9.
 # ---------------------------------------------------------------------------
 resource "aws_cognito_user_pool_client" "ui" {
   name         = "${local.name_prefix}-ui"
@@ -290,36 +306,86 @@ resource "aws_cognito_user_pool_client" "ui" {
 }
 
 # ---------------------------------------------------------------------------
-# Secrets Manager: one secret per M2M client holding its generated client
-# secret. Only ARNs are exported — secret VALUES never leave AWS.
+# Agent USERS — one per var.agent_clients, each with a strong generated
+# permanent password and placed in the appropriate group.
 # ---------------------------------------------------------------------------
-resource "aws_secretsmanager_secret" "agent_client" {
+
+# Strong password per agent. Satisfies the pool password policy (>=12, upper +
+# lower + number + symbol). Never emitted as a plain output — only stored in the
+# single agent-credentials secret below.
+resource "random_password" "agent" {
   for_each = toset(var.agent_clients)
 
-  name        = "${local.name_prefix}/cognito/${each.key}"
-  description = "Cognito M2M client credentials for the '${each.key}' agent (Spec Server)."
+  length           = 24
+  min_lower        = 2
+  min_upper        = 2
+  min_numeric      = 2
+  min_special      = 2
+  override_special = "!@#%^*()-_=+" # policy-safe symbols (avoid quotes/backslash)
+}
 
-  # Fast recovery in dev; the value is reproducible from Cognito anyway.
+# Setting `password` (not `temporary_password`) makes the provider call
+# AdminSetUserPassword with Permanent=true, so no first-login reset is needed.
+# message_action = SUPPRESS => no invite email is sent (these are machine users).
+resource "aws_cognito_user" "agent" {
+  for_each = toset(var.agent_clients)
+
+  user_pool_id   = aws_cognito_user_pool.this.id
+  username       = local.agent_usernames[each.key]
+  password       = random_password.agent[each.key].result
+  message_action = "SUPPRESS"
+
+  attributes = {
+    email          = local.agent_usernames[each.key]
+    email_verified = "true"
+  }
+}
+
+resource "aws_cognito_user_in_group" "agent" {
+  for_each = toset(var.agent_clients)
+
+  user_pool_id = aws_cognito_user_pool.this.id
+  group_name   = aws_cognito_user_group.this[local.agent_group_map[each.key]].name
+  username     = aws_cognito_user.agent[each.key].username
+}
+
+# ---------------------------------------------------------------------------
+# Secrets Manager: ONE secret holding all agent credentials (cost — a single
+# secret, not one per agent). JSON shape consumed by scripts/agent_token.py:
+#   { "pool_id", "client_id", "region",
+#     "users": { "<slug>": { "username", "password", "groups": [...] } } }
+# Only the secret ARN is exported — values never leave AWS / never hit git.
+# ---------------------------------------------------------------------------
+resource "aws_secretsmanager_secret" "agent_credentials" {
+  name        = "${local.name_prefix}/agent-credentials"
+  description = "All Spec Server AI-agent Cognito user credentials (username/password + groups) + pool/client/region. Consumed by scripts/agent_token.py to mint JWTs via USER_PASSWORD_AUTH."
+
+  # Fast recovery in dev; values are re-derivable by re-applying (new passwords).
   recovery_window_in_days = 7
 
   tags = local.tags
 }
 
-resource "aws_secretsmanager_secret_version" "agent_client" {
-  for_each = toset(var.agent_clients)
+resource "aws_secretsmanager_secret_version" "agent_credentials" {
+  secret_id = aws_secretsmanager_secret.agent_credentials.id
 
-  secret_id = aws_secretsmanager_secret.agent_client[each.key].id
   secret_string = jsonencode({
-    client_id      = aws_cognito_user_pool_client.agent[each.key].id
-    client_secret  = aws_cognito_user_pool_client.agent[each.key].client_secret
-    token_endpoint = "https://${aws_cognito_user_pool_domain.this.domain}.auth.${var.aws_region}.amazoncognito.com/oauth2/token"
-    scopes         = local.m2m_scope_identifiers
+    pool_id   = aws_cognito_user_pool.this.id
+    client_id = aws_cognito_user_pool_client.agents.id
+    region    = var.aws_region
+    users = {
+      for name in var.agent_clients : name => {
+        username = aws_cognito_user.agent[name].username
+        password = random_password.agent[name].result
+        groups   = [local.agent_group_map[name]]
+      }
+    }
   })
 }
 
 # ---------------------------------------------------------------------------
-# Outputs — consumed by AUTH-2 (app JWKS validator) and AUTH-3 (API GW JWT
-# authorizer). NO secret values here, only ARNs.
+# Outputs — consumed by AUTH-2 (app JWT validator), AUTH-3 (API GW JWT
+# authorizer), and scripts/agent_token.py. NO secret values here, only ARNs.
 # ---------------------------------------------------------------------------
 
 output "cognito_user_pool_id" {
@@ -337,24 +403,9 @@ output "cognito_jwks_uri" {
   value       = "https://${aws_cognito_user_pool.this.endpoint}/.well-known/jwks.json"
 }
 
-output "cognito_resource_server_identifier" {
-  description = "Resource-server identifier = the expected JWT `aud`/scope prefix. AUTH-3/AUTH-2 check that granted scopes (e.g. <id>/tasks.write) are present."
-  value       = aws_cognito_resource_server.api.identifier
-}
-
-output "cognito_api_scope_identifiers" {
-  description = "Full custom scope strings (<identifier>/<scope_name>) the API understands. AUTH-3 maps routes to these scopes."
-  value       = aws_cognito_resource_server.api.scope_identifiers
-}
-
-output "cognito_hosted_ui_domain" {
-  description = "Hosted-UI base URL. Human SPA points its OAuth authorize/logout endpoints here; agents POST to <domain>/oauth2/token."
-  value       = "https://${aws_cognito_user_pool_domain.this.domain}.auth.${var.aws_region}.amazoncognito.com"
-}
-
-output "cognito_token_endpoint" {
-  description = "OAuth2 token endpoint. M2M agents POST client_credentials here to mint a JWT."
-  value       = "https://${aws_cognito_user_pool_domain.this.domain}.auth.${var.aws_region}.amazoncognito.com/oauth2/token"
+output "cognito_agents_client_id" {
+  description = "Public `agents` app client ID used by all AI-agent users (USER_PASSWORD_AUTH)."
+  value       = aws_cognito_user_pool_client.agents.id
 }
 
 output "cognito_ui_client_id" {
@@ -362,12 +413,17 @@ output "cognito_ui_client_id" {
   value       = aws_cognito_user_pool_client.ui.id
 }
 
-output "cognito_m2m_client_ids" {
-  description = "Map of agent name -> M2M app client ID. (Client SECRETS are only in Secrets Manager, never output.)"
-  value       = { for k, c in aws_cognito_user_pool_client.agent : k => c.id }
+output "cognito_agent_audiences" {
+  description = "JWT audiences accepted by the API GW authorizer + app validator: [agents client id, UI client id]. apigw.tf and lambda.tf read this."
+  value       = local.cognito_agent_audiences
 }
 
-output "cognito_m2m_secret_arns" {
-  description = "Map of agent name -> Secrets Manager secret ARN holding that agent's client_id/client_secret. Grant each agent's execution role secretsmanager:GetSecretValue on its own ARN only."
-  value       = { for k, s in aws_secretsmanager_secret.agent_client : k => s.arn }
+output "cognito_agent_credentials_secret_arn" {
+  description = "ARN of the single Secrets Manager secret holding ALL agent credentials (username/password/groups + pool/client/region). Grant agent runners secretsmanager:GetSecretValue on THIS ARN only. Values are never output."
+  value       = aws_secretsmanager_secret.agent_credentials.arn
+}
+
+output "cognito_hosted_ui_domain" {
+  description = "Hosted-UI base URL for the human SPA OAuth authorize/logout endpoints. (Agents do not use the hosted UI.)"
+  value       = "https://${aws_cognito_user_pool_domain.this.domain}.auth.${var.aws_region}.amazoncognito.com"
 }

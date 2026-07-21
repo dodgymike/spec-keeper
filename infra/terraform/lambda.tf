@@ -122,10 +122,11 @@ resource "aws_lambda_function" "app" {
 
       # Cognito JWT validation inputs (AUTH-2 app-level validator). Issuer/JWKS
       # come from cognito.tf outputs; audience is the set of accepted client_ids
-      # (shared with the API Gateway JWT authorizer — see apigw.tf).
+      # (the `agents` + UI clients, shared with the API Gateway JWT authorizer —
+      # see cognito.tf `local.cognito_agent_audiences` and apigw.tf).
       COGNITO_ISSUER   = "https://${aws_cognito_user_pool.this.endpoint}"
       COGNITO_JWKS_URI = "https://${aws_cognito_user_pool.this.endpoint}/.well-known/jwks.json"
-      COGNITO_AUDIENCE = join(",", local.jwt_audiences)
+      COGNITO_AUDIENCE = join(",", local.cognito_agent_audiences)
     }
   }
 
