@@ -63,6 +63,7 @@ data "aws_iam_policy_document" "lambda_permissions" {
       "dynamodb:BatchWriteItem",
       "dynamodb:TransactWriteItems",
       "dynamodb:ConditionCheckItem",
+      "dynamodb:DescribeTable",
     ]
     resources = [
       # dynamodb.tf: the one data table...
