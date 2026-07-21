@@ -52,15 +52,20 @@ _PERM_ADMIN = "admin"
 # --------------------------------------------------------------------------- #
 # Auth entry point + precedence ladder
 # --------------------------------------------------------------------------- #
-def require_api_key() -> None:
+def require_api_key(required: str | None = None) -> None:
     """Enforce auth per the precedence ladder documented in the module header.
 
-    Called (with no arguments) at the top of every blueprint handler; it derives
-    the required scope from the live ``request`` (method + blueprint)."""
+    Called at the top of every blueprint handler. By default it DERIVES the
+    required permission from the live ``request`` (method + blueprint). Pass an
+    explicit ``required`` permission (``"read"`` / ``"write"`` / ``"admin"``) to
+    OVERRIDE that derivation — e.g. the admin-invites endpoints gate BOTH their
+    GET and POST on ``"admin"`` (listing/minting invites is admin-only, not the
+    default ``read`` a GET would otherwise require). When auth is disabled (the
+    local-only default) this is a no-op regardless of ``required``."""
     cfg = current_app.config
     issuer = cfg.get("COGNITO_ISSUER")
     if issuer:
-        _require_cognito_jwt(cfg, issuer)
+        _require_cognito_jwt(cfg, issuer, required)
         return
 
     keys = cfg.get("API_KEYS") or []
@@ -79,12 +84,12 @@ def _bearer_token() -> str | None:
     return None
 
 
-def _require_cognito_jwt(cfg, issuer: str) -> None:
+def _require_cognito_jwt(cfg, issuer: str, required: str | None = None) -> None:
     token = _bearer_token()
     if not token:
         abort(401, message="Missing bearer token.")
     claims = _decode_and_verify(token, cfg, issuer)
-    required = _required_permission(cfg)
+    required = required or _required_permission(cfg)
     granted = _effective_permissions(_token_groups(claims, cfg), _group_permissions(cfg))
     if required not in granted:
         abort(

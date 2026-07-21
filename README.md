@@ -89,6 +89,8 @@ every knob.
   needs a justification. List a task's runs or every run in the project (with steps), paginated.
 - **Idempotency-Key** replay on `claim-next`/`reserve`; **lease reaper** (abandoned tasks become
   re-claimable); **pagination** on list endpoints.
+- **Invite-only human signup admin endpoints** (HA-2) — mint/list single-use invite codes
+  (hash-only storage, admin-gated); see "Invite-only human signup" below.
 - **Alembic migrations**, **OpenAPI 3** + Swagger UI, **Docker** compose, and a **scheduled daily
   backup** (`scripts/backup.sh` via a launchd LaunchAgent).
 
@@ -179,8 +181,11 @@ optimistic-lock/412 contract — passes identically on both backends.
 | `DATABASE_URL` | `postgresql+psycopg://spec:spec@db:5432/specserver` | SQLAlchemy connection |
 | `STORAGE_BACKEND` | `postgres` | Storage adapter selected by `make_storage()`. `postgres` (default) or `dynamodb` (`app/storage/dynamo.py`). |
 | `DYNAMODB_TABLE` | _(none)_ | Table name for the `dynamodb` backend. Read directly from `os.environ` by the storage layer (not `app/config.py`). Required when `STORAGE_BACKEND=dynamodb`. |
-| `DYNAMODB_ENDPOINT_URL` | _(none)_ | Override endpoint for the `dynamodb` backend, e.g. `http://dynamodb-local:8000` for DynamoDB Local. Unset ⇒ boto3 talks to real AWS. |
-| `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | _(none)_ | Standard AWS/boto3 credential env vars, used only by the `dynamodb` backend. |
+| `DYNAMODB_ENDPOINT_URL` | _(none)_ | Override endpoint for the `dynamodb` storage backend and (separately, via `app/config.py`) the invites admin endpoints, e.g. `http://dynamodb-local:8000` for DynamoDB Local. Unset ⇒ boto3 talks to real AWS. |
+| `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | _(none)_ | Standard AWS/boto3 credential env vars, used by the `dynamodb` storage backend and the invites admin endpoints. |
+| `INVITES_TABLE` | _(none)_ | Dedicated DynamoDB table backing invite-only human signup (HA-2): `POST`/`GET /api/v1/admin/invites`. Unset ⇒ both endpoints return 501 (local-dev graceful default). Wired from terraform output `invites_table_name` (`infra/terraform/invites.tf`). |
+| `INVITE_TTL_DAYS` | `14` | Default validity window (days) for a freshly minted invite; overridable per-invite via the mint request's `ttl_days` (1-90). |
+| `INVITE_JOIN_BASE_URL` | _(empty)_ | Base URL prefixed to the `join_url` the mint endpoint returns (e.g. `https://spec.example.com`); empty ⇒ a relative `/join?code=...` link. |
 | `LEASE_DEFAULT_TTL` | `1800` | Claimed-task lease seconds |
 | `API_KEYS` | _(empty)_ | Comma-separated bearer tokens (legacy static auth). Empty ⇒ auth off (local-only). Ignored if `COGNITO_ISSUER` is set. |
 | `COGNITO_ISSUER` | _(empty)_ | OIDC issuer for Cognito RS256 JWT auth (AUTH-2/AUTH-10). When set, takes precedence over `API_KEYS`. Authorization is by Cognito group membership (`AUTH_GROUPS_CLAIM`, `AUTH_GROUP_READ`/`WRITE`/`ADMIN`), not scopes. See `AGENTS_API.md` → "Authentication" and `.env.example` for the full `COGNITO_*`/`JWKS_*`/`AUTH_GROUP_*` knob set. |
@@ -203,6 +208,18 @@ optimistic-lock/412 contract — passes identically on both backends.
   `USER_PASSWORD_AUTH` against the `agents` app client, keeps the access token in memory, renews
   it (via `REFRESH_TOKEN_AUTH` or by re-authenticating on a 401), and never prints or logs the
   password or any token. See `AGENTS_API.md` → "Authenticating to the deployed server".
+
+### Invite-only human signup (HA-2)
+
+Admins mint single-use invite codes (`POST /api/v1/admin/invites`, admin-gated) that a human
+redeems at signup; only the invite's SHA-256 hash is ever stored server-side and the plaintext
+code is returned once, never logged. This needs `INVITES_TABLE` (a dedicated DynamoDB table,
+terraform output `invites_table_name` from `infra/terraform/invites.tf`) — unset ⇒ both admin
+endpoints return 501. The same terraform file builds the Cognito PreSignUp Lambda that burns the
+code at signup (auto-confirm/verify, no group added) and outputs `presignup_lambda_arn`; that ARN
+is wired as the user pool's `pre_sign_up` trigger by the separate HA-3 pool cutover, which owns
+`cognito.tf` (this file never edits it). See `AGENTS_API.md` → "Admin: invite-only human signup"
+for the request/response shapes.
 
 ## Backups
 

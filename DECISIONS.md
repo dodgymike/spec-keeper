@@ -114,3 +114,31 @@ Decisions:
   is created UNSIGNED because `InitiateAuth` is an unauthenticated API (no AWS creds needed); the
   Secrets Manager client stays signed (needs `secretsmanager:GetSecretValue`). Password/tokens are
   never logged, put in exception text, or shown by repr/__main__.
+
+## HA-2 — Invite system design decisions
+- **Invites live in a DEDICATED table (`${name_prefix}-invites`), not the app single-table store.**
+  Invites are an auth artifact, not a storage-abstraction entity, so the admin endpoint reaches
+  them via boto3 directly (not `current_app.storage`). Key = `code_hash`.
+- **Store the HASH of the code, never the plaintext.** The code is 128-bit `secrets.token_urlsafe`
+  entropy, so a plain SHA-256 (no pepper) is sufficient: a table dump cannot be reversed to a live
+  code. Same for the optional email-binding (SHA-256 of the normalized address).
+- **Email-binding enforced INSIDE the conditional burn**, as
+  `(attribute_not_exists(email_binding) OR email_binding = :eb)`, rather than bird's pre-read +
+  backstop. This makes the burn a single atomic UpdateItem with NO get-then-update TOCTOU, and the
+  PreSignUp role needs only `dynamodb:UpdateItem` (no GetItem). A wrong-email attempt fails
+  identically to a missing/used/expired code (no oracle).
+- **Approval is by GROUP, not a status attribute (shared HA-3 contract).** PreSignUp adds the new
+  user to NO group => pending; the app 403s them until an admin grants spec-readers. The `approved`
+  marker is stored on the invite for a FUTURE PostConfirmation hook (this trigger deliberately
+  calls no Cognito admin API, keeping its role UpdateItem-only). No `custom:status` attribute.
+- **cognito.tf is NOT edited by HA-2.** invites.tf receives the pool ARN via
+  `var.cognito_user_pool_arn` (for the `aws_lambda_permission` invoke grant, `count`-gated so
+  validate passes pre-cutover) and OUTPUTs `presignup_lambda_arn`; the HA-3 pool cutover wires the
+  pool's `pre_sign_up` trigger and passes the ARN back.
+- **App-Lambda invites access attached in invites.tf** (a scoped `aws_iam_role_policy` on the
+  iam.tf `lambda_exec` role, referenced read-only) rather than editing iam.tf, so the two files
+  stay merge-conflict-free — same pattern reaper.tf uses to reference sibling resources.
+- **`require_api_key` gained an optional `required` permission override** so the admin endpoints
+  can hard-pin BOTH their GET and POST to `admin` (a plain GET would otherwise only need `read`).
+  Additive + backward-compatible: default `None` keeps the method+blueprint derivation for every
+  existing caller.

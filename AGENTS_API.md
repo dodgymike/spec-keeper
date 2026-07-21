@@ -49,6 +49,7 @@ which takes priority over no auth.
 | `GET` / `HEAD` (any resource) | read |
 | Mutating calls on `projects` / `agents` | admin |
 | All other mutating calls (tasks, epics, reservations, ports, log, chains) | write |
+| `GET` / `POST /admin/invites` | admin (both methods — invite listing/minting is admin-only, overriding the default `read` a `GET` would otherwise get) |
 
 A request succeeds if ANY of the caller's groups grant the required permission — e.g. a
 `spec-writers` member has read+write but not admin; a `spec-admins` member has all three.
@@ -360,6 +361,44 @@ curl -s -X POST $B/projects/corsearch/tasks/claim-next \
   -d '{"agent":"alice"}'
 # Re-sending the identical request with the same key returns the SAME task.
 ```
+
+## Admin: invite-only human signup
+
+Two endpoints under `/api/v1/admin`, both gated on the `admin` permission regardless of HTTP
+method (see the permission table above) — this is for a human admin/dashboard, not the agent
+workflow. Both return **501** when `INVITES_TABLE` is unset (the local-dev default), so a server
+without the invites table configured fails gracefully instead of crashing.
+
+**Mint an invite** — returns the plaintext code **once**; only its SHA-256 hash is ever stored:
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
+  -X POST $B/admin/invites -d '{"email":"newhire@example.com","ttl_days":14,"approved":false}'
+# -> {"code":"kX9f...", "join_url":"https://spec.example.com/join?code=kX9f...",
+#     "code_hash":"3fa8...", "expires_at":1753600000, "email_bound":true, "approved":false}
+```
+- All body fields are optional. Omit `email` for an open (not address-pinned) invite — anyone with
+  the code can redeem it; supplying `email` pins the invite to that address (only its hash is
+  stored, never the address itself). `ttl_days` (1-90, default `INVITE_TTL_DAYS`) overrides the
+  validity window. `approved` just tags the row for a future auto-group-grant hook; it does not by
+  itself grant any group today (see below).
+- `code` is the **only** response that ever carries the plaintext — it is never stored or logged;
+  only `code_hash` (its SHA-256) persists.
+
+**List active invites** — hashes/status/expiry only, never the plaintext:
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' $B/admin/invites
+# -> [{"code_hash":"3fa8...", "status":"active", "created_at":1752300000,
+#      "expires_at":1753600000, "email_bound":true, "approved":false}, ...]
+```
+
+**What happens after signup:** the Cognito PreSignUp Lambda (`infra/terraform/invites.tf` +
+`infra/terraform/presignup_lambda/handler.py`) hashes the code the invitee submits and atomically
+burns the matching row (one conditional update, `active`→`used`; enforces the email binding when
+one was set), then auto-confirms and auto-verifies the new user — but adds them to **no group**.
+A human is approved by group membership, not a status field, so an admin must still add the new
+user to `spec-readers` (or higher) before they can call the API.
 
 ## Conventions agents must honour
 

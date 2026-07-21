@@ -31,6 +31,7 @@ def create_app(config_object: type = Config) -> Flask:
     app.register_blueprint(health_bp)
 
     # flask-smorest blueprints (documented in OpenAPI).
+    from .blueprints.admin import blp as admin_blp  # HA-2
     from .blueprints.agents import blp as agents_blp
     from .blueprints.chains import blp as chains_blp  # LOG-3
     from .blueprints.epics import blp as epics_blp
@@ -48,6 +49,7 @@ def create_app(config_object: type = Config) -> Flask:
     api.register_blueprint(ports_blp)
     api.register_blueprint(log_blp)
     api.register_blueprint(chains_blp)
+    api.register_blueprint(admin_blp)
 
     _register_cli(app)
     return app

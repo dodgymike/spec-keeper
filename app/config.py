@@ -32,6 +32,22 @@ class Config:
     # Default lease TTL (seconds) for a claimed task.
     LEASE_DEFAULT_TTL = int(os.environ.get("LEASE_DEFAULT_TTL", "1800"))
 
+    # --- Invites (HA-2) -------------------------------------------------
+    # Dedicated DynamoDB invites table backing invite-only human signup (NOT the
+    # app single-table store). The admin endpoints (POST/GET /api/v1/admin/invites)
+    # read/write it via boto3. Wired from terraform output `invites_table_name`.
+    # UNSET (the local-dev default) => the admin invite endpoints return 501 so a
+    # local run without the table is graceful rather than crashing.
+    INVITES_TABLE = os.environ.get("INVITES_TABLE") or None
+    # Days a freshly-minted invite stays valid (TTL). ~14d mirrors the bird gate.
+    INVITE_TTL_DAYS = int(os.environ.get("INVITE_TTL_DAYS", "14"))
+    # Base URL the join link is built from (e.g. https://spec.elasticninja.com).
+    # The plaintext code is appended as ?code=<code>; empty => a relative link.
+    INVITE_JOIN_BASE_URL = os.environ.get("INVITE_JOIN_BASE_URL", "")
+    # DynamoDB endpoint override for local dev / tests (e.g. DynamoDB Local).
+    DYNAMODB_ENDPOINT_URL = os.environ.get("DYNAMODB_ENDPOINT_URL") or None
+    AWS_REGION = os.environ.get("AWS_REGION") or None
+
     # Optional bearer tokens. Empty => auth disabled (local-only default).
     API_KEYS = [
         k.strip() for k in os.environ.get("API_KEYS", "").split(",") if k.strip()
@@ -124,3 +140,6 @@ class TestConfig(Config):
     COGNITO_JWKS_URI = None
     COGNITO_AUDIENCE = []
     CORS_ORIGINS = []
+    # Invites off by default so a stray INVITES_TABLE env can't flip the baseline;
+    # tests that exercise the admin endpoint set it explicitly on a subclass.
+    INVITES_TABLE = None

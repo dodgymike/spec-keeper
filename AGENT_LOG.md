@@ -227,3 +227,48 @@ to the server's `/events` endpoint.
   tests/test_health.py, STORAGE_ABSTRACTION_DEEPDIVE.md, AGENT_LOG.md.
 - NOT part of SLS-14 (leave out of the commit): the stray `ui/.gitignore` edit and pre-existing
   `docker-compose.yml` (M), `install-and-run.sh`/`restore_backup.py` (??).
+
+## HA-2 — Invite-only human signup: invites table + PreSignUp burn + admin endpoint (feature-runner)
+- Task: build invite-only human signup mirroring the bird project's invite + PreSignUp burn.
+  Restated: a dedicated invites DynamoDB table, a Cognito PreSignUp Lambda that atomically burns
+  single-use invite codes, and an admin-gated app endpoint to mint/list invites. CODE-ONLY.
+- New files: `infra/terraform/invites.tf` (invites table + PreSignUp Lambda + least-priv roles +
+  cognito invoke permission + app-invites access policy + outputs),
+  `infra/terraform/presignup_lambda/handler.py` (the PreSignUp trigger),
+  `app/blueprints/admin.py` (POST/GET /api/v1/admin/invites), `tests/test_presignup.py`,
+  `tests/test_admin_invites.py`.
+- Edited: `app/helpers.py` (require_api_key gained an OPTIONAL `required` permission override —
+  backward-compatible, default None => existing derivation; admin endpoints call
+  `require_api_key(required="admin")`), `app/config.py` (INVITES_TABLE / INVITE_TTL_DAYS /
+  INVITE_JOIN_BASE_URL / DYNAMODB_ENDPOINT_URL / AWS_REGION knobs; TestConfig pins
+  INVITES_TABLE=None), `app/schemas.py` (InviteIn/InviteMintOut/InviteOut), `app/__init__.py`
+  (register the admin blueprint).
+- Burn/email-binding: only the SHA-256 `code_hash` is stored (plaintext code returned ONCE by
+  mint, never persisted/logged). The burn is a SINGLE conditional `UpdateItem`
+  (`status='active' AND expires_at>now AND (attribute_not_exists(email_binding) OR
+  email_binding=:eb)` -> `status='used'`) so two concurrent signups can never double-spend and the
+  optional email-binding is enforced atomically in the same write. All rejections (missing/used/
+  expired/mismatch) surface as ONE generic PreSignUp raise (no enumeration oracle). PreSignUp adds
+  the user to NO spec-* group (approved by GROUP per the shared HA-3 contract) => pending until an
+  admin adds them to spec-readers; auto-confirms + auto-verifies email.
+- Did NOT edit cognito.tf: invites.tf takes the pool ARN via `var.cognito_user_pool_arn` and only
+  OUTPUTs `presignup_lambda_arn` for the HA-3 pool cutover to wire the pre_sign_up trigger.
+- Verify: full suite **89 passed**; new invite tests **15 passed** (PreSignUp valid burn /
+  already-used->raise / expired->raise / email-mismatch->raise / bound-match / missing / unknown;
+  admin mint stores hash active / email-bound stores hash not plaintext / list never leaks
+  plaintext / 501-when-unconfigured / authz non-admin 403 / reader 403 / missing 401 / admin 201).
+  `terraform fmt` clean, `terraform init -backend=false` + `terraform validate` => "Success! The
+  configuration is valid." (the presignup archive_file source dir builds).
+- Chain: implementer -> test-engineer -> reviewer(APPROVE, scope clean, cognito.tf untouched) ->
+  security(PASS on all 7 mandated requirements; only Low/informational notes: unbounded admin list
+  scan, body-validation-before-auth ordering (existing convention), legacy API_KEYS branch ignores
+  the admin gate by design) -> documentation (AGENTS_API.md, README.md, .env.example).
+- NOT committed — FILES FOR COORDINATED COMMIT (HA-2 only): infra/terraform/invites.tf,
+  infra/terraform/presignup_lambda/handler.py, app/blueprints/admin.py, app/helpers.py,
+  app/config.py, app/schemas.py, app/__init__.py, tests/test_presignup.py,
+  tests/test_admin_invites.py, AGENTS_API.md, README.md, .env.example, AGENT_LOG.md, DECISIONS.md.
+- NOT part of HA-2 (exclude): the parallel HA-3 agent's staged files (create_auth_lambda/,
+  customauth.tf, define_auth_lambda/, verify_auth_lambda/) and pre-existing docker-compose.yml (M),
+  install-and-run.sh / restore_backup.py (??).
+- Follow-up (Low, non-blocking): cap GET /admin/invites scan with a Limit/page bound for parity
+  with the other list schemas' Range(max=1000).

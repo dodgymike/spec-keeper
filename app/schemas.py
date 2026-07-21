@@ -366,3 +366,54 @@ class ChainRunPatch(Schema):
 class ChainRunQuery(Schema):
     limit = fields.Int(load_default=200, validate=validate.Range(min=1, max=1000))
     offset = fields.Int(load_default=0, validate=validate.Range(min=0))
+
+
+# --------------------------------------------------------------------------- #
+# Invites (HA-2) — invite-only human signup. NOTE: the plaintext code is
+# returned ONCE by the mint endpoint and NEVER stored or listed; the table (and
+# every read schema below) only ever carries the SHA-256 `code_hash`.
+# --------------------------------------------------------------------------- #
+class InviteIn(Schema):
+    email = fields.Email(
+        allow_none=True,
+        load_default=None,
+        metadata={"description": (
+            "Optional address to PIN the invite to (email-bound): only this "
+            "address can redeem it. Omit for an open, admin-reviewed invite. The "
+            "address itself is never stored — only its SHA-256 hash (email_binding)."
+        )},
+    )
+    ttl_days = fields.Int(
+        allow_none=True,
+        load_default=None,
+        validate=validate.Range(min=1, max=90),
+        metadata={"description": "Override the invite validity window in days (default INVITE_TTL_DAYS)."},
+    )
+    approved = fields.Bool(
+        load_default=False,
+        metadata={"description": (
+            "If true, mark the invite pre-approved so a future PostConfirmation "
+            "hook MAY add the invitee straight to spec-readers. Default false => "
+            "the invitee lands pending until an admin grants a group."
+        )},
+    )
+
+
+class InviteMintOut(Schema):
+    """The mint response — the ONLY place the plaintext code is ever emitted."""
+    code = fields.Str(dump_only=True, metadata={"description": "The plaintext single-use code. Shown ONCE; never stored or logged in plaintext."})
+    join_url = fields.Str(dump_only=True, metadata={"description": "The signup link carrying the code (?code=...)."})
+    code_hash = fields.Str(dump_only=True, metadata={"description": "SHA-256 of the code — what is actually stored."})
+    expires_at = fields.Int(dump_only=True, metadata={"description": "Epoch seconds when the invite expires (TTL)."})
+    email_bound = fields.Bool(dump_only=True, metadata={"description": "Whether the invite is pinned to one address."})
+    approved = fields.Bool(dump_only=True)
+
+
+class InviteOut(Schema):
+    """A listed invite — hashes/status/expiry only, NEVER the plaintext code."""
+    code_hash = fields.Str(dump_only=True)
+    status = fields.Str(dump_only=True)
+    created_at = fields.Int(dump_only=True)
+    expires_at = fields.Int(dump_only=True)
+    email_bound = fields.Bool(dump_only=True)
+    approved = fields.Bool(dump_only=True)
