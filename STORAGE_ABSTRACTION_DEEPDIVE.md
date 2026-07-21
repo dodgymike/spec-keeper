@@ -184,6 +184,9 @@ today's `abort(...)` codes and the existing `check_if_match` 412 (`helpers.py:66
 # app/storage/base.py
 class StorageBackend(Protocol):
 
+    # --- health ---
+    def ping(self) -> None: ...   # raises BackendUnavailable; cheap liveness probe for /readyz
+
     # --- projects / agents / epics ---
     def get_project(self, slug: str) -> ProjectDTO: ...            # raises NotFound
     def list_projects(self) -> list[ProjectDTO]: ...

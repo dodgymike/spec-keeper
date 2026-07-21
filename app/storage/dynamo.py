@@ -144,6 +144,16 @@ class DynamoBackend:
         self._client = session.client("dynamodb", **common)
         self.table = self._resource.Table(table)
 
+    # ----- health ------------------------------------------------------ #
+    def ping(self) -> None:
+        """Cheap liveness check for /readyz: confirm the app table is reachable
+        via a bounded ``DescribeTable``. Returns ``None`` on success; raises the
+        neutral ``BackendUnavailable`` on any connectivity/credential error."""
+        try:
+            self._client.describe_table(TableName=self.table_name)
+        except (ClientError, BotoCoreError) as exc:
+            raise BackendUnavailable(str(exc)) from exc
+
     # ----- low-level helpers ------------------------------------------- #
     def _get(self, pk: str, sk: str, *, consistent: bool = False):
         # ConsistentRead makes a same-request post-write reload strong on real

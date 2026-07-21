@@ -64,7 +64,7 @@ from .dto import (
     ReservationDTO,
     TaskDTO,
 )
-from .errors import Conflict, NotFound, VersionConflict
+from .errors import BackendUnavailable, Conflict, NotFound, VersionConflict
 
 
 # --------------------------------------------------------------------------- #
@@ -152,6 +152,18 @@ def _chain_run_dto(r: ChainRun) -> ChainRunDTO:
 # --------------------------------------------------------------------------- #
 class PostgresBackend:
     """The reference ``StorageBackend`` over Flask-SQLAlchemy's ``db.session``."""
+
+    # ----- health --------------------------------------------------------
+    def ping(self) -> None:
+        """Cheap liveness check for /readyz: the database answers ``SELECT 1``.
+
+        Returns ``None`` on success; on failure rolls back the (now-poisoned)
+        session and raises the neutral ``BackendUnavailable``."""
+        try:
+            db.session.execute(sa.text("SELECT 1"))
+        except Exception as exc:
+            db.session.rollback()
+            raise BackendUnavailable(str(exc)) from exc
 
     # ----- internal lookups (raise backend-neutral errors) -------------
     def _project(self, slug: str) -> Project:

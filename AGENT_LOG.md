@@ -207,3 +207,23 @@ to the server's `/events` endpoint.
   COORDINATED COMMIT: app/helpers.py, app/config.py, scripts/agent_token.py, tests/test_auth.py,
   AGENTS_API.md, README.md, .env.example, CLAUDE.md, AGENT_LOG.md, DECISIONS.md.
 - NOT touched: infra/ (cognito.tf/apigw.tf/lambda.tf — parallel agent) and app/storage/.
+
+## SLS-14 — Backend-aware /readyz health check (2026-07-21)
+- Problem: `/readyz` ran `SELECT 1` against Postgres directly, so the deployed Lambda with
+  `STORAGE_BACKEND=dynamodb` (no Postgres) returned 503 on the readiness probe.
+- Fix: added `ping()` to the `StorageBackend` Protocol (`app/storage/base.py`) and both adapters —
+  `PostgresBackend.ping` runs `SELECT 1` (rolls back a poisoned session, raises
+  `BackendUnavailable` on failure); `DynamoBackend.ping` runs a cheap `DescribeTable` on the app
+  table. Rewired `/readyz` to `current_app.storage.ping()` with NO direct db/sqlalchemy reference;
+  `/healthz` stays a static 200. Response shapes unchanged (200 `{status:ready}` /
+  503 `{status:unready,error:...}`).
+- Verify: Postgres full **74 passed**; cross-backend **121 passed, 3 skipped** (pre-existing
+  `postgres_only`). New `tests/test_health.py` — `/readyz` 200 on BOTH `[postgres]` and
+  `[dynamodb]`, plus a 503-on-ping-failure path.
+- Chain: implementer -> test-engineer -> reviewer(PASS on code) -> security(PASS, P2 non-blocking
+  error-string disclosure = unchanged pre-existing behaviour) -> documentation
+  (STORAGE_ABSTRACTION_DEEPDIVE.md Protocol list). NOT committed — FILES FOR COORDINATED COMMIT:
+  app/storage/base.py, app/storage/postgres.py, app/storage/dynamo.py, app/blueprints/health.py,
+  tests/test_health.py, STORAGE_ABSTRACTION_DEEPDIVE.md, AGENT_LOG.md.
+- NOT part of SLS-14 (leave out of the commit): the stray `ui/.gitignore` edit and pre-existing
+  `docker-compose.yml` (M), `install-and-run.sh`/`restore_backup.py` (??).

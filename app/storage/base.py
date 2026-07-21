@@ -36,6 +36,11 @@ from .dto import (
 
 @runtime_checkable
 class StorageBackend(Protocol):
+    # --- health ---------------------------------------------------------
+    def ping(self) -> None: ...                                           # BackendUnavailable
+    """Cheap liveness probe used by /readyz; returns None on success,
+    raises BackendUnavailable on failure."""
+
     # --- projects -------------------------------------------------------
     def list_projects(self) -> list[ProjectDTO]: ...
     def get_project(self, slug: str) -> ProjectDTO: ...                       # NotFound
