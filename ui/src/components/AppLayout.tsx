@@ -1,13 +1,16 @@
 import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
+import { useAuth } from "../auth/AuthContext";
 import "./AppLayout.css";
 
 interface AppLayoutProps {
   children: ReactNode;
 }
 
-/** The app shell: a header with nav, and a content area for routed pages. */
+/** The app shell: a header with nav + auth status, and a content area for routed pages. */
 export function AppLayout({ children }: AppLayoutProps) {
+  const { status, user, signOut } = useAuth();
+
   return (
     <div className="app-layout">
       <header className="app-layout__header">
@@ -31,6 +34,18 @@ export function AppLayout({ children }: AppLayoutProps) {
             Coordination
           </NavLink>
         </nav>
+        <div className="app-layout__auth" role="status" aria-live="polite">
+          {status === "signed-in" ? (
+            <>
+              <span className="app-layout__user">
+                {user?.email ? `Signed in as ${user.email}` : "Signed in"}
+              </span>
+              <button type="button" className="app-layout__signout" onClick={() => signOut()}>
+                Sign out
+              </button>
+            </>
+          ) : null}
+        </div>
       </header>
       <main className="app-layout__content">{children}</main>
     </div>

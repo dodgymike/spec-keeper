@@ -12,15 +12,21 @@ import type {
   TaskListParams,
 } from "./types";
 
+import { getAccessToken, isCognitoConfigured, recoverFromUnauthorized } from "../auth/session";
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8080";
 
 /**
- * Auth seam: once Cognito login is wired up, this should return the current
- * user's JWT (e.g. from an auth context / token cache). For now it only
- * reads an optional dev-only token from the environment, so local dev can
- * exercise `API_KEYS`-protected deployments without a real login flow.
+ * Auth seam (UI-7/AUTH-5): when Cognito is configured (`VITE_COGNITO_DOMAIN`
+ * + `VITE_COGNITO_CLIENT_ID`), returns the live access token from
+ * `auth/session.ts` (refreshing first if it's near expiry). Otherwise falls
+ * back to the dev-only `VITE_DEV_TOKEN` env var - the local-dev ergonomics
+ * this project has always relied on, unchanged when Cognito isn't set up.
  */
-function getToken(): string | undefined {
+async function getToken(): Promise<string | undefined> {
+  if (isCognitoConfigured()) {
+    return getAccessToken();
+  }
   return import.meta.env.VITE_DEV_TOKEN || undefined;
 }
 
@@ -55,8 +61,16 @@ function buildUrl(path: string, params?: object): string {
   return url.toString();
 }
 
-/** Core fetch wrapper: base URL, JSON handling, auth header, error shape. */
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+/**
+ * Core fetch wrapper: base URL, JSON handling, auth header, error shape.
+ *
+ * On a 401 with Cognito configured, tries one silent token refresh and
+ * retries the request once; if the refresh also fails, `session.ts`
+ * redirects to the Hosted UI sign-in (so callers here just see the
+ * original 401 surfaced as an `ApiError`, never a blank screen or a retry
+ * loop - `_retried` bounds this to a single attempt).
+ */
+async function request<T>(path: string, options: RequestOptions = {}, _retried = false): Promise<T> {
   const { method = "GET", params, body, headers = {} } = options;
 
   const finalHeaders: Record<string, string> = {
@@ -66,7 +80,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   if (body !== undefined) {
     finalHeaders["Content-Type"] = "application/json";
   }
-  const token = getToken();
+  const token = await getToken();
   if (token) {
     finalHeaders["Authorization"] = `Bearer ${token}`;
   }
@@ -80,6 +94,13 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     });
   } catch (cause) {
     throw new ApiError(0, "Network error contacting the Spec Server API.", cause);
+  }
+
+  if (response.status === 401 && !_retried && isCognitoConfigured()) {
+    const refreshedToken = await recoverFromUnauthorized();
+    if (refreshedToken) {
+      return request<T>(path, options, true);
+    }
   }
 
   const text = await response.text();
