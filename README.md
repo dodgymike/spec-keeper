@@ -63,12 +63,13 @@ Migrating an existing repo's `SPEC.md` onto the server? See **`INTEGRATION_GUIDE
 `scripts/migrate-repo.sh <slug> <path/to/SPEC.md>`.
 
 **Auth is off by default** (local-only, no `Authorization` header needed). Set `COGNITO_ISSUER`
-to require a Cognito RS256 JWT with a per-request scope (`tasks.read`/`tasks.write`/
-`projects.admin`), or set `API_KEYS` for the simpler legacy static-bearer-token mode — Cognito
-takes precedence if both are set. **CORS is off by default** too; set `CORS_ORIGINS` (an
-exact-match allow-list, never `*`) to let the dashboard call the API from a browser. See
-`AGENTS_API.md` → "Authentication" for the full precedence ladder, the scope table, and how to
-mint a token, and `.env.example` for every knob.
+to require a Cognito RS256 JWT whose `cognito:groups` claim grants the permission the request
+needs — `spec-readers` (read), `spec-writers` (read, write), `spec-admins` (read, write, admin) —
+or set `API_KEYS` for the simpler legacy static-bearer-token mode — Cognito takes precedence if
+both are set. **CORS is off by default** too; set `CORS_ORIGINS` (an exact-match allow-list, never
+`*`) to let the dashboard call the API from a browser. See `AGENTS_API.md` → "Authentication" for
+the full precedence ladder, the group table, and how to mint a token, and `.env.example` for
+every knob.
 
 ## What's included
 
@@ -182,25 +183,26 @@ optimistic-lock/412 contract — passes identically on both backends.
 | `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | _(none)_ | Standard AWS/boto3 credential env vars, used only by the `dynamodb` backend. |
 | `LEASE_DEFAULT_TTL` | `1800` | Claimed-task lease seconds |
 | `API_KEYS` | _(empty)_ | Comma-separated bearer tokens (legacy static auth). Empty ⇒ auth off (local-only). Ignored if `COGNITO_ISSUER` is set. |
-| `COGNITO_ISSUER` | _(empty)_ | OIDC issuer for Cognito RS256 JWT auth (AUTH-2). When set, takes precedence over `API_KEYS`. See `AGENTS_API.md` → "Authentication" and `.env.example` for the full `COGNITO_*`/`JWKS_*`/`AUTH_SCOPE_*` knob set. |
+| `COGNITO_ISSUER` | _(empty)_ | OIDC issuer for Cognito RS256 JWT auth (AUTH-2/AUTH-10). When set, takes precedence over `API_KEYS`. Authorization is by Cognito group membership (`AUTH_GROUPS_CLAIM`, `AUTH_GROUP_READ`/`WRITE`/`ADMIN`), not scopes. See `AGENTS_API.md` → "Authentication" and `.env.example` for the full `COGNITO_*`/`JWKS_*`/`AUTH_GROUP_*` knob set. |
 | `CORS_ORIGINS` | _(empty)_ | Comma-separated exact-match browser-origin allow-list for the dashboard (AUTH-7). Empty ⇒ CORS off. `*` is never honoured. |
-| `AGENT_CLIENT_SECRET_ARN` | _(empty)_ | **Agent-side, not server.** Secrets Manager ARN holding an agent's Cognito M2M `client_id`/`client_secret`/`token_endpoint`/`scopes`; read by `scripts/agent_token.py` to mint tokens against a deployed server. Prefer this over the inline `AGENT_*` fields. |
-| `AGENT_CLIENT_ID` / `AGENT_CLIENT_SECRET` / `AGENT_TOKEN_ENDPOINT` / `AGENT_SCOPES` | _(empty)_ | Inline agent client credentials for dev/CI, as an alternative to the ARN. Never commit a real `AGENT_CLIENT_SECRET`. |
+| `AGENT_CREDENTIALS_SECRET_ARN` | _(empty)_ | **Agent-side, not server.** Secrets Manager ARN holding the `agent-credentials` secret (pool id, client id, region, and a map of agent usernames to passwords/groups); read by `scripts/agent_token.py` to authenticate an agent user against a deployed server. Prefer this over the inline `AGENT_*` fields. |
 
 ### Secrets & tokens
 
-- **Cognito M2M client secrets live in AWS Secrets Manager**, referenced by ARN (created by
-  `infra/terraform/cognito.tf` → output `cognito_m2m_secret_arns`). They are **never** in the repo,
-  in `*.tfvars`, in terraform outputs, or in git — grant each agent's role
-  `secretsmanager:GetSecretValue` on its own ARN only.
+- Agents authenticate as Cognito **users** (the M2M client_credentials clients were retired to
+  save cost). Their usernames/passwords live in the `agent-credentials` AWS Secrets Manager
+  secret — JSON shaped `{"pool_id", "client_id", "region", "users": {"<name>": {"password",
+  "groups"}}}` — **never** in the repo, in `*.tfvars`, in terraform outputs, or in git.
 - **The server needs no secret at rest.** It authenticates callers by validating their JWT against
-  Cognito's **public** JWKS (`COGNITO_JWKS_URI`); it never holds a client secret. Only agents
-  (clients) hold credentials, and only to mint tokens.
+  Cognito's **public** JWKS (`COGNITO_JWKS_URI`) and checking the token's `cognito:groups` claim;
+  it never holds a client secret or a user password. Only agents hold credentials, and only to
+  authenticate and mint tokens.
 - `.env` is **gitignored**; `.env.example` documents every knob with safe empty defaults. Set
   Cognito/agent values in your local `.env` (or inject at deploy time), never in a committed file.
-- Minting/refreshing tokens for API calls is `scripts/agent_token.py` — it keeps the token in
-  memory, refreshes on expiry/401, and never prints the secret or token. See `AGENTS_API.md` →
-  "Authenticating to the deployed server".
+- Authenticating/refreshing tokens for API calls is `scripts/agent_token.py` — it runs
+  `USER_PASSWORD_AUTH` against the `agents` app client, keeps the access token in memory, renews
+  it (via `REFRESH_TOKEN_AUTH` or by re-authenticating on a 401), and never prints or logs the
+  password or any token. See `AGENTS_API.md` → "Authenticating to the deployed server".
 
 ## Backups
 

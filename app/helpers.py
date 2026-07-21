@@ -1,17 +1,27 @@
 """Shared request helpers: lookups, optimistic-lock checks, auth.
 
-Auth precedence ladder (AUTH-2), evaluated per request in ``require_api_key``:
+Auth precedence ladder (AUTH-2, group model per AUTH-10), evaluated per request
+in ``require_api_key``:
 
 1. ``COGNITO_ISSUER`` configured -> require & validate a Cognito RS256 JWT and
-   enforce the per-method/-resource scope (401 on missing/invalid/expired token,
-   403 on a valid token lacking the required scope).
+   enforce the per-method/-resource permission derived from the token's Cognito
+   *group* membership (401 on missing/invalid/expired token, 403 on a valid
+   token whose groups do not grant the required permission).
 2. else ``API_KEYS`` configured -> the legacy static bearer-token check.
 3. else -> open (the local-only default; behaviour unchanged).
 
-Scope mapping (HTTP method + blueprint -> required custom scope name):
-    GET / HEAD (any resource)                         -> tasks.read
-    mutations on the projects / agents blueprints     -> projects.admin
-    all other mutations (tasks, epics, reservations,  -> tasks.write
+Group -> permission model (a user's effective permissions are the union over its
+Cognito groups, read from the verified ``cognito:groups`` access-token claim):
+    spec-admins  -> {read, write, admin}
+    spec-writers -> {read, write}
+    spec-readers -> {read}
+A token carrying no known group grants no permissions (403 on anything needing
+read or above).
+
+Method + blueprint -> required permission:
+    GET / HEAD (any resource)                         -> read
+    mutations on the projects / agents blueprints     -> admin
+    all other mutations (tasks, epics, reservations,  -> write
         ports, log, chains)
 
 The JWKS is fetched once and cached (TTL + refresh-on-unknown-kid) so a burst of
@@ -32,6 +42,11 @@ from .models import Epic, Project, Task
 
 #: Blueprints whose *mutations* are administrative (project/agent management).
 _ADMIN_BLUEPRINTS = frozenset({"projects", "agents"})
+
+#: Permission tokens used by the group model (union'd across a user's groups).
+_PERM_READ = "read"
+_PERM_WRITE = "write"
+_PERM_ADMIN = "admin"
 
 
 # --------------------------------------------------------------------------- #
@@ -69,40 +84,62 @@ def _require_cognito_jwt(cfg, issuer: str) -> None:
     if not token:
         abort(401, message="Missing bearer token.")
     claims = _decode_and_verify(token, cfg, issuer)
-    required = _required_scope(cfg)
-    if required and not _scope_satisfied(required, _token_scopes(claims)):
-        abort(403, message=f"Token lacks required scope '{required}'.")
+    required = _required_permission(cfg)
+    granted = _effective_permissions(_token_groups(claims, cfg), _group_permissions(cfg))
+    if required not in granted:
+        abort(
+            403,
+            message=(
+                f"Token's Cognito groups do not grant '{required}' "
+                "(required for this request)."
+            ),
+        )
 
 
-def _required_scope(cfg) -> str:
-    """Map the current request (method + blueprint) to a required scope name."""
+def _required_permission(cfg) -> str:
+    """Map the current request (method + blueprint) to a required permission."""
     method = request.method.upper()
     if method in {"GET", "HEAD", "OPTIONS"}:
-        return cfg.get("AUTH_SCOPE_READ", "tasks.read")
+        return _PERM_READ
     if request.blueprint in _ADMIN_BLUEPRINTS:
-        return cfg.get("AUTH_SCOPE_ADMIN", "projects.admin")
-    return cfg.get("AUTH_SCOPE_WRITE", "tasks.write")
+        return _PERM_ADMIN
+    return _PERM_WRITE
 
 
-def _token_scopes(claims: dict) -> set[str]:
-    """Collect granted scopes from the ``scope`` (space-delimited) / ``scp`` claim."""
-    raw = claims.get("scope")
-    if raw is None:
-        raw = claims.get("scp")
+def _group_permissions(cfg) -> dict[str, frozenset[str]]:
+    """The group -> permission-set map (group names are configurable)."""
+    return {
+        cfg.get("AUTH_GROUP_ADMIN", "spec-admins"): frozenset(
+            {_PERM_READ, _PERM_WRITE, _PERM_ADMIN}
+        ),
+        cfg.get("AUTH_GROUP_WRITE", "spec-writers"): frozenset(
+            {_PERM_READ, _PERM_WRITE}
+        ),
+        cfg.get("AUTH_GROUP_READ", "spec-readers"): frozenset({_PERM_READ}),
+    }
+
+
+def _token_groups(claims: dict, cfg) -> list[str]:
+    """Read Cognito groups from the *verified* claims only (never from a header).
+
+    Cognito delivers ``cognito:groups`` as a JSON list on the access token; we
+    also tolerate a bare string. Anything else -> no groups (no permissions)."""
+    raw = claims.get(cfg.get("AUTH_GROUPS_CLAIM", "cognito:groups"))
     if isinstance(raw, str):
-        return set(raw.split())
+        return [raw]
     if isinstance(raw, (list, tuple)):
-        return {str(s) for s in raw}
-    return set()
+        return [str(g) for g in raw]
+    return []
 
 
-def _scope_satisfied(required: str, granted: set[str]) -> bool:
-    """A required scope *name* is satisfied by a granted scope that is either the
-    bare name or a full ``<resource-server>/<name>`` identifier."""
-    for g in granted:
-        if g == required or g.rsplit("/", 1)[-1] == required:
-            return True
-    return False
+def _effective_permissions(
+    groups: list[str], mapping: dict[str, frozenset[str]]
+) -> set[str]:
+    """Union the permission sets of all recognised groups the token carries."""
+    perms: set[str] = set()
+    for g in groups:
+        perms |= mapping.get(g, frozenset())
+    return perms
 
 
 # --------------------------------------------------------------------------- #

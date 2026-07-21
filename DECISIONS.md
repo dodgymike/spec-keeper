@@ -93,3 +93,24 @@ Decisions:
   (raised as P2 by both reviewer and security; fixed with a regression test).
 - **CORS is exact-match only, never `*`**, because the API is used with `Authorization`
   credentials and wildcard-with-credentials is unsafe/forbidden.
+
+## AUTH-10 — group-based authz + agent user-auth (2026-07-21)
+- **Authz keys off Cognito GROUP membership, not resource-server scopes.** The verified access
+  token's `cognito:groups` claim drives a permission set (spec-admins=read+write+admin,
+  spec-writers=read+write, spec-readers=read), unioned across a user's groups. Rationale: the M2M
+  `client_credentials` clients (one per scope profile) cost ~$6/mo each and were retired; users +
+  groups are free and map cleanly to the existing read/write/admin permission tiers. The method->
+  permission mapping (GET/HEAD=read; projects/agents mutations=admin; other mutations=write) is
+  unchanged — only the *source* of the grant moved from `scope` to `cognito:groups`.
+- **Fails closed:** a token with no known group (or no `cognito:groups` claim) has an empty
+  permission set -> 403 on anything needing read+. No wildcard/implicit grant.
+- **Group names + claim are config-driven** (`AUTH_GROUP_ADMIN/WRITE/READ`, `AUTH_GROUPS_CLAIM`)
+  so infra can rename groups without an app code change.
+- **`COGNITO_AUDIENCE` widened to the agents + UI app-client ids.** Cognito access tokens carry no
+  `aud`, so `client_id` is matched; both clients now issue access tokens gated by `cognito:groups`.
+- **Agent token helper uses `USER_PASSWORD_AUTH` + `REFRESH_TOKEN_AUTH`.** `REFRESH_TOKEN_AUTH`
+  returns a fresh AccessToken but no new RefreshToken, so the helper retains the existing refresh
+  token and falls back to a full re-auth when it's missing/rejected. The boto3 cognito-idp client
+  is created UNSIGNED because `InitiateAuth` is an unauthenticated API (no AWS creds needed); the
+  Secrets Manager client stays signed (needs `secretsmanager:GetSecretValue`). Password/tokens are
+  never logged, put in exception text, or shown by repr/__main__.

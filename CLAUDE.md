@@ -194,12 +194,15 @@ MUST always have **feature parity and identical observable behaviour**. This is 
 
 - Never commit real secrets. `.env` is gitignored; `.env.example` documents the knobs.
 - The optional `API_KEYS` bearer auth is for shared deployments; the default (empty) is local-only.
-- **Cognito M2M client secrets live in AWS Secrets Manager** (referenced by ARN — see
-  `infra/terraform/cognito.tf` output `cognito_m2m_secret_arns`), **never** in the repo, `*.tfvars`,
-  terraform outputs, or git. Grant each agent's role `secretsmanager:GetSecretValue` on its own ARN.
+- Agents authenticate as Cognito **users** (via `USER_PASSWORD_AUTH`, no client secret) — the old
+  M2M client_credentials clients were retired. Their usernames/passwords live in the
+  `agent-credentials` AWS Secrets Manager secret (`{"pool_id", "client_id", "region", "users":
+  {"<name>": {"password", "groups"}}}`), **never** in the repo, `*.tfvars`, terraform outputs, or
+  git.
 - **The server holds no secret at rest for JWT auth** — it validates tokens against Cognito's public
-  JWKS (`COGNITO_JWKS_URI`). Only agents (clients) hold credentials, to mint tokens via
-  `scripts/agent_token.py` (which never prints/logs the secret or token). See README → "Secrets &
+  JWKS (`COGNITO_JWKS_URI`) and checks the token's `cognito:groups` claim against `AUTH_GROUP_ADMIN`/
+  `WRITE`/`READ`. Only agents hold credentials, to authenticate and mint tokens via
+  `scripts/agent_token.py` (which never prints/logs the password or token). See README → "Secrets &
   tokens" and `AGENTS_API.md` → "Authenticating to the deployed server".
 - SQL must stay parameterized (SQLAlchemy core / bound params) — never string-format user input
   into SQL. The security agent flags any raw f-string SQL with user data. (The DynamoDB adapter

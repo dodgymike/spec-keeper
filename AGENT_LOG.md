@@ -173,3 +173,37 @@ to the server's `/events` endpoint.
 - SLS-12: `list_chain_runs` on the StorageBackend Protocol + both adapters; `GET /tasks/{ident}/chain-runs` and `GET /chain-runs` (ChainRunOut, newest-first, `?limit`/`?offset`); auto-emit `chain_run`/`chain_step` events (identical shape on Postgres + DynamoDB).
 - SLS-13: DynamoDB ConsistentRead on post-write reloads + mutator pre-reads; reserve numeric-gap safe-window documented; idempotency store confirmed atomic; `EventDTO.task_id` divergence documented; `Query` `Limit` pushed into unfiltered pre-sorted GSI4 feed paths; `config.py` STORAGE_BACKEND comment de-staled.
 - Verify: Postgres-only 70 passed; cross-backend (postgres,dynamodb) 114 passed / 3 skipped. Chain: implementer → test-engineer → reviewer(PASS) → security(PASS) → documentation. NOT committed — files listed for coordinated commit.
+
+## 2026-07-21 — AUTH-10 (feature-runner, code-only, uncommitted)
+- Switched app authz from Cognito resource-server SCOPES to GROUP membership, and rewrote the
+  agent token helper from M2M `client_credentials` to Cognito USER auth (the M2M clients were
+  retired to save ~$6/mo each).
+- `app/helpers.py`: replaced `_required_scope`/`_token_scopes`/`_scope_satisfied` with
+  `_required_permission`/`_group_permissions`/`_token_groups`/`_effective_permissions`. Reads
+  `cognito:groups` from the **verified** claims only, unions per-group perms (spec-admins=
+  read+write+admin, spec-writers=read+write, spec-readers=read), enforces method->perm
+  (GET/HEAD=read; projects/agents mutations=admin; other mutations=write). 401 missing/invalid,
+  403 valid-but-insufficient/no-groups. JWT verification (RS256 pinned, JWKS cache, iss/exp/
+  token_use/aud-or-client_id) and the precedence ladder left unchanged.
+- `app/config.py`: dropped `AUTH_SCOPE_READ/WRITE/ADMIN`; added `AUTH_GROUPS_CLAIM` +
+  `AUTH_GROUP_ADMIN/WRITE/READ`; `COGNITO_AUDIENCE` now = agents + UI client ids.
+- `scripts/agent_token.py`: rewritten to `InitiateAuth USER_PASSWORD_AUTH` (unsigned boto3
+  cognito-idp client) -> AccessToken+RefreshToken+ExpiresIn; `REFRESH_TOKEN_AUTH` ~60s before
+  expiry, re-auth on 401; creds from the `agent-credentials` Secrets Manager secret
+  ({pool_id,client_id,region,users:{name:{password,groups}}}) or env (AGENT_USERNAME/
+  AGENT_PASSWORD/COGNITO_CLIENT_ID/COGNITO_REGION). Never logs password/tokens.
+  `authorized_request()`/`get_token()` kept drop-in.
+- `tests/test_auth.py`: adapted the JWT harness to mint `cognito:groups` tokens; added the
+  group->permission matrix (writer->admin route 403; writer create-task+read ok; reader GET ok/
+  mutate 403; multi-group union; no-groups/unknown-group 403); kept the 401 matrix, precedence,
+  JWKS-cache, and CORS tests. Unique uuid slugs keep the tests idempotent (`_make_app` never
+  drops the shared test DB).
+- Docs: AGENTS_API.md/README.md/.env.example/CLAUDE.md updated (scope->group model, USER_PASSWORD_
+  AUTH+refresh flow, agent-credentials secret).
+- Verify: full suite **71 passed**; auth suite **22 passed**
+  (`TEST_DATABASE_URL=...specserver_test`).
+- Chain: implementer(feature-runner) -> test-engineer(feature-runner) -> reviewer(APPROVE) ->
+  security(PASS, all 6 required confirmations) -> documentation. NOT committed — FILES FOR
+  COORDINATED COMMIT: app/helpers.py, app/config.py, scripts/agent_token.py, tests/test_auth.py,
+  AGENTS_API.md, README.md, .env.example, CLAUDE.md, AGENT_LOG.md, DECISIONS.md.
+- NOT touched: infra/ (cognito.tf/apigw.tf/lambda.tf — parallel agent) and app/storage/.

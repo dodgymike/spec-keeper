@@ -6,7 +6,7 @@ SPEC-driven workflow to concrete calls.
 
 Base URL: `http://localhost:8080/api/v1`. Every request needs `Authorization: Bearer <token>`
 under whichever auth mode is configured — see "Authentication" below for which kind of token
-and which scope a given call needs.
+and which group permission a given call needs.
 
 **Storage backend is transparent.** `STORAGE_BACKEND` selects Postgres (default) or DynamoDB; the
 HTTP API — every route, status code, and concurrency guarantee (atomic claim, collision-proof
@@ -19,18 +19,21 @@ both backends. Agents never need to know which backend is live.
 Auth is evaluated per request with a precedence ladder (`app/helpers.require_api_key`):
 
 1. **`COGNITO_ISSUER` configured** — every request must carry a valid Cognito RS256 JWT bearer
-   token, and the token's `scope` claim must contain the scope required for that request (see
-   the table below). Get a token via the OAuth2 `client_credentials` grant: `POST` your
-   `client_id`/`client_secret` (from Secrets Manager — see `infra/terraform/cognito.tf`,
-   `cognito_m2m_secret_arns`) to `cognito_token_endpoint`, requesting the API scopes
-   (`cognito_api_scope_identifiers`). Example:
-   ```bash
-   curl -s -X POST "$TOKEN_ENDPOINT" \
-     -u "$CLIENT_ID:$CLIENT_SECRET" \
-     -d grant_type=client_credentials -d scope="$SCOPES" \
-     | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])"
-   # -> use as: -H "Authorization: Bearer <access_token>"
-   ```
+   token, and the caller's Cognito **group membership** must grant the permission required for
+   that request (see the table below). The token's group-list claim (default `cognito:groups`,
+   configurable via `AUTH_GROUPS_CLAIM`) is a JSON list; groups map to permissions like this:
+
+   | Group | Permissions |
+   |---|---|
+   | `spec-admins` | read, write, admin |
+   | `spec-writers` | read, write |
+   | `spec-readers` | read |
+
+   A caller's effective permissions are the **union** over all its groups. A token with no
+   recognized group has no permissions (403 on anything needing read or above).
+
+   Agents authenticate as Cognito **users** (the old M2M client_credentials clients were retired),
+   via `USER_PASSWORD_AUTH` — see "Authenticating to the deployed server" below for the recipe.
 2. **else `API_KEYS` configured** — the legacy static bearer token, unchanged: send
    `Authorization: Bearer <key>` where `<key>` is one of the comma-separated `API_KEYS` values.
 3. **else** — open (local-only default, no `Authorization` header needed).
@@ -38,49 +41,53 @@ Auth is evaluated per request with a precedence ladder (`app/helpers.require_api
 Only one mode is active at a time: a configured `COGNITO_ISSUER` takes priority over `API_KEYS`,
 which takes priority over no auth.
 
-**Method/resource → required scope** (default scope names shown; configurable via
-`AUTH_SCOPE_READ`/`WRITE`/`ADMIN`):
+**Method/resource → required permission** (default group names shown; configurable via
+`AUTH_GROUP_READ`/`AUTH_GROUP_WRITE`/`AUTH_GROUP_ADMIN`):
 
-| Request | Required scope |
+| Request | Required permission |
 |---|---|
-| `GET` / `HEAD` (any resource) | `tasks.read` |
-| Mutating calls on `projects` / `agents` | `projects.admin` |
-| All other mutating calls (tasks, epics, reservations, ports, log, chains) | `tasks.write` |
+| `GET` / `HEAD` (any resource) | read |
+| Mutating calls on `projects` / `agents` | admin |
+| All other mutating calls (tasks, epics, reservations, ports, log, chains) | write |
 
-A granted scope may be either the bare name (`tasks.write`) or the full
-`<resource-server>/<name>` identifier the JWT actually carries (e.g.
-`https://api.spec-server/tasks.write`) — both satisfy the requirement.
+A request succeeds if ANY of the caller's groups grant the required permission — e.g. a
+`spec-writers` member has read+write but not admin; a `spec-admins` member has all three.
 
-**Failure modes:** missing/malformed/expired/wrong-audience/wrong-issuer JWT (or a missing/wrong
-static key) → **401**; a valid, verified token that simply lacks the required scope → **403**.
-Both use the standard flask-smorest `{code, status, message}` error envelope.
+**Failure modes:** missing/malformed/expired/wrong-audience/wrong-issuer/wrong-`token_use` JWT (or
+a missing/wrong static key) → **401**; a valid, verified token whose groups don't grant the
+required permission → **403**. Both use the standard flask-smorest `{code, status, message}` error
+envelope.
 
 ### Authenticating to the deployed server
 
 Locally the server runs with **auth off** — no `Authorization` header, no token, nothing to do.
 Everything below matters only against a deployed server that has `COGNITO_ISSUER` set.
 
-**Scope → route mapping** (what each call needs; see the table above for the authoritative form):
-`GET`/`HEAD` → `tasks.read`; task/epic/reservation/note/commit/log/chain mutations → `tasks.write`;
-project/agent admin (create/update a project or the agent roster) → `projects.admin`. An M2M client
-is granted the scopes it needs; request them in the `client_credentials` call.
+**Group → route mapping** (what each call needs; see the table above for the authoritative form):
+`GET`/`HEAD` → read (any of `spec-readers`/`spec-writers`/`spec-admins`); task/epic/reservation/
+note/commit/log/chain mutations → write (`spec-writers` or `spec-admins`); project/agent admin
+(create/update a project or the agent roster) → admin (`spec-admins` only). An agent's Cognito
+user is placed in whichever group(s) match the work it does.
 
-**Mint a token by hand** (the raw flow — curl the token endpoint, then Bearer the JWT):
+**Mint a token by hand** (the raw flow — `USER_PASSWORD_AUTH` against the `agents` app client,
+no client secret involved):
 
 ```bash
-TOKEN=$(curl -s -X POST "$AGENT_TOKEN_ENDPOINT" \
-  -u "$AGENT_CLIENT_ID:$AGENT_CLIENT_SECRET" \
-  -d grant_type=client_credentials -d scope="$AGENT_SCOPES" \
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
-curl -s -H "Authorization: Bearer $TOKEN" "$B/projects/spec-server/tasks?status=todo"
+aws cognito-idp initiate-auth --auth-flow USER_PASSWORD_AUTH \
+  --client-id "$AGENTS_CLIENT_ID" \
+  --auth-parameters USERNAME="$AGENT_USERNAME",PASSWORD="$AGENT_PASSWORD"
+# -> {"AuthenticationResult": {"AccessToken": "...", "RefreshToken": "...", "ExpiresIn": 3600, ...}}
+curl -s -H "Authorization: Bearer $ACCESS_TOKEN" "$B/projects/spec-server/tasks?status=todo"
 ```
 
-**Use the helper** (recommended): `scripts/agent_token.py` does the `client_credentials` grant,
-**caches the token in memory, and refreshes it on expiry or on a 401** — so agents never juggle
-token lifetimes. It reads the client id/secret/endpoint/scopes from env (`AGENT_CLIENT_ID`,
-`AGENT_CLIENT_SECRET`, `AGENT_TOKEN_ENDPOINT`, `AGENT_SCOPES`) or, better, from a Secrets Manager
-secret ARN (`AGENT_CLIENT_SECRET_ARN` — the exact JSON blob `infra/terraform/cognito.tf` writes).
-It never prints or logs the secret or the token.
+**Use the helper** (recommended): `scripts/agent_token.py` runs the `USER_PASSWORD_AUTH` flow
+against the `agents` app client (no client secret), **caches the access token in memory, and
+renews it via `REFRESH_TOKEN_AUTH` shortly before expiry (or by re-authenticating on a 401)** —
+so agents never juggle token lifetimes. It resolves the agent's username/password from an AWS
+Secrets Manager secret (`AGENT_CREDENTIALS_SECRET_ARN` or `AGENT_CREDENTIALS_SECRET`, selecting
+the user via `AGENT_USERNAME` — optional if the secret has exactly one user) or, for dev/CI,
+inline env (`AGENT_USERNAME`, `AGENT_PASSWORD`, `COGNITO_CLIENT_ID`, `COGNITO_REGION`; env values
+override the corresponding secret fields). It never prints or logs the password or any token.
 
 ```python
 from scripts.agent_token import authorized_request, get_token
@@ -92,7 +99,8 @@ status, body = authorized_request("GET", f"{B}/projects/spec-server/tasks?status
 headers = {"Authorization": f"Bearer {get_token()}"}
 ```
 
-`authorized_request` retries once on a 401 after re-minting, which is exactly the token-expiry case.
+`authorized_request` retries once on a 401 after re-authenticating, which is exactly the
+token-expiry case.
 
 ## The workflow → API mapping
 

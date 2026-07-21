@@ -37,9 +37,11 @@ class Config:
         k.strip() for k in os.environ.get("API_KEYS", "").split(",") if k.strip()
     ]
 
-    # --- Cognito JWT auth (AUTH-2) --------------------------------------
+    # --- Cognito JWT auth (AUTH-2, group model per AUTH-10) -------------
     # Precedence ladder (see app/helpers.require_api_key):
-    #   1. COGNITO_ISSUER set  -> require & validate a Cognito RS256 JWT + scope.
+    #   1. COGNITO_ISSUER set  -> require & validate a Cognito RS256 JWT and
+    #                             enforce the permission derived from the token's
+    #                             cognito:groups membership.
     #   2. else API_KEYS set   -> static bearer check (backward-compat).
     #   3. else                -> open (local-only default, unchanged).
     #
@@ -48,12 +50,14 @@ class Config:
     # (terraform output `cognito_jwks_uri`).
     COGNITO_ISSUER = os.environ.get("COGNITO_ISSUER") or None
     COGNITO_JWKS_URI = os.environ.get("COGNITO_JWKS_URI") or None
-    # Accepted audiences (aud) OR client_id values. Cognito access tokens carry
-    # no `aud`, so we also accept `client_id`. Empty => audience check skipped.
+    # Accepted audiences (aud) OR client_id values — now the *agents* app-client
+    # id plus the *UI* app-client id (comma-separated). Cognito access tokens
+    # carry no `aud`, so we match `client_id` too. Empty => audience check
+    # skipped. e.g. COGNITO_AUDIENCE=<agents_client_id>,<ui_client_id>
     COGNITO_AUDIENCE = [
         a.strip() for a in os.environ.get("COGNITO_AUDIENCE", "").split(",") if a.strip()
     ]
-    # Expected `token_use` claim. Cognito M2M access tokens use "access".
+    # Expected `token_use` claim. Cognito access tokens use "access".
     COGNITO_TOKEN_USE = os.environ.get("COGNITO_TOKEN_USE", "access") or None
     # JWKS cache TTL (seconds) and clock leeway (seconds) for exp/nbf.
     JWKS_CACHE_TTL = int(os.environ.get("JWKS_CACHE_TTL", "3600"))
@@ -61,11 +65,15 @@ class Config:
     # bogus-kid flood into at most one outbound fetch per interval — anti-DoS).
     JWKS_MIN_REFRESH_INTERVAL = int(os.environ.get("JWKS_MIN_REFRESH_INTERVAL", "30"))
     AUTH_LEEWAY = int(os.environ.get("AUTH_LEEWAY", "0"))
-    # HTTP method/resource -> required scope. Custom scope *names* (the suffix of
-    # the full "<resource-server>/<name>" identifier in the JWT `scope` claim).
-    AUTH_SCOPE_READ = os.environ.get("AUTH_SCOPE_READ", "tasks.read")
-    AUTH_SCOPE_WRITE = os.environ.get("AUTH_SCOPE_WRITE", "tasks.write")
-    AUTH_SCOPE_ADMIN = os.environ.get("AUTH_SCOPE_ADMIN", "projects.admin")
+    # Access-token claim carrying the caller's Cognito group list.
+    AUTH_GROUPS_CLAIM = os.environ.get("AUTH_GROUPS_CLAIM", "cognito:groups")
+    # Group names -> permissions (union'd per user in app/helpers):
+    #   AUTH_GROUP_ADMIN  => {read, write, admin}   (project/agent management)
+    #   AUTH_GROUP_WRITE  => {read, write}          (task/epic/reservation/... writes)
+    #   AUTH_GROUP_READ   => {read}                 (GET/HEAD)
+    AUTH_GROUP_ADMIN = os.environ.get("AUTH_GROUP_ADMIN", "spec-admins")
+    AUTH_GROUP_WRITE = os.environ.get("AUTH_GROUP_WRITE", "spec-writers")
+    AUTH_GROUP_READ = os.environ.get("AUTH_GROUP_READ", "spec-readers")
 
     # --- CORS (AUTH-7) --------------------------------------------------
     # Exact-match allow-list of browser origins for the dashboard. Empty =>
