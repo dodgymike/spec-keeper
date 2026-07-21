@@ -138,3 +138,33 @@ to the server's `/events` endpoint.
   PyJWT/cryptography pip-installed into the running container ephemerally.
 - **Not committed** (code-only run). FILES FOR COORDINATED COMMIT handed to the orchestrator.
   Reserved: nothing. Chain-batched AUTH-2+AUTH-7 per explicit instruction ("do them together").
+
+## 2026-07-21 — INFRA-4 (feature-runner, CODE-ONLY): Lambda build pipeline + real handler
+
+- **Task:** INFRA-4 "Build pipeline for Lambda artifact" (project `spec-server`). Deliver the
+  REAL Lambda artifact + build pipeline replacing the INFRA-3 503 placeholder that lambda.tf
+  wired up (`handler = "wsgi_lambda.handler"`, arm64/python3.12, `var.lambda_zip_path`).
+- **Adapter:** Mangum (ASGI↔Lambda, API Gateway HTTP API payload v2.0) wrapping
+  `a2wsgi.WSGIMiddleware(create_app())` — Flask is WSGI, Mangum is ASGI, so a2wsgi bridges.
+  `create_app()` + adapter built at MODULE scope for cold-start reuse; boto3 DynamoDB clients
+  are lazy so there is no network I/O at import.
+- **Files:** NEW `wsgi_lambda.py` (handler at zip root); NEW `scripts/build_lambda.sh`
+  (`pip --platform manylinux2014_aarch64 --only-binary=:all: --python-version 3.12` → aarch64
+  wheels + app source at archive root + dev-dep prune + best-effort deterministic zip →
+  `build/lambda.zip`); NEW `scripts/README-lambda.md`; EDIT `requirements.txt`
+  (+`mangum>=0.17,<1.0`, +`a2wsgi>=1.10,<2.0`); EDIT `.gitignore` (+`build/`, +`lambda.zip`).
+- **Verified (offline, no AWS):** `import wsgi_lambda; callable(handler)` OK; synthetic API
+  Gateway HTTP API v2.0 `GET /healthz` → 200 under BOTH postgres and dynamodb backends; build
+  ran here → 31M zip with genuine aarch64 ELF wheels (`file`-confirmed) + `wsgi_lambda.py` at
+  root + pytest/gunicorn pruned; full suite = 68 passed. `bash -n scripts/build_lambda.sh` OK.
+- **Chain:** implementer(feature-runner) → test-engineer(manual offline invoke + pytest) →
+  reviewer(APPROVE) → security(PASS). Documentation step scoped to `scripts/README-lambda.md`
+  + inline comments only — README.md/AGENTS_API.md/CLAUDE.md/.env.example are owned by a
+  parallel docs agent (per task constraint), so no separate documentation subagent was invoked.
+- **Not committed** (code-only run); FILES FOR COORDINATED COMMIT handed to the orchestrator.
+  Reserved: nothing. NOT edited: `infra/terraform/*.tf` (var.lambda_zip_path default left empty;
+  note for coordinator: terraform reads it relative to `infra/terraform/`, pass an ABSOLUTE path).
+  Deploy step (coordinator): `bash scripts/build_lambda.sh` then
+  `aws lambda update-function-code --zip-file fileb://build/lambda.zip` OR
+  `terraform apply -var lambda_zip_path=$PWD/build/lambda.zip`. Migrations/`init-db` are a
+  deploy step, never in the handler.
