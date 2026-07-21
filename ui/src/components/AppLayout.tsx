@@ -22,6 +22,14 @@ export function AppLayout({ children }: AppLayoutProps) {
           >
             Projects
           </NavLink>
+          <NavLink
+            to="/coordination"
+            className={({ isActive }) =>
+              isActive ? "app-layout__link app-layout__link--active" : "app-layout__link"
+            }
+          >
+            Coordination
+          </NavLink>
         </nav>
       </header>
       <main className="app-layout__content">{children}</main>

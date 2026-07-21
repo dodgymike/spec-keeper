@@ -75,6 +75,11 @@ export interface Task {
   completed_at: string | null;
 }
 
+export interface Counter {
+  namespace: string;
+  current_value: number;
+}
+
 export interface TaskListParams {
   status?: TaskStatus;
   owner?: string;

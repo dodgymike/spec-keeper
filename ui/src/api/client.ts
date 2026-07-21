@@ -1,4 +1,4 @@
-import type { Epic, Project, Task, TaskListParams } from "./types";
+import type { Counter, Epic, Project, Task, TaskListParams } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8080";
 
@@ -99,4 +99,9 @@ export function listTasks(slug: string, params?: TaskListParams): Promise<Task[]
   return request<Task[]>(`/api/v1/projects/${encodeURIComponent(slug)}/tasks`, {
     params,
   });
+}
+
+/** Current reservation-counter value per namespace (e.g. `dynamo-gsi -> 5`). */
+export function listCounters(slug: string): Promise<Counter[]> {
+  return request<Counter[]>(`/api/v1/projects/${encodeURIComponent(slug)}/counters`);
 }
