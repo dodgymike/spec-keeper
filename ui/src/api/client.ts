@@ -17,11 +17,12 @@ import { getAccessToken, isCognitoConfigured, recoverFromUnauthorized } from "..
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8080";
 
 /**
- * Auth seam (UI-7/AUTH-5): when Cognito is configured (`VITE_COGNITO_DOMAIN`
- * + `VITE_COGNITO_CLIENT_ID`), returns the live access token from
- * `auth/session.ts` (refreshing first if it's near expiry). Otherwise falls
- * back to the dev-only `VITE_DEV_TOKEN` env var - the local-dev ergonomics
- * this project has always relied on, unchanged when Cognito isn't set up.
+ * Auth seam (HA-4): when Cognito is configured (`VITE_COGNITO_REGION` +
+ * `VITE_COGNITO_CLIENT_ID` + `VITE_COGNITO_USER_POOL_ID`), returns the live
+ * access token from `auth/session.ts` (refreshing first if it's near
+ * expiry). Otherwise falls back to the dev-only `VITE_DEV_TOKEN` env var -
+ * the local-dev ergonomics this project has always relied on, unchanged
+ * when Cognito isn't set up.
  */
 async function getToken(): Promise<string | undefined> {
   if (isCognitoConfigured()) {
@@ -65,10 +66,11 @@ function buildUrl(path: string, params?: object): string {
  * Core fetch wrapper: base URL, JSON handling, auth header, error shape.
  *
  * On a 401 with Cognito configured, tries one silent token refresh and
- * retries the request once; if the refresh also fails, `session.ts`
- * redirects to the Hosted UI sign-in (so callers here just see the
- * original 401 surfaced as an `ApiError`, never a blank screen or a retry
- * loop - `_retried` bounds this to a single attempt).
+ * retries the request once; if the refresh also fails, `session.ts` clears
+ * the session to `signed-out` (no redirect - `App.tsx` then renders the
+ * native `LoginPage`), so callers here just see the original 401 surfaced
+ * as an `ApiError`, never a blank screen or a retry loop - `_retried`
+ * bounds this to a single attempt).
  */
 async function request<T>(path: string, options: RequestOptions = {}, _retried = false): Promise<T> {
   const { method = "GET", params, body, headers = {} } = options;

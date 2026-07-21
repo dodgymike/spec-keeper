@@ -5,23 +5,24 @@ interface ImportMetaEnv {
   readonly VITE_API_BASE?: string;
   /**
    * Dev-only bearer token, used when Cognito is NOT configured (see
-   * `VITE_COGNITO_DOMAIN` below). Never set this in a production build.
+   * `VITE_COGNITO_CLIENT_ID` below). Never set this in a production build.
    */
   readonly VITE_DEV_TOKEN?: string;
   /**
-   * Cognito Hosted-UI domain host (no scheme), e.g.
-   * `spec-server-auth-ab12cd.auth.us-east-1.amazoncognito.com`. Unset ->
-   * auth is disabled and the app falls back to `VITE_DEV_TOKEN`/no auth.
+   * AWS region hosting the Cognito user pool, e.g. `eu-west-1`. Defaults to
+   * `eu-west-1` when unset. The app talks DIRECTLY to the regional
+   * Cognito-IDP JSON endpoint (`https://cognito-idp.<region>.amazonaws.com/`)
+   * - no Hosted UI, no OAuth/PKCE redirect, no Amplify.
    */
-  readonly VITE_COGNITO_DOMAIN?: string;
-  /** Public SPA app client ID (Authorization Code + PKCE, no secret). */
+  readonly VITE_COGNITO_REGION?: string;
+  /**
+   * Cognito user pool ID, e.g. `eu-west-1_AbCdEfGhI`. Unset (together with
+   * `VITE_COGNITO_CLIENT_ID`) -> auth is disabled and the app falls back to
+   * `VITE_DEV_TOKEN`/no auth.
+   */
+  readonly VITE_COGNITO_USER_POOL_ID?: string;
+  /** Public native (non-Hosted-UI) app client ID used directly against the Cognito-IDP JSON API. */
   readonly VITE_COGNITO_CLIENT_ID?: string;
-  /** OAuth redirect_uri; must exactly match a callback URL configured on the Cognito app client. Default: http://localhost:5173/callback */
-  readonly VITE_COGNITO_REDIRECT_URI?: string;
-  /** Cognito logout redirect (logout_uri); must exactly match a configured logout URL. Default: http://localhost:5173/ */
-  readonly VITE_COGNITO_LOGOUT_URI?: string;
-  /** Space-separated OAuth scopes. Default: "openid email profile" */
-  readonly VITE_COGNITO_SCOPES?: string;
 }
 
 interface ImportMeta {

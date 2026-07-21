@@ -29,48 +29,59 @@ Copy `.env.example` to `.env.local` and adjust as needed:
 | --- | --- | --- |
 | `VITE_API_BASE` | `http://localhost:8080` | Base URL of the running Spec Server API. |
 | `VITE_DEV_TOKEN` | unset | Optional dev-only bearer token, sent as `Authorization: Bearer <token>`. Only used when Cognito (below) is not configured; only needed if the API is deployed with `API_KEYS` configured. |
-| `VITE_COGNITO_DOMAIN` | unset | Cognito Hosted-UI domain host (no scheme), e.g. `spec-server-auth-ab12cd.auth.us-east-1.amazoncognito.com`. Leave unset to disable the login flow entirely (local-dev fallback below). |
-| `VITE_COGNITO_CLIENT_ID` | unset | Public SPA app client ID (Authorization Code + PKCE, no secret). |
-| `VITE_COGNITO_REDIRECT_URI` | `http://localhost:5173/callback` | OAuth `redirect_uri`; must exactly match a callback URL allowed on the Cognito app client. |
-| `VITE_COGNITO_LOGOUT_URI` | `http://localhost:5173/` | Cognito `logout_uri`; must exactly match a logout URL allowed on the Cognito app client. |
-| `VITE_COGNITO_SCOPES` | `openid email profile` | Space-separated OAuth scopes requested at sign-in. |
+| `VITE_COGNITO_REGION` | `eu-west-1` | AWS region hosting the Cognito user pool (the app calls the regional Cognito-IDP JSON API directly). |
+| `VITE_COGNITO_USER_POOL_ID` | unset | Cognito user pool ID, e.g. `eu-west-1_AbCdEfGhI`. |
+| `VITE_COGNITO_CLIENT_ID` | unset | Public **native** app client ID for the human `ui` client (no secret, no PKCE/OAuth involved). |
 
-### Human sign-in (UI-7 / AUTH-5)
+Cognito is considered "configured" when `VITE_COGNITO_REGION`,
+`VITE_COGNITO_CLIENT_ID`, and `VITE_COGNITO_USER_POOL_ID` are all set;
+otherwise the login flow is disabled entirely (local-dev fallback below).
 
-When `VITE_COGNITO_DOMAIN` and `VITE_COGNITO_CLIENT_ID` are both set, the app
-requires sign-in via the Cognito Hosted UI (Authorization Code + PKCE,
-`src/auth/`):
+### Human sign-in (UI-7 / AUTH-5 / HA-4)
 
-- `src/auth/pkce.ts` - hand-rolled PKCE (`crypto.subtle` SHA-256 for the
-  `S256` code_challenge, `crypto.getRandomValues` for the verifier/state).
-  No OIDC library, no CDN script - CSP-clean by construction.
-- `src/auth/session.ts` - a framework-agnostic singleton that builds the
-  authorize/logout URLs, exchanges the code for tokens at
-  `https://<domain>/oauth2/token`, and holds the access/id/refresh tokens
-  **in memory only** (never written to local/session storage - the PKCE
-  `code_verifier` and OAuth `state` are the only things briefly stashed in
-  `sessionStorage`, cleared as soon as the callback completes). Refresh
-  happens silently ahead of expiry, and again on any API 401
-  (`recoverFromUnauthorized()`); if refresh fails, it redirects to sign-in.
+When Cognito is configured (see above), the app requires sign-in via
+**native Cognito WebAuthn passkeys** - it talks directly to the regional
+Cognito-IDP JSON API over `fetch`; there is no Amplify, no Hosted UI, and no
+OAuth/PKCE redirect. The auth code lives in `src/auth/`:
+
+- `src/auth/cognito.ts` - the Cognito-IDP JSON API client and WebAuthn
+  credential marshalling (`InitiateAuth`/`RespondToAuthChallenge` with the
+  `USER_AUTH` and `WEB_AUTHN` challenge flows, `navigator.credentials`
+  encoding/decoding). No OIDC library, no CDN script - CSP-clean by
+  construction.
+- `src/auth/session.ts` - a framework-agnostic singleton holding the
+  sign-in/sign-up/recovery flows and the access/id/refresh tokens **in
+  memory only** - never written to local/session storage. A page reload
+  requires re-authentication.
+- `src/auth/config.ts` / `src/auth/errors.ts` - env-driven config
+  (region/user pool/client id) and typed Cognito error mapping.
 - `src/auth/AuthContext.tsx` - a small React context wrapping that singleton
-  for the header user chip and the sign-in screen.
-- `src/pages/SignInPage.tsx` / `src/pages/CallbackPage.tsx` - the minimal
-  sign-in screen and the `/callback` redirect handler (spinner, focus moved
-  to the view on mount, `aria-live` status, then a router redirect back to
-  wherever the user was).
+  for the header user chip and the auth pages.
+- `src/pages/LoginPage.tsx` - native passkey sign-in (`USER_AUTH` +
+  `WEB_AUTHN`) with an "email me a code instead" recovery path
+  (`CUSTOM_AUTH` email one-time-code).
+- `src/pages/JoinPage.tsx` - invite-only onboarding at `/join?code=...`:
+  `SignUp` with the invite code passed via `clientMetadata`, followed by
+  email-OTP verification and passkey enrolment.
+- `src/pages/SettingsPage.tsx` - lists the signed-in user's registered
+  passkeys and lets them add or remove one.
 
-**Local-dev fallback:** leaving `VITE_COGNITO_DOMAIN`/`VITE_COGNITO_CLIENT_ID`
-unset disables this entirely - no login screen, no redirect - and
-`client.ts`'s `getToken()` falls back to `VITE_DEV_TOKEN` (or no auth), so the
-dashboard runs against a local open server exactly as before.
+There is no `/callback` route - sign-in never leaves the page (no
+redirect-based OAuth flow to complete).
 
-**CSP note (for INFRA-5's CloudFront config):** the SPA's only additional
-network origin beyond the API is the Cognito Hosted-UI domain
-(`VITE_COGNITO_DOMAIN`) - `connect-src` needs
-`https://<VITE_COGNITO_DOMAIN>` (the app calls `/oauth2/token` there), and
-top-level navigation (not fetch) goes to `https://<VITE_COGNITO_DOMAIN>/oauth2/authorize`
-and `/logout`, which CSP `connect-src`/`frame-src` don't need to allow but
-`form-action`/navigation policy should permit if enforced.
+**WebAuthn RP ID:** the relying-party ID is the site host
+(`window.location.hostname`) - i.e. the CloudFront host in production.
+
+**Local-dev fallback:** leaving Cognito unconfigured disables this entirely -
+no login screen, no redirect - and `client.ts`'s `getToken()` falls back to
+`VITE_DEV_TOKEN` (or no auth), so the dashboard runs against a local open
+server exactly as before.
+
+**CSP note (for INFRA-5's CloudFront config):** because the app calls the
+Cognito-IDP JSON API directly via `fetch`, `connect-src` must include
+`https://cognito-idp.<VITE_COGNITO_REGION>.amazonaws.com` (e.g.
+`https://cognito-idp.eu-west-1.amazonaws.com`). There is no separate Hosted-UI
+domain and no top-level navigation to Cognito.
 
 ## Building
 
@@ -119,8 +130,9 @@ here"). It is a dependency for AUTH/INFRA work and should allow, at minimum:
 - Attaches `Authorization: Bearer <token>` when `getToken()` returns a value
   - the live Cognito access token (`src/auth/session.ts`) when configured,
   falling back to `VITE_DEV_TOKEN` otherwise (see "Human sign-in" above).
-- On a `401`, attempts one silent token refresh and retries once; if that
-  also fails, redirects to sign-in instead of leaving a blank screen.
+- On a `401` with Cognito configured, attempts one silent token refresh and
+  retries once; if that also fails, `session.ts` clears the session (no
+  redirect) and `App.tsx` renders `LoginPage` in its place.
 - Throws a typed `ApiError` (with `status` and parsed `body`) on non-2xx
   responses, so callers can render a graceful error state instead of a blank
   screen.

@@ -33,6 +33,16 @@ export function AppLayout({ children }: AppLayoutProps) {
           >
             Coordination
           </NavLink>
+          {status === "signed-in" ? (
+            <NavLink
+              to="/settings"
+              className={({ isActive }) =>
+                isActive ? "app-layout__link app-layout__link--active" : "app-layout__link"
+              }
+            >
+              Settings
+            </NavLink>
+          ) : null}
         </nav>
         <div className="app-layout__auth" role="status" aria-live="polite">
           {status === "signed-in" ? (
@@ -40,7 +50,7 @@ export function AppLayout({ children }: AppLayoutProps) {
               <span className="app-layout__user">
                 {user?.email ? `Signed in as ${user.email}` : "Signed in"}
               </span>
-              <button type="button" className="app-layout__signout" onClick={() => signOut()}>
+              <button type="button" className="app-layout__signout" onClick={() => void signOut()}>
                 Sign out
               </button>
             </>

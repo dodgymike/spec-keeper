@@ -1,27 +1,20 @@
 /**
- * Framework-agnostic auth session singleton: builds the Cognito Hosted-UI
- * authorize/logout URLs, exchanges the authorization code for tokens at the
- * token endpoint (public client, no secret - PKCE verifier proves
- * possession instead), and holds the access/id/refresh tokens **in memory
- * only** (never persisted to localStorage/sessionStorage, so a real XSS
- * can't read them off disk; a page reload starts a fresh sign-in).
- *
- * `state` + PKCE `code_verifier` are stashed in `sessionStorage` only for
- * the short round trip to the Hosted UI and back (cleared as soon as the
- * callback is handled).
+ * Framework-agnostic auth session singleton. Holds the access/id/refresh
+ * tokens **in memory only** (never written to localStorage/sessionStorage -
+ * a page reload always starts a fresh session) and drives them via the
+ * stateless Cognito-IDP client in `cognito.ts` (native WebAuthn passkeys +
+ * email-OTP - no Hosted UI, no OAuth/PKCE redirect).
  *
  * `client.ts` (the API client) is a plain module, not a React component, so
  * it talks to this singleton directly via `getAccessToken()` /
  * `recoverFromUnauthorized()` rather than through the React context.
  * `auth/AuthContext.tsx` wraps this same singleton for React consumers
- * (header user chip, sign-in/out screens) via `subscribe()`.
+ * (header user chip, settings page) via `subscribe()`. `pages/LoginPage.tsx`
+ * and `pages/JoinPage.tsx` drive the sign-in/sign-up ceremonies directly via
+ * `cognito.ts` and hand the result to `adoptTokens()`.
  */
-import { cognitoConfig } from "./config";
-import { deriveCodeChallenge, generateRandomToken } from "./pkce";
-
-const VERIFIER_KEY = "spec_server_auth_verifier";
-const STATE_KEY = "spec_server_auth_state";
-const RETURN_TO_KEY = "spec_server_auth_return_to";
+import * as cognito from "./cognito";
+import type { AuthenticationResult, Passkey } from "./cognito";
 
 export interface AuthUser {
   email?: string;
@@ -34,6 +27,15 @@ export interface AuthState {
   status: AuthStatus;
   user: AuthUser | null;
   error?: string;
+  /**
+   * True right after an OTP/recovery-style sign-in (email-OTP recovery, or
+   * `/join` onboarding) completes, so the App shell can offer passkey
+   * enrolment. `LoginPage`/`JoinPage` unmount the instant `adoptTokens()`
+   * flips `status` to "signed-in" (App only renders them while signed-out /
+   * on `/join*`), so the offer has to live at the App level - see
+   * `App.tsx`'s `PasskeyOfferScreen`.
+   */
+  pendingPasskeyOffer: boolean;
 }
 
 interface TokenSet {
@@ -47,7 +49,11 @@ interface TokenSet {
 type Listener = (state: AuthState) => void;
 
 let tokens: TokenSet | null = null;
-let authState: AuthState = { status: cognitoConfig ? "signed-out" : "disabled", user: null };
+let authState: AuthState = {
+  status: cognito.isCognitoConfigured() ? "signed-out" : "disabled",
+  user: null,
+  pendingPasskeyOffer: false,
+};
 const listeners = new Set<Listener>();
 
 function setState(next: AuthState): void {
@@ -65,167 +71,78 @@ export function subscribe(listener: Listener): () => void {
 }
 
 export function isCognitoConfigured(): boolean {
-  return Boolean(cognitoConfig);
+  return cognito.isCognitoConfigured();
 }
 
-function decodeJwtPayload(jwt: string): Record<string, unknown> {
-  const segment = jwt.split(".")[1];
-  if (!segment) return {};
-  const normalized = segment.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
-  try {
-    return JSON.parse(atob(padded)) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
-}
-
-function applyTokens(next: TokenSet): void {
-  tokens = next;
-  const claims = decodeJwtPayload(next.idToken);
+function applyTokens(result: AuthenticationResult, pendingPasskeyOffer: boolean): void {
+  const claims = cognito.decodeJwtPayload(result.IdToken);
+  tokens = {
+    accessToken: result.AccessToken,
+    idToken: result.IdToken,
+    // RefreshToken is only returned on the initial authentication, not on refresh.
+    refreshToken: result.RefreshToken ?? tokens?.refreshToken,
+    expiresAt: Date.now() + (result.ExpiresIn ?? 3600) * 1000,
+  };
   setState({
     status: "signed-in",
     user: {
       email: typeof claims.email === "string" ? claims.email : undefined,
       sub: typeof claims.sub === "string" ? claims.sub : undefined,
     },
-  });
-}
-
-function clearTokens(): void {
-  tokens = null;
-  sessionStorage.removeItem(VERIFIER_KEY);
-  sessionStorage.removeItem(STATE_KEY);
-  sessionStorage.removeItem(RETURN_TO_KEY);
-}
-
-/** Redirect to the Cognito Hosted UI to start Authorization Code + PKCE. */
-export async function signIn(returnTo?: string): Promise<void> {
-  if (!cognitoConfig) return;
-  const verifier = generateRandomToken();
-  const requestState = generateRandomToken();
-  const challenge = await deriveCodeChallenge(verifier);
-
-  sessionStorage.setItem(VERIFIER_KEY, verifier);
-  sessionStorage.setItem(STATE_KEY, requestState);
-  sessionStorage.setItem(RETURN_TO_KEY, returnTo ?? `${window.location.pathname}${window.location.search}`);
-
-  const url = new URL(`https://${cognitoConfig.domain}/oauth2/authorize`);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("client_id", cognitoConfig.clientId);
-  url.searchParams.set("redirect_uri", cognitoConfig.redirectUri);
-  url.searchParams.set("scope", cognitoConfig.scopes);
-  url.searchParams.set("state", requestState);
-  url.searchParams.set("code_challenge", challenge);
-  url.searchParams.set("code_challenge_method", "S256");
-
-  window.location.assign(url.toString());
-}
-
-/** Clear local session state and redirect through the Cognito logout endpoint. */
-export function signOut(): void {
-  clearTokens();
-  if (!cognitoConfig) {
-    setState({ status: "disabled", user: null });
-    return;
-  }
-  setState({ status: "signed-out", user: null });
-  const url = new URL(`https://${cognitoConfig.domain}/logout`);
-  url.searchParams.set("client_id", cognitoConfig.clientId);
-  url.searchParams.set("logout_uri", cognitoConfig.logoutUri);
-  window.location.assign(url.toString());
-}
-
-async function exchangeToken(body: URLSearchParams): Promise<void> {
-  if (!cognitoConfig) throw new Error("Cognito is not configured.");
-  const previousRefreshToken = tokens?.refreshToken;
-  const response = await fetch(`https://${cognitoConfig.domain}/oauth2/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  if (!response.ok) {
-    throw new Error(`Cognito token endpoint returned ${response.status}`);
-  }
-  const data = (await response.json()) as {
-    access_token: string;
-    id_token: string;
-    refresh_token?: string;
-    expires_in: number;
-  };
-  applyTokens({
-    accessToken: data.access_token,
-    idToken: data.id_token,
-    // The refresh grant does not always return a new refresh_token; keep
-    // the previous one in that case.
-    refreshToken: data.refresh_token ?? previousRefreshToken,
-    expiresAt: Date.now() + data.expires_in * 1000,
+    pendingPasskeyOffer,
   });
 }
 
 /**
- * Handle the `/callback` redirect: validate `state`, exchange `code` for
- * tokens using the stashed PKCE verifier (public client - no secret).
- * Returns the path the user was on before `signIn()` sent them to Cognito.
+ * Apply a completed ceremony's tokens (passkey sign-in, email-OTP, sign-up).
+ * Pass `{ offerPasskey: true }` for OTP/recovery-style sign-ins (email-OTP
+ * recovery, `/join` onboarding) where the user may not have a passkey yet;
+ * omit it (or pass `false`) for ordinary passkey sign-in.
  */
-export async function handleCallback(params: URLSearchParams): Promise<string> {
-  if (!cognitoConfig) throw new Error("Cognito is not configured.");
-  const returnTo = sessionStorage.getItem(RETURN_TO_KEY) || "/";
-
-  const oauthError = params.get("error");
-  if (oauthError) {
-    clearTokens();
-    setState({ status: "signed-out", user: null, error: params.get("error_description") ?? oauthError });
-    throw new Error(oauthError);
-  }
-
-  const code = params.get("code");
-  const returnedState = params.get("state");
-  const expectedState = sessionStorage.getItem(STATE_KEY);
-  const verifier = sessionStorage.getItem(VERIFIER_KEY);
-
-  if (!code || !returnedState || !verifier || returnedState !== expectedState) {
-    clearTokens();
-    setState({ status: "signed-out", user: null, error: "Sign-in response failed validation." });
-    throw new Error("Invalid OAuth callback (state mismatch or missing code/verifier).");
-  }
-
-  sessionStorage.removeItem(STATE_KEY);
-  sessionStorage.removeItem(VERIFIER_KEY);
-  sessionStorage.removeItem(RETURN_TO_KEY);
-
-  await exchangeToken(
-    new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: cognitoConfig.clientId,
-      code,
-      redirect_uri: cognitoConfig.redirectUri,
-      code_verifier: verifier,
-    })
-  );
-
-  return returnTo;
+export function adoptTokens(result: AuthenticationResult, options?: { offerPasskey?: boolean }): void {
+  applyTokens(result, options?.offerPasskey ?? false);
 }
 
-async function refresh(): Promise<boolean> {
-  if (!cognitoConfig || !tokens?.refreshToken) return false;
-  try {
-    await exchangeToken(
-      new URLSearchParams({
-        grant_type: "refresh_token",
-        client_id: cognitoConfig.clientId,
-        refresh_token: tokens.refreshToken,
-      })
-    );
-    return true;
-  } catch {
-    clearTokens();
-    setState({ status: "signed-out", user: null });
-    return false;
-  }
+/** Dismiss the post-sign-in passkey offer (App.tsx's `PasskeyOfferScreen`). */
+export function dismissPasskeyOffer(): void {
+  if (!authState.pendingPasskeyOffer) return;
+  setState({ ...authState, pendingPasskeyOffer: false });
+}
+
+function clearTokens(): void {
+  tokens = null;
 }
 
 const EXPIRY_SKEW_MS = 30_000;
+
+// Single-flight refresh: a page can have more than one caller triggering
+// getAccessToken()/recoverFromUnauthorized() near-simultaneously; without
+// de-duplication both would POST the same refresh token concurrently.
+let refreshInFlight: Promise<string | undefined> | null = null;
+
+async function refresh(): Promise<string | undefined> {
+  if (refreshInFlight) return refreshInFlight;
+  if (!tokens?.refreshToken) return undefined;
+  const refreshToken = tokens.refreshToken;
+  const attempt = (async (): Promise<string | undefined> => {
+    try {
+      const result = await cognito.refreshTokens(refreshToken);
+      // A silent token refresh never changes whether a passkey offer is
+      // pending - carry the current value forward rather than resetting it.
+      applyTokens(result, authState.pendingPasskeyOffer);
+      return tokens?.accessToken;
+    } catch {
+      clearTokens();
+      setState({ status: "signed-out", user: null, pendingPasskeyOffer: false });
+      return undefined;
+    }
+  })();
+  refreshInFlight = attempt;
+  void attempt.finally(() => {
+    if (refreshInFlight === attempt) refreshInFlight = null;
+  });
+  return attempt;
+}
 
 /**
  * Current access token, silently refreshing first if it's expired or about
@@ -233,23 +150,63 @@ const EXPIRY_SKEW_MS = 30_000;
  * fall back to `VITE_DEV_TOKEN`) or when there is no session yet.
  */
 export async function getAccessToken(): Promise<string | undefined> {
-  if (!cognitoConfig) return undefined;
+  if (!cognito.isCognitoConfigured()) return undefined;
   if (tokens && tokens.expiresAt - EXPIRY_SKEW_MS > Date.now()) {
     return tokens.accessToken;
   }
-  const refreshed = await refresh();
-  return refreshed ? tokens?.accessToken : undefined;
+  return refresh();
 }
 
 /**
- * Called by `client.ts` on a 401: try one silent refresh; on failure,
- * redirect to the Hosted UI sign-in (never leaves the caller on a blank
- * screen or looping retries).
+ * Called by `client.ts` on a 401: try one silent refresh; on failure, clear
+ * the session and return `undefined` (no redirect - `App.tsx` renders
+ * `LoginPage` for `status === "signed-out"`).
  */
 export async function recoverFromUnauthorized(): Promise<string | undefined> {
-  if (!cognitoConfig) return undefined;
+  if (!cognito.isCognitoConfigured()) return undefined;
   const refreshed = await refresh();
-  if (refreshed) return tokens?.accessToken;
-  await signIn();
+  if (refreshed) return refreshed;
+  clearTokens();
+  setState({ status: "signed-out", user: null, pendingPasskeyOffer: false });
   return undefined;
+}
+
+/** Best-effort GlobalSignOut, then clear the local session. No redirect. */
+export async function signOut(): Promise<void> {
+  const accessToken = tokens?.accessToken;
+  if (accessToken) {
+    await cognito.globalSignOut(accessToken);
+  }
+  clearTokens();
+  setState({
+    status: cognito.isCognitoConfigured() ? "signed-out" : "disabled",
+    user: null,
+    pendingPasskeyOffer: false,
+  });
+}
+
+async function requireAccessToken(): Promise<string> {
+  const accessToken = await getAccessToken();
+  if (!accessToken) {
+    throw new Error("Not signed in.");
+  }
+  return accessToken;
+}
+
+/** Enrol a new passkey for the signed-in user (Settings, or post-OTP onboarding). */
+export async function enrolPasskey(): Promise<void> {
+  const accessToken = await requireAccessToken();
+  await cognito.enrolPasskey(accessToken);
+}
+
+/** List the signed-in user's registered passkeys (Settings -> Security). */
+export async function listPasskeys(): Promise<Passkey[]> {
+  const accessToken = await requireAccessToken();
+  return cognito.listPasskeys(accessToken);
+}
+
+/** Remove one of the signed-in user's passkeys (Settings -> Security). */
+export async function deletePasskey(credentialId: string): Promise<void> {
+  const accessToken = await requireAccessToken();
+  await cognito.deletePasskey(accessToken, credentialId);
 }

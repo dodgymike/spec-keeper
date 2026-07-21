@@ -3,13 +3,12 @@ import * as session from "./session";
 import type { AuthState } from "./session";
 
 interface AuthContextValue extends AuthState {
-  signIn: (returnTo?: string) => Promise<void>;
-  signOut: () => void;
+  signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-/** Wraps `auth/session.ts`'s singleton for React consumers (header, sign-in screen). */
+/** Wraps `auth/session.ts`'s singleton for React consumers (header, settings page). */
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>(session.getState());
 
@@ -17,7 +16,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const value: AuthContextValue = {
     ...state,
-    signIn: session.signIn,
     signOut: session.signOut,
   };
 
