@@ -22,8 +22,8 @@
   --color-accent-strong: #23409e;
 
   /* Colour: status (mirrors app.models.TaskStatus) */
-  --color-status-todo: #6b7280;
-  --color-status-in_progress: #b45309;
+  --color-status-todo: #525a67;
+  --color-status-in_progress: #a34a08;
   --color-status-blocked: #b91c1c;
   --color-status-deferred: #6d28d9;
   --color-status-done: #15803d;

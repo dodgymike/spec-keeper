@@ -19,7 +19,15 @@
   color: var(--color-text-muted);
 }
 
-/* Status-coloured variant, mirrors Badge's [data-status] palette. */
+/*
+ * Status-coloured variant, mirrors Badge's [data-status] palette: the text
+ * colour is only guaranteed to hit the 4.5:1 contrast floor against its own
+ * paired tinted background (see Badge.css), not against the generic
+ * --color-bg-sunken chip background. Note stat-chip__value is 16px/700 -
+ * bold weight does not exempt it from the 4.5:1 normal-text floor (it would
+ * only relax to 3:1 at >=18.66px/700 or >=24px regular), so keep these
+ * text/background pairs in lockstep with Badge's tokens.
+ */
 .stat-chip--status[data-status="todo"] .stat-chip__value {
   color: var(--color-status-todo);
 }
@@ -46,4 +54,32 @@
 
 .stat-chip--status[data-status="cancelled"] .stat-chip__value {
   color: var(--color-status-cancelled);
+}
+
+.stat-chip--status[data-status="todo"] {
+  background: var(--color-status-todo-bg);
+}
+
+.stat-chip--status[data-status="in_progress"] {
+  background: var(--color-status-in_progress-bg);
+}
+
+.stat-chip--status[data-status="blocked"] {
+  background: var(--color-status-blocked-bg);
+}
+
+.stat-chip--status[data-status="deferred"] {
+  background: var(--color-status-deferred-bg);
+}
+
+.stat-chip--status[data-status="done"] {
+  background: var(--color-status-done-bg);
+}
+
+.stat-chip--status[data-status="superseded"] {
+  background: var(--color-status-superseded-bg);
+}
+
+.stat-chip--status[data-status="cancelled"] {
+  background: var(--color-status-cancelled-bg);
 }

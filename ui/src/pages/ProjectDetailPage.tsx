@@ -17,7 +17,7 @@ export function ProjectDetailPage() {
       </p>
       <Card>
         <h1 className="project-detail-page__slug">{slug}</h1>
-        <p className="project-detail-page__placeholder">Coming soon.</p>
+        <p className="project-detail-page__placeholder">Not yet implemented.</p>
       </Card>
     </section>
   );

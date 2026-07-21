@@ -65,9 +65,37 @@ function countStalled(tasks: Task[]): number {
   ).length;
 }
 
+/** How often the "Updated Ns ago" indicator re-renders to stay current. */
+const RELATIVE_TIME_TICK_MS = 1000;
+/** How often the project list auto-refreshes in the background. */
+const AUTO_REFRESH_MS = 30_000;
+
+/** Formats a millisecond duration as a short "Ns ago" / "Nm ago" string. */
+function formatRelativeTime(elapsedMs: number): string {
+  const seconds = Math.max(0, Math.round(elapsedMs / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  return `${minutes}m ago`;
+}
+
 export function ProjectsPage() {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [rollups, setRollups] = useState<Record<string, RollupState>>({});
+  // Bumping `reload` re-runs the fetch effect below - it backs both the
+  // manual Refresh/Retry controls and the 30s auto-refresh interval.
+  const [reload, setReload] = useState(0);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), RELATIVE_TIME_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => setReload((r) => r + 1), AUTO_REFRESH_MS);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +104,7 @@ export function ProjectsPage() {
       .then((projects) => {
         if (cancelled) return;
         setState({ status: "ready", projects });
+        setLastUpdated(Date.now());
       })
       .catch((error: unknown) => {
         if (!cancelled) {
@@ -88,7 +117,7 @@ export function ProjectsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reload]);
 
   useEffect(() => {
     if (state.status !== "ready") return;
@@ -140,6 +169,20 @@ export function ProjectsPage() {
     <section className="projects-page">
       <header className="projects-page__header">
         <h1 className="projects-page__title">Projects</h1>
+        <div className="projects-page__header-controls">
+          {lastUpdated !== null && (
+            <span className="projects-page__updated">
+              Updated {formatRelativeTime(now - lastUpdated)}
+            </span>
+          )}
+          <button
+            type="button"
+            className="projects-page__refresh-button"
+            onClick={() => setReload((r) => r + 1)}
+          >
+            Refresh
+          </button>
+        </div>
       </header>
 
       {state.status === "loading" && <ProjectsSkeleton />}
@@ -148,12 +191,19 @@ export function ProjectsPage() {
         <Card className="projects-page__error">
           <p>Could not load projects from the Spec Server API.</p>
           <p className="projects-page__error-detail">{state.error.message}</p>
+          <button
+            type="button"
+            className="projects-page__retry-button"
+            onClick={() => setReload((r) => r + 1)}
+          >
+            Retry
+          </button>
         </Card>
       )}
 
       {state.status === "ready" && state.projects.length === 0 && (
         <Card>
-          <p>No projects yet.</p>
+          <p>No projects.</p>
         </Card>
       )}
 
@@ -175,12 +225,9 @@ interface ProjectCardProps {
 
 function ProjectCard({ project, rollup }: ProjectCardProps) {
   return (
-    <Link
-      to={`/projects/${encodeURIComponent(project.slug)}`}
-      className="project-card-link"
-      aria-label={`Open ${project.name}`}
-    >
+    <Link to={`/projects/${encodeURIComponent(project.slug)}`} className="project-card-link">
       <Card className="project-card">
+        <span className="sr-only">Open project </span>
         <h2 className="project-card__name">{project.name}</h2>
         <p className="project-card__slug">{project.slug}</p>
         {project.description && <p className="project-card__description">{project.description}</p>}
@@ -229,7 +276,7 @@ function ProjectRollup({ epicCount, counts, stalledCount }: ProjectRollupProps) 
         <StatChip label="in progress" value={counts.in_progress} status="in_progress" />
         <StatChip label="todo" value={counts.todo} status="todo" />
         <StatChip label="epics" value={epicCount} />
-        <StatChip label="complete" value={completionPct === null ? "—" : `${completionPct}%`} />
+        <StatChip label="% done" value={completionPct === null ? "—" : `${completionPct}%`} />
       </div>
 
       <p className="project-card__health">
@@ -239,7 +286,7 @@ function ProjectRollup({ epicCount, counts, stalledCount }: ProjectRollupProps) 
             status="blocked"
           />
         ) : counts.in_progress > 0 ? (
-          <Badge label={`${activeInProgress} active, none stalled`} status="in_progress" />
+          <Badge label={`${activeInProgress} in progress, none stalled`} status="in_progress" />
         ) : (
           <Badge label="no in-progress work" status="todo" />
         )}
