@@ -15,6 +15,50 @@ terraform wiring lives in `infra/terraform/lambda.tf` (function
 - **`build_lambda.sh`** — produces `build/lambda.zip` with aarch64/py3.12 wheels
   (`--platform manylinux2014_aarch64 --only-binary=:all:`) plus the app source at
   the archive root. `build/` is gitignored.
+- **`../requirements.lock`** — INFRA-7: the hash-pinned, full transitive-dependency
+  closure of `requirements.txt`, generated with `pip-compile --generate-hashes`.
+  This is the **source of truth for what actually gets built into the zip**;
+  `build_lambda.sh` installs from it with `--require-hashes` so the artifact
+  (and its `source_code_hash`) is reproducible across rebuilds/machines.
+  `requirements.txt` stays the short, human-readable list of *direct* deps —
+  it is not fed to pip directly by the build unless the lock is missing.
+
+## Regenerating `requirements.lock` (do this whenever `requirements.txt` changes)
+
+```bash
+python3 -m venv /tmp/lockvenv && source /tmp/lockvenv/bin/activate
+pip install --upgrade pip pip-tools
+pip-compile --generate-hashes --allow-unsafe --resolver=backtracking \
+  --output-file=requirements.lock requirements.txt
+```
+
+Then **verify it actually installs for the Lambda target** before committing
+(the lock is generated on whatever host runs this, but must resolve for
+`python3.12` / `manylinux2014_aarch64`, the target `build_lambda.sh` installs
+for):
+
+```bash
+python3 -m pip install --require-hashes \
+  --platform manylinux2014_aarch64 --implementation cp --python-version 3.12 \
+  --only-binary=:all: --target /tmp/lambda_check -r requirements.lock
+```
+
+**Known caveat — pin overrides for the Lambda platform tag.** pip's
+`--platform` install mode matches wheel tags *literally*; it does not expand
+the manylinux glibc-version hierarchy the way auto-detected host installs do.
+So a compiled package whose newest release dropped the legacy
+`manylinux2014_aarch64` wheel tag (only shipping newer `manylinux_2_2x_aarch64`
+tags) will resolve fine in the lock but then fail the install above. As of
+this writing that applies to `greenlet` and `psycopg[binary]`, so the lock
+pins them below latest with `-P greenlet==<version> -P psycopg==<version>`
+(see the header comment in `requirements.lock` for the exact versions and
+reasoning). If regenerating without those `-P` overrides fails the verify
+step above, find the newest version of the offending package that still ships
+a `manylinux2014_aarch64` (or `manylinux2014_x86_64`, for an x86_64 build)
+wheel and re-pin it the same way. If `build_lambda.sh`'s `PLATFORM` is ever
+changed (e.g. to a newer `manylinux_2_28_aarch64` baseline matching the
+Lambda `python3.12`/AL2023 runtime's actual glibc), re-verify and drop
+whichever `-P` overrides are no longer needed.
 
 ## Build (code-only; run by the deploy-coordinator, not committed)
 

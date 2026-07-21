@@ -36,6 +36,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/build}"
 PKG_DIR="$BUILD_DIR/package"
 OUTPUT_ZIP="${OUTPUT_ZIP:-$BUILD_DIR/lambda.zip}"
+# INFRA-7: requirements.lock (hash-pinned, full transitive closure) is the
+# source of truth for what actually gets deployed -- it is what makes
+# source_code_hash reproducible across rebuilds. requirements.txt stays the
+# human-readable direct-deps list; regenerate the lock with pip-compile
+# whenever it changes (see scripts/README-lambda.md).
+LOCKFILE="${LOCKFILE:-$REPO_ROOT/requirements.lock}"
 REQUIREMENTS="${REQUIREMENTS:-$REPO_ROOT/requirements.txt}"
 
 # --- Lambda target (MUST match infra/terraform/lambda.tf) ------------------ #
@@ -57,7 +63,27 @@ mkdir -p "$PKG_DIR"
 # (never the build host's) so compiled deps (psycopg[binary], cryptography) are
 # aarch64 manylinux wheels. If a required wheel is unavailable for the target,
 # pip fails loudly rather than silently shipping a host-arch binary.
-echo "[build_lambda] installing deps into $PKG_DIR ..."
+#
+# INFRA-7: prefer the hash-pinned lock (requirements.lock) with
+# --require-hashes so the artifact -- and its source_code_hash -- is
+# reproducible across rebuilds (every transitive dep pinned + hash-verified,
+# not just the direct deps in requirements.txt). Fall back to
+# requirements.txt (no hash verification) only if the lock is missing, with a
+# loud warning, so a fresh checkout still builds.
+if [[ -f "$LOCKFILE" ]]; then
+  echo "[build_lambda] installing deps from $LOCKFILE (--require-hashes) ..."
+  INSTALL_REQ="$LOCKFILE"
+  # The lock already pins every package to an exact version, and pip disallows
+  # combining --require-hashes with --upgrade's unpinned re-resolution.
+  EXTRA_PIP_ARGS=(--require-hashes)
+else
+  echo "[build_lambda] WARNING: $LOCKFILE not found -- falling back to" >&2
+  echo "[build_lambda] WARNING: $REQUIREMENTS (NOT hash-pinned; the build is" >&2
+  echo "[build_lambda] WARNING: NOT reproducible). Regenerate the lock: see" >&2
+  echo "[build_lambda] WARNING: scripts/README-lambda.md." >&2
+  INSTALL_REQ="$REQUIREMENTS"
+  EXTRA_PIP_ARGS=(--upgrade)
+fi
 # We install into a --target dir, not a virtualenv, so neutralise any host
 # `require-virtualenv` pip setting for THIS call only (does not leak out).
 PIP_REQUIRE_VIRTUALENV=false python3 -m pip install \
@@ -67,9 +93,9 @@ PIP_REQUIRE_VIRTUALENV=false python3 -m pip install \
   --implementation cp \
   --python-version "$PY_VERSION" \
   --only-binary=:all: \
-  --upgrade \
+  "${EXTRA_PIP_ARGS[@]}" \
   --target "$PKG_DIR" \
-  -r "$REQUIREMENTS"
+  -r "$INSTALL_REQ"
 
 # Trim dev/test-only weight that is never imported in the Lambda request path
 # (keeps the zip small => faster cold start). requirements.txt stays the single
