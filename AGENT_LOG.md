@@ -57,3 +57,24 @@ to the server's `/events` endpoint.
   the API. Backlog now **23 done / 0 todo** on the server.
 - SPEC.md is now a readable mirror; regenerate with `GET /projects/spec-server/export`.
 - Every epic from the original plan is shipped: MVP, PORT, LOG, HARDEN, chain tracking, DOGFOOD.
+
+## 2026-07-21 — AGENTS epic: integrate & adapt the bird-viz agent roster
+
+- New user goals opened 3 fronts: deploy the Spec Server as an authenticated AWS service
+  (decided: **Cognito OAuth2 client-credentials → JWT**), build a **React/Vite** project-viz UI,
+  and integrate the richer agent roster from the sibling `bird-song-visualisation` project.
+- Recreated the dogfood `spec-server` project in the running server and added **5 epics /
+  40 tasks** (AGENTS, SLS, AUTH, INFRA, UI) via spec-keeper.
+- AGENTS epic (this commit): adapted 11 agents + 1 skill from bird-viz into `.claude/`, retargeted
+  from bird/GPU to this serverless Flask→(Lambda + switchable Postgres/DynamoDB) service — notes
+  point at project `spec-server`, AWS profile `spec-server-infra`, all GPU/spot content removed,
+  concurrency framing moved to DynamoDB conditional-write / atomic-`ADD` primitives:
+  aws-infra, aws-cost-optimizer, aws-teardown-enforcer, deploy-coordinator, ui-reviewer,
+  architecture-reviewer, performance-reviewer, reliability-reviewer, data-reviewer, deep-diver,
+  report-writer, + the presentation-slides skill. Registered them in CLAUDE.md's roster.
+- Justification for streamlined chain: these are `.claude/` config/docs (no app code), so the
+  implementer/reviewer/security code-chain was authored directly by the orchestrator; task state
+  still flows through spec-keeper.
+- User mid-course correction: the DynamoDB move must be **switchable**, not a one-way port — SLS
+  epic reframed to a pluggable storage layer (Postgres reference impl + DynamoDB adapter, config-
+  selected) with an adapter-parity test suite.

@@ -21,8 +21,34 @@ Agent roster (`.claude/agents/`):
 - **feature-runner** — runs ONE task end-to-end through the mandated chain, code-only and
   parallel-safe. Use this INSTEAD OF a generic agent for any change touching app code.
 
+Extended roster (adapted from the sibling bird-viz project for the AWS-deploy + UI + serverless
+work — see the `AGENTS`, `SLS`, `AUTH`, `INFRA`, `UI` epics):
+- **architecture-reviewer** — reviews component boundaries, the DynamoDB/Postgres data model, and the
+  concurrency invariants. Read-only.
+- **data-reviewer** — reviews the pluggable storage layer (Postgres + DynamoDB adapters), schema/
+  migration discipline, key design, and adapter parity. Read-only.
+- **performance-reviewer** — reviews latency hot paths, cold starts, query efficiency, and per-request
+  cost. Read-only.
+- **reliability-reviewer** — reviews failure modes, idempotency, multi-item atomicity, and the
+  invariants under failure. Read-only.
+- **ui-reviewer** — reviews the React/Vite dashboard's UI/UX, a11y, CSP-cleanliness, and copy.
+  Read-only.
+- **aws-infra** — the ONLY role that mutates AWS infra (Terraform durable, CLI transient); serverless
+  stack (Lambda, DynamoDB, API Gateway, Cognito, CloudFront). Cost- and teardown-aware.
+- **aws-cost-optimizer** — advisory: hunts AWS cost (Lambda/DynamoDB/logs/orphans). Read-only.
+- **aws-teardown-enforcer** — owns the preview-env reaper; guarantees transient infra is torn down.
+- **deploy-coordinator** — the ONLY role that deploys; runs the single coordinated deploy wave +
+  mandatory unauthenticated-route smoke check.
+- **deep-diver** — investigates a hard "why is X broken / how to build Y" question → a `_DEEPDIVE.md`.
+- **report-writer** — maintains the self-contained HTML report (`report/report.html`), one tab per
+  completed task, assembled from the task's Spec Server note journal.
+
+Skill (`.claude/skills/`): **presentation-slides** — 16:9 matplotlib slides explaining the system.
+
 For ANY code change the chain **spec-keeper → implementer → reviewer → security** is
 MANDATORY; skipping a step requires an explicit one-line justification in `AGENT_LOG.md`.
+For **UI** changes add **ui-reviewer**; for **AWS infra** changes route through **aws-infra** (mutate)
+and **deploy-coordinator** (deploy) — never `terraform apply` from a generic agent.
 
 ## Source of truth
 
