@@ -257,10 +257,13 @@ resource "aws_cognito_user_pool" "this" {
   username_attributes      = ["email"]
   auto_verified_attributes = ["email"]
 
-  # No self-service open signups — humans are invited by an admin; agent users
-  # are created by this Terraform (admin create).
+  # Self-signup is ENABLED but gated by the PreSignUp trigger (HA-2), which burns
+  # a single-use invite code — so it is invite-only in practice, not open signup.
+  # allow_admin_create_user_only=true would BLOCK the SignUp API entirely and
+  # break the invite/passkey join flow ("SignUp is not permitted for this user
+  # pool"). Agent users are still created by Terraform via admin_create_user.
   admin_create_user_config {
-    allow_admin_create_user_only = true
+    allow_admin_create_user_only = false
   }
 
   # HA-1 — native WebAuthn passkeys. relying_party_id is domain-pinned to the
