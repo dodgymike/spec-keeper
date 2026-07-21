@@ -417,3 +417,41 @@ class InviteOut(Schema):
     expires_at = fields.Int(dump_only=True)
     email_bound = fields.Bool(dump_only=True)
     approved = fields.Bool(dump_only=True)
+
+
+# --------------------------------------------------------------------------- #
+# Admin user lifecycle (HA-5) — approve/reject/block/delete/promote the Cognito
+# users (humans AND agents) backing the pool. Approval is by GROUP membership:
+# a pending human is in NO spec-* group; approve adds spec-readers/spec-writers,
+# promote adds spec-admins, reject/block disables + strips spec-* groups.
+# --------------------------------------------------------------------------- #
+class AdminUsersQuery(Schema):
+    status = fields.Str(
+        required=False,
+        validate=validate.OneOf(["pending", "active"]),
+        metadata={"description": (
+            "Filter by derived lifecycle status: 'pending' (in no spec-* group) "
+            "or 'active' (in at least one spec-* group)."
+        )},
+    )
+
+
+class AdminUserOut(Schema):
+    """A listed pool user. Carries NO tokens/passwords — identity + status only."""
+    username = fields.Str(dump_only=True)
+    email = fields.Str(dump_only=True, allow_none=True)
+    enabled = fields.Bool(dump_only=True, metadata={"description": "False once blocked/rejected (Cognito-disabled)."})
+    status = fields.Str(dump_only=True, metadata={"description": "pending (no spec-* group) or active."})
+    groups = fields.List(fields.Str(), dump_only=True, metadata={"description": "The user's Cognito group memberships."})
+    created_at = fields.Str(dump_only=True, allow_none=True, metadata={"description": "ISO-8601 account creation time."})
+
+
+class AdminApproveIn(Schema):
+    group = fields.Str(
+        load_default=None,
+        validate=validate.OneOf(["spec-readers", "spec-writers"]),
+        metadata={"description": (
+            "Group to grant on approval: 'spec-readers' (default) or "
+            "'spec-writers'. Admin promotion is a separate /promote action."
+        )},
+    )

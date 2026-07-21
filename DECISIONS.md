@@ -142,3 +142,21 @@ Decisions:
   can hard-pin BOTH their GET and POST to `admin` (a plain GET would otherwise only need `read`).
   Additive + backward-compatible: default `None` keeps the method+blueprint derivation for every
   existing caller.
+
+## DEC — 2026-07-21 — HA-5 admin user lifecycle: group-based approval + fail-closed self-guard
+- **Approval is by Cognito GROUP, not a stored status column.** A pending human sits in NO spec-*
+  group; approve adds spec-readers/spec-writers, promote adds spec-admins, reject/block disables the
+  Cognito user AND strips its spec-* groups. Derived `status` (pending/active) is computed from group
+  membership at list time. This keeps Cognito the single source of truth for who may sign in and with
+  what permission, reusing the existing group->permission model (AUTH-10) with no new storage.
+- **Added `cognito-idp:ListUsersInGroup` to the app Lambda IAM beyond the task's enumerated action
+  list.** The last-admin demote guardrail must enumerate the spec-admins group; there is no way to
+  count admins with only the enumerated actions. It stays least-privilege (scoped to the one pool ARN).
+- **Self-protected mutations (block/reject/delete/demote) fail closed (501) under static API_KEYS
+  auth.** The self-lockout guard reads the caller identity from the VERIFIED JWT (g.cognito_claims via
+  helpers.current_identity()); static-key auth carries no per-caller identity, so rather than run the
+  guard blind these mutations refuse. The canonical deploy always sets COGNITO_ISSUER, so this only
+  affects a misconfiguration. Reviewer + security both flagged the gap independently.
+- **Tests follow the HA-2 fake-client monkeypatch pattern (no moto).** moto is not a project
+  dependency; an in-memory FakeCognito monkeypatched into admin._cognito_client mirrors the existing
+  FakeTable approach for invites, keeping the test suite dependency-free.

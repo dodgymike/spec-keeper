@@ -127,6 +127,11 @@ resource "aws_lambda_function" "app" {
       COGNITO_ISSUER   = "https://${aws_cognito_user_pool.this.endpoint}"
       COGNITO_JWKS_URI = "https://${aws_cognito_user_pool.this.endpoint}/.well-known/jwks.json"
       COGNITO_AUDIENCE = join(",", local.cognito_agent_audiences)
+
+      # HA-5 — the pool the admin user-lifecycle API (GET/POST /api/v1/admin/
+      # users...) manages humans/agents in via cognito-idp admin actions (IAM in
+      # iam.tf, scoped to this pool ARN). Unset would make those endpoints 501.
+      COGNITO_USER_POOL_ID = aws_cognito_user_pool.this.id
     }
   }
 

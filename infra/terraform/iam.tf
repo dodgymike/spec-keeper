@@ -73,6 +73,31 @@ data "aws_iam_policy_document" "lambda_permissions" {
     ]
   }
 
+  # Cognito user-lifecycle admin actions (HA-5): the admin API approves/rejects/
+  # blocks/deletes/promotes human (and agent) users by GROUP membership. Scoped
+  # to EXACTLY the one user pool ARN (from cognito.tf) — never "*". Only the
+  # specific admin actions the endpoints call; no pool-admin (Create/DeleteGroup,
+  # UpdateUserPool) and no wildcard. ListUsersInGroup backs the last-admin
+  # guardrail; AdminGetUser backs the unknown-user 404 + self-action check.
+  statement {
+    sid    = "CognitoUserAdmin"
+    effect = "Allow"
+    actions = [
+      "cognito-idp:ListUsers",
+      "cognito-idp:ListUsersInGroup",
+      "cognito-idp:AdminGetUser",
+      "cognito-idp:AdminListGroupsForUser",
+      "cognito-idp:AdminAddUserToGroup",
+      "cognito-idp:AdminRemoveUserFromGroup",
+      "cognito-idp:AdminDisableUser",
+      "cognito-idp:AdminEnableUser",
+      "cognito-idp:AdminDeleteUser",
+    ]
+    resources = [
+      aws_cognito_user_pool.this.arn,
+    ]
+  }
+
   # CloudWatch Logs: write ONLY into this function's own log group + streams.
   # CreateLogGroup is intentionally omitted — the group is precreated in
   # lambda.tf with an explicit 30-day retention, so the runtime only needs to

@@ -50,6 +50,7 @@ which takes priority over no auth.
 | Mutating calls on `projects` / `agents` | admin |
 | All other mutating calls (tasks, epics, reservations, ports, log, chains) | write |
 | `GET` / `POST /admin/invites` | admin (both methods — invite listing/minting is admin-only, overriding the default `read` a `GET` would otherwise get) |
+| `/admin/users` and `/admin/users/{username}/*` (list/approve/reject/block/unblock/promote/demote/delete) | admin (all methods, overriding the default `read` a `GET` would otherwise get) |
 
 A request succeeds if ANY of the caller's groups grant the required permission — e.g. a
 `spec-writers` member has read+write but not admin; a `spec-admins` member has all three.
@@ -399,6 +400,76 @@ burns the matching row (one conditional update, `active`→`used`; enforces the 
 one was set), then auto-confirms and auto-verifies the new user — but adds them to **no group**.
 A human is approved by group membership, not a status field, so an admin must still add the new
 user to `spec-readers` (or higher) before they can call the API.
+
+## Admin: user lifecycle (HA-5)
+
+Seven endpoints under `/api/v1/admin`, all admin-gated (`spec-admins` group, same as the invites
+endpoints above) — again for a human admin/dashboard, not the agent workflow. All return **501**
+when `COGNITO_USER_POOL_ID` is unset (the local-dev default), mirroring the invites
+501-when-unconfigured contract. These apply equally to **agent** users — an agent is a Cognito
+user like any other.
+
+Human "approval" here is by **group membership**, not a status field: a user with no `spec-*`
+group is `pending`; a user in at least one is `active`. `enabled` reflects the Cognito
+enabled/disabled bit (`false` once blocked/rejected).
+
+**List pool users** (bounded walk, never an unbounded scan — at most 500 users):
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' "$B/admin/users?status=pending"
+# -> [{"username":"jdoe", "email":"jdoe@example.com", "enabled":true, "status":"pending",
+#      "groups":[], "created_at":"2026-07-01T12:00:00+00:00"}, ...]
+```
+`?status=pending|active` filters by the derived status above; omit it to list everyone.
+
+**Approve a pending user** (adds a group; default `spec-readers`):
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
+  -X POST $B/admin/users/jdoe/approve -d '{"group":"spec-writers"}'
+# -> 204
+```
+`group` is optional (`"spec-readers"` or `"spec-writers"`; default `spec-readers`). Admin
+promotion is a separate call (below), not something `approve` can grant.
+
+**Reject / block** — disable the Cognito account AND strip its `spec-*` groups:
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' -X POST $B/admin/users/jdoe/reject   # -> 204
+curl -s -H 'Authorization: Bearer <admin-token>' -X POST $B/admin/users/jdoe/block    # -> 204
+```
+
+**Unblock** — re-enable the account. Groups are **not** restored; re-grant with `/approve` or
+`/promote`:
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' -X POST $B/admin/users/jdoe/unblock  # -> 204
+```
+
+**Promote / demote** — add/remove `spec-admins`:
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' -X POST $B/admin/users/jdoe/promote  # -> 204
+curl -s -H 'Authorization: Bearer <admin-token>' -X POST $B/admin/users/jdoe/demote   # -> 204
+```
+
+**Delete** — hard-delete the user (`AdminDeleteUser`):
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' -X DELETE $B/admin/users/jdoe        # -> 204
+```
+
+**Guardrails:**
+- **404** when `username` doesn't exist in the pool; **409** on an illegal transition.
+- **Self-lockout protection:** `block`/`reject`/`delete`/`demote` refuse to act on the *calling*
+  admin (409) — you can't block or delete yourself, and `demote` additionally refuses to remove
+  the **last** remaining `spec-admins` member (409), so the pool can never end up admin-less.
+- Self-protection depends on knowing who the caller is from their verified JWT. Under **static
+  `API_KEYS` auth** (no `COGNITO_ISSUER` configured) the caller can't be identified that way, so
+  these four self-protected mutations (`block`/`reject`/`delete`/`demote`) return **501** rather
+  than run the guard blind — approve/unblock/promote/list are unaffected since they carry no
+  self-lockout risk.
+- Configured via `COGNITO_USER_POOL_ID` (env); `AWS_REGION` is reused from the existing AWS knobs.
 
 ## Conventions agents must honour
 

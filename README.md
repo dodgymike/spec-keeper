@@ -91,6 +91,9 @@ every knob.
   re-claimable); **pagination** on list endpoints.
 - **Invite-only human signup admin endpoints** (HA-2) — mint/list single-use invite codes
   (hash-only storage, admin-gated); see "Invite-only human signup" below.
+- **Admin user-lifecycle endpoints** (HA-5) — list/approve/reject/block/unblock/promote/demote/
+  delete Cognito pool users (including agent users), admin-gated; see "Admin: user lifecycle"
+  below.
 - **Alembic migrations**, **OpenAPI 3** + Swagger UI, **Docker** compose, and a **scheduled daily
   backup** (`scripts/backup.sh` via a launchd LaunchAgent).
 
@@ -186,6 +189,7 @@ optimistic-lock/412 contract — passes identically on both backends.
 | `INVITES_TABLE` | _(none)_ | Dedicated DynamoDB table backing invite-only human signup (HA-2): `POST`/`GET /api/v1/admin/invites`. Unset ⇒ both endpoints return 501 (local-dev graceful default). Wired from terraform output `invites_table_name` (`infra/terraform/invites.tf`). |
 | `INVITE_TTL_DAYS` | `14` | Default validity window (days) for a freshly minted invite; overridable per-invite via the mint request's `ttl_days` (1-90). |
 | `INVITE_JOIN_BASE_URL` | _(empty)_ | Base URL prefixed to the `join_url` the mint endpoint returns (e.g. `https://spec.example.com`); empty ⇒ a relative `/join?code=...` link. |
+| `COGNITO_USER_POOL_ID` | _(none)_ | Cognito user pool backing the admin user-lifecycle endpoints (HA-5): `/api/v1/admin/users*` (list/approve/reject/block/unblock/promote/demote/delete). Unset ⇒ every `/admin/users*` endpoint returns 501 (local-dev graceful default), same contract as `INVITES_TABLE` above. Reuses `AWS_REGION`. Wired from terraform output `cognito_user_pool_id` (`infra/terraform/cognito.tf`). |
 | `LEASE_DEFAULT_TTL` | `1800` | Claimed-task lease seconds |
 | `API_KEYS` | _(empty)_ | Comma-separated bearer tokens (legacy static auth). Empty ⇒ auth off (local-only). Ignored if `COGNITO_ISSUER` is set. |
 | `COGNITO_ISSUER` | _(empty)_ | OIDC issuer for Cognito RS256 JWT auth (AUTH-2/AUTH-10). When set, takes precedence over `API_KEYS`. Authorization is by Cognito group membership (`AUTH_GROUPS_CLAIM`, `AUTH_GROUP_READ`/`WRITE`/`ADMIN`), not scopes. See `AGENTS_API.md` → "Authentication" and `.env.example` for the full `COGNITO_*`/`JWKS_*`/`AUTH_GROUP_*` knob set. |
@@ -220,6 +224,20 @@ code at signup (auto-confirm/verify, no group added) and outputs `presignup_lamb
 is wired as the user pool's `pre_sign_up` trigger by the separate HA-3 pool cutover, which owns
 `cognito.tf` (this file never edits it). See `AGENTS_API.md` → "Admin: invite-only human signup"
 for the request/response shapes.
+
+### Admin: user lifecycle (HA-5)
+
+Once a human (or agent) is a Cognito user, an admin manages their access by group membership:
+`GET /api/v1/admin/users` lists pool users (bounded to at most 500, never an unbounded scan) with
+a derived `pending`/`active` status (`pending` = in no `spec-*` group); `approve` grants
+`spec-readers`/`spec-writers`; `promote`/`demote` add/remove `spec-admins`; `reject`/`block`
+disable the account and strip its `spec-*` groups; `unblock` re-enables it (groups are not
+restored); `DELETE` hard-deletes the user. All seven endpoints are admin-gated and need
+`COGNITO_USER_POOL_ID` — unset ⇒ 501, the same graceful-default contract as the invites table
+above. Self-lockout guards refuse to let an admin block/reject/delete/demote themselves, and
+refuse to demote the last remaining admin; those guarded mutations need the caller's verified
+Cognito identity, so they return 501 under static `API_KEYS` auth (no `COGNITO_ISSUER`). See
+`AGENTS_API.md` → "Admin: user lifecycle" for the request/response shapes.
 
 ## Backups
 

@@ -91,6 +91,14 @@ class Config:
     AUTH_GROUP_WRITE = os.environ.get("AUTH_GROUP_WRITE", "spec-writers")
     AUTH_GROUP_READ = os.environ.get("AUTH_GROUP_READ", "spec-readers")
 
+    # --- Admin user-lifecycle API (HA-5) --------------------------------
+    # Cognito user pool the admin endpoints (GET/POST /api/v1/admin/users...)
+    # manage humans (and agents) in, via boto3 cognito-idp admin actions.
+    # Approve/reject/block/delete/promote all operate on this pool. UNSET (the
+    # local-dev default) => those endpoints return 501 so a local run without a
+    # pool is graceful. Wired from terraform output `cognito_user_pool_id`.
+    COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID") or None
+
     # --- CORS (AUTH-7) --------------------------------------------------
     # Exact-match allow-list of browser origins for the dashboard. Empty =>
     # CORS disabled (local-only default). "*" is intentionally NOT honoured:
@@ -143,3 +151,6 @@ class TestConfig(Config):
     # Invites off by default so a stray INVITES_TABLE env can't flip the baseline;
     # tests that exercise the admin endpoint set it explicitly on a subclass.
     INVITES_TABLE = None
+    # User-admin pool off by default (same rationale) — tests that exercise the
+    # admin user endpoints set COGNITO_USER_POOL_ID explicitly on a subclass.
+    COGNITO_USER_POOL_ID = None

@@ -34,7 +34,7 @@ import threading
 import time
 
 import sqlalchemy as sa
-from flask import current_app, request
+from flask import current_app, g, request
 from flask_smorest import abort
 
 from .extensions import db
@@ -89,6 +89,10 @@ def _require_cognito_jwt(cfg, issuer: str, required: str | None = None) -> None:
     if not token:
         abort(401, message="Missing bearer token.")
     claims = _decode_and_verify(token, cfg, issuer)
+    # Stash the verified claims so handlers can identify the caller (e.g. the
+    # HA-5 admin endpoints refuse to block/delete/demote the caller themselves).
+    # Never populated from an unverified source — only from a passed signature.
+    g.cognito_claims = claims
     required = required or _required_permission(cfg)
     granted = _effective_permissions(_token_groups(claims, cfg), _group_permissions(cfg))
     if required not in granted:
@@ -292,6 +296,19 @@ def _reset_jwks_cache() -> None:
     """Test hook: drop all cached JWKS."""
     with _JWKS_CACHES_LOCK:
         _JWKS_CACHES.clear()
+
+
+def current_identity() -> dict | None:
+    """Return the verified caller's ``{"sub", "username"}`` from the JWT, or None.
+
+    Populated by ``_require_cognito_jwt`` from the *verified* access token only.
+    ``None`` when Cognito auth is off (the local-only default) — callers that use
+    this for a self-action guardrail therefore no-op safely in local dev, where
+    the admin endpoints 501 anyway (no pool configured)."""
+    claims = getattr(g, "cognito_claims", None)
+    if not claims:
+        return None
+    return {"sub": claims.get("sub"), "username": claims.get("username")}
 
 
 def get_project_or_404(slug: str) -> Project:

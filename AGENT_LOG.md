@@ -272,3 +272,33 @@ to the server's `/events` endpoint.
   install-and-run.sh / restore_backup.py (??).
 - Follow-up (Low, non-blocking): cap GET /admin/invites scan with a Limit/page bound for parity
   with the other list schemas' Range(max=1000).
+
+## HA-5 — 2026-07-21 — Admin user-lifecycle API (backend-only) — feature-runner
+- Restated: build spec-admins-gated Cognito user-lifecycle endpoints (list/approve/reject/block/
+  unblock/promote/demote/delete) under /api/v1/admin/users; NO ui/ screen (separate HA-4 wave).
+- Files (coordinated commit, NOT committed by this agent):
+  app/blueprints/admin.py (extended with the HA-5 section), app/helpers.py (current_identity() +
+  stash g.cognito_claims from the verified JWT), app/schemas.py (AdminUsersQuery/AdminUserOut/
+  AdminApproveIn), app/config.py (COGNITO_USER_POOL_ID knob + TestConfig pin),
+  infra/terraform/iam.tf (CognitoUserAdmin statement scoped to the pool ARN),
+  infra/terraform/lambda.tf (COGNITO_USER_POOL_ID env var), .env.example (knob),
+  tests/test_admin_users.py (new), AGENTS_API.md + README.md (docs), AGENT_LOG.md, DECISIONS.md.
+- Approval is by GROUP: pending = in NO spec-* group; approve adds spec-readers/spec-writers;
+  promote adds spec-admins; reject/block = AdminDisableUser + strip spec-* groups; unblock enables;
+  delete = AdminDeleteUser. Guardrails: refuse self block/delete/demote (409), refuse last-admin
+  demote (409), 404 unknown user, 501 when COGNITO_USER_POOL_ID unset, and fail-closed 501 for the
+  self-protected mutations under static API_KEYS (no verifiable caller identity).
+- IAM (iam.tf CognitoUserAdmin): ListUsers, ListUsersInGroup, AdminGetUser, AdminListGroupsForUser,
+  AdminAddUserToGroup, AdminRemoveUserFromGroup, AdminDisableUser, AdminEnableUser, AdminDeleteUser
+  — scoped to aws_cognito_user_pool.this.arn (NOT "*"). Edited lambda.tf to add COGNITO_USER_POOL_ID
+  (no parallel agent owns lambda.tf this wave).
+- Verify: new tests tests/test_admin_users.py **18 passed**; full suite **107 passed**
+  (TEST_DATABASE_URL=...specserver_test). `terraform fmt` clean; `terraform init -backend=false` +
+  `terraform validate` => "Success! The configuration is valid."
+- Chain: implementer -> test-engineer -> reviewer(APPROVE, one task, scope clean, guards correct) ->
+  security(PASS, no P0/P1: admin-gated, self-lockout via VERIFIED token identity only, least-priv
+  IAM scoped to the pool ARN, no token/secret logging; P2 fail-closed-under-API_KEYS applied) ->
+  documentation (AGENTS_API.md, README.md).
+- Did NOT touch ui/ (HA-4 owns it) or cognito.tf. NOT committed — files listed above are for the
+  coordinated commit. Orchestrator note: COGNITO_USER_POOL_ID was added to lambda.tf, so no manual
+  env wiring is needed at cutover.
