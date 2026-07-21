@@ -87,13 +87,18 @@ resource "aws_budgets_budget" "monthly" {
 }
 
 # --- Cost Anomaly Detection ---------------------------------------------------
+# Cost Explorer / Cost Anomaly Detection is a us-east-1-only API, so these
+# resources are pinned to the us_east_1 aliased provider regardless of the
+# stack's primary region (var.aws_region), which may be e.g. eu-west-1.
 resource "aws_ce_anomaly_monitor" "service" {
+  provider          = aws.us_east_1
   name              = "${local.name_prefix}-anomaly-monitor"
   monitor_type      = "DIMENSIONAL"
   monitor_dimension = "SERVICE"
 }
 
 resource "aws_ce_anomaly_subscription" "daily" {
+  provider  = aws.us_east_1
   name      = "${local.name_prefix}-anomaly-sub"
   frequency = "DAILY"
 
