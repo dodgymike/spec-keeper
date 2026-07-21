@@ -78,3 +78,34 @@ to the server's `/events` endpoint.
 - User mid-course correction: the DynamoDB move must be **switchable**, not a one-way port — SLS
   epic reframed to a pluggable storage layer (Postgres reference impl + DynamoDB adapter, config-
   selected) with an adapter-parity test suite.
+
+## 2026-07-21 — SLS-2 (+ SLS-2.1): storage abstraction extracted (code-only, uncommitted)
+
+- **Task:** SLS-2 (`spec-server`) — extract a backend-neutral `StorageBackend`
+  and make the current Postgres/SQLAlchemy logic the reference adapter behind it,
+  with ZERO behaviour change. Folded in SLS-2.1 (DTOs + backend-neutral errors).
+- **Chain:** implementer + test-engineer (run by feature-runner) → reviewer →
+  security → documentation. reviewer and security BOTH ran (no skips).
+- **Created:** `app/storage/{__init__,base,errors,dto,postgres}.py`.
+- **Modified:** `app/__init__.py` (wire `app.storage` + error handlers),
+  `app/config.py` (`STORAGE_BACKEND`), `app/helpers.py`
+  (`expected_version_from_request`, DTO-friendly `etag_headers`), `app/schemas.py`
+  (TaskOut.epic_key/tags + AgentOut.project → plain fields dumping DTOs), and all
+  eight `app/blueprints/*.py` (now call `current_app.storage.<method>()`).
+- **Deliberately UNCHANGED:** `app/services.py` (verbatim `FOR UPDATE SKIP LOCKED`
+  claim + `INSERT ... ON CONFLICT` reserve), `app/models.py`, `app/idempotency.py`,
+  `migrations/`. Concurrency invariants preserved verbatim.
+- **Idempotency:** claim-next/reserve fold lookup+store into the storage method
+  in one transaction (serialize callback from the blueprint) — single-commit
+  semantics preserved.
+- **Verify:** full suite green against dockerized Postgres `specserver_test` —
+  `42 passed` (ran via source-mounted one-off container). App imports cleanly.
+- **Review:** reviewer APPROVED after fixing P1 (error handlers now emit the
+  flask-smorest `{code,status,message}` envelope, restoring byte-identical error
+  bodies). security PASS (no P0/P1; SQL stays parameterized, auth preserved).
+- **Accepted deviation (P2, cosmetic):** the 412 body's `message` now interpolates
+  the stripped If-Match token (e.g. `'99'`) instead of the raw header (`'"v99"'`);
+  no test covers it and matching would leak the raw HTTP header into the storage
+  layer. Status code and envelope are identical.
+- **Not committed** (code-only run). FILES FOR COORDINATED COMMIT handed to the
+  orchestrator. Reserved: nothing.

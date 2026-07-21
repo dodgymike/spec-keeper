@@ -20,6 +20,11 @@ class Config:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True}
 
+    # --- Storage backend (DEC-4) ---------------------------------------
+    # Which storage adapter to use: "postgres" (reference/default) or, later,
+    # "dynamodb". Default keeps behaviour identical for local/Postgres runs.
+    STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "postgres")
+
     # --- Behaviour ------------------------------------------------------
     # Default lease TTL (seconds) for a claimed task.
     LEASE_DEFAULT_TTL = int(os.environ.get("LEASE_DEFAULT_TTL", "1800"))

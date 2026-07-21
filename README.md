@@ -87,12 +87,23 @@ Migrating an existing repo's `SPEC.md` onto the server? See **`INTEGRATION_GUIDE
 | SQLAlchemy models (the schema) | `app/models.py` |
 | Marshmallow schemas (validation **and** OpenAPI source of truth) | `app/schemas.py` |
 | Atomic claim + reserve, event-log helper | `app/services.py` |
+| Storage abstraction (backend-neutral port + Postgres adapter) | `app/storage/` |
 | Idempotency-Key store | `app/idempotency.py` |
 | `SPEC.md` import/export parser + renderer | `app/specmd.py` |
 | REST blueprints (projects · agents · epics · tasks · reservations · ports · log · chains) | `app/blueprints/` |
 | Alembic migrations (run on boot) | `migrations/` |
 | Tests (concurrency + round-trip + idempotency) | `tests/` |
 | Backup / migrate / schedule scripts | `scripts/` |
+
+Blueprints call `current_app.storage.<method>()` instead of touching `db.session` directly.
+`app/storage/` holds the abstraction: `base.py` (the `StorageBackend` `Protocol` — the full
+method set every adapter must satisfy), `errors.py` (`NotFound`/`Conflict`/`VersionConflict`/
+`BackendUnavailable`, mapped to `404`/`409`/`412`/`503`), `dto.py` (frozen DTOs returned in place
+of ORM objects), and `postgres.py` (the reference adapter — still delegates the two atomic
+operations to the unchanged `app/services.py`). `make_storage()` in `app/storage/__init__.py`
+picks the adapter from the `STORAGE_BACKEND` config (default `"postgres"`; `"dynamodb"` is
+reserved for a later adapter). The public HTTP API is unaffected — this is an internal
+refactor, not a contract change.
 
 Key tables: `projects`, `agents` (project-scoped), `epics`, `tasks` (status enum, priority,
 component, `owner`, `version`, lease, `section`), `tags`, `task_relations`, `commit_refs`,
@@ -119,6 +130,7 @@ stamping it first); the test suite builds its schema directly from the models.
 | Var | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | `postgresql+psycopg://spec:spec@db:5432/specserver` | SQLAlchemy connection |
+| `STORAGE_BACKEND` | `postgres` | Storage adapter selected by `make_storage()`. Only `postgres` is implemented; `dynamodb` is reserved for a future adapter. |
 | `LEASE_DEFAULT_TTL` | `1800` | Claimed-task lease seconds |
 | `API_KEYS` | _(empty)_ | Comma-separated bearer tokens. Empty ⇒ auth off (local-only). |
 

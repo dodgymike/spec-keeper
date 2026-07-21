@@ -1,13 +1,11 @@
 """Project CRUD."""
 from __future__ import annotations
 
-import sqlalchemy as sa
+from flask import current_app
 from flask.views import MethodView
-from flask_smorest import Blueprint, abort
+from flask_smorest import Blueprint
 
-from ..extensions import db
-from ..helpers import get_project_or_404, require_api_key
-from ..models import Project
+from ..helpers import require_api_key
 from ..schemas import ProjectIn, ProjectOut, ProjectPatch
 
 blp = Blueprint(
@@ -22,24 +20,14 @@ class ProjectsCollection(MethodView):
     def get(self):
         """List projects."""
         require_api_key()
-        return db.session.execute(
-            sa.select(Project).order_by(Project.slug)
-        ).scalars().all()
+        return current_app.storage.list_projects()
 
     @blp.arguments(ProjectIn)
     @blp.response(201, ProjectOut)
     def post(self, data):
         """Create a project."""
         require_api_key()
-        existing = db.session.execute(
-            sa.select(Project).where(Project.slug == data["slug"])
-        ).scalar_one_or_none()
-        if existing is not None:
-            abort(409, message=f"Project '{data['slug']}' already exists.")
-        project = Project(**data)
-        db.session.add(project)
-        db.session.commit()
-        return project
+        return current_app.storage.create_project(data)
 
 
 @blp.route("/<slug>")
@@ -48,24 +36,18 @@ class ProjectItem(MethodView):
     def get(self, slug):
         """Get a project by slug."""
         require_api_key()
-        return get_project_or_404(slug)
+        return current_app.storage.get_project(slug)
 
     @blp.arguments(ProjectPatch)
     @blp.response(200, ProjectOut)
     def patch(self, data, slug):
         """Update a project."""
         require_api_key()
-        project = get_project_or_404(slug)
-        for k, v in data.items():
-            setattr(project, k, v)
-        db.session.commit()
-        return project
+        return current_app.storage.update_project(slug, data)
 
     @blp.response(204)
     def delete(self, slug):
         """Delete a project (cascades to its tasks)."""
         require_api_key()
-        project = get_project_or_404(slug)
-        db.session.delete(project)
-        db.session.commit()
+        current_app.storage.delete_project(slug)
         return ""

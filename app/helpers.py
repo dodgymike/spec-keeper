@@ -73,5 +73,21 @@ def check_if_match(task: Task) -> None:
         )
 
 
-def etag_headers(task: Task) -> dict:
+def etag_headers(task) -> dict:
+    """Build the ETag header from anything carrying a ``version`` (ORM or DTO)."""
     return {"ETag": f'"v{task.version}"'}
+
+
+def expected_version_from_request() -> str | None:
+    """Parse the ``If-Match`` request header into a bare version token.
+
+    Returns the value with surrounding quotes and a leading ``v`` stripped
+    (e.g. ``'"v3"'`` -> ``'3'``), or ``None`` when the header is absent. The
+    storage layer compares this against the task's current version and raises
+    ``VersionConflict`` (-> 412) on mismatch — preserving the old lenient
+    behaviour where a missing header skips the check.
+    """
+    if_match = request.headers.get("If-Match")
+    if if_match is None:
+        return None
+    return if_match.strip().strip('"').lstrip("v")

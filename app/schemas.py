@@ -51,14 +51,11 @@ class AgentIn(Schema):
 
 class AgentOut(Schema):
     public_id = fields.Str(dump_only=True)
-    project = fields.Method("get_project", dump_only=True)
+    project = fields.Str(allow_none=True, dump_only=True)  # owning project's slug
     slug = fields.Str()
     display_name = fields.Str(allow_none=True)
     kind = fields.Str()
     created_at = fields.DateTime(dump_only=True)
-
-    def get_project(self, obj):
-        return obj.project.slug if obj.project else None
 
 
 # --------------------------------------------------------------------------- #
@@ -143,7 +140,7 @@ class TaskOut(Schema):
     public_id = fields.Str(dump_only=True)
     display_id = fields.Str(dump_only=True)
     key = fields.Str(allow_none=True)
-    epic_key = fields.Method("get_epic_key", dump_only=True)
+    epic_key = fields.Str(allow_none=True, dump_only=True)
     title = fields.Str()
     description = fields.Str(allow_none=True)
     status = fields.Enum(TaskStatus, by_value=True)
@@ -156,18 +153,12 @@ class TaskOut(Schema):
     lease_expires_at = fields.DateTime(allow_none=True, dump_only=True)
     position = fields.Float()
     version = fields.Int(dump_only=True, metadata={"description": "Optimistic-lock token; send back as If-Match."})
-    tags = fields.Method("get_tags", dump_only=True)
+    tags = fields.List(fields.Str(), dump_only=True)
     commits = fields.List(fields.Nested(CommitRefOut), dump_only=True)
     notes = fields.List(fields.Nested(NoteOut), dump_only=True)
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
     completed_at = fields.DateTime(allow_none=True, dump_only=True)
-
-    def get_epic_key(self, obj):
-        return obj.epic.key if obj.epic else None
-
-    def get_tags(self, obj):
-        return [t.key for t in obj.tags]
 
 
 class TaskIn(Schema):

@@ -1,13 +1,11 @@
 """Per-project agent registry (ownership of tasks is by slug string)."""
 from __future__ import annotations
 
-import sqlalchemy as sa
+from flask import current_app
 from flask.views import MethodView
 from flask_smorest import Blueprint
 
-from ..extensions import db
-from ..helpers import get_project_or_404, require_api_key
-from ..models import Agent
+from ..helpers import require_api_key
 from ..schemas import AgentIn, AgentOut
 
 blp = Blueprint(
@@ -22,29 +20,11 @@ class AgentsCollection(MethodView):
     def get(self, slug):
         """List a project's registered agents."""
         require_api_key()
-        project = get_project_or_404(slug)
-        return db.session.execute(
-            sa.select(Agent)
-            .where(Agent.project_id == project.id)
-            .order_by(Agent.slug)
-        ).scalars().all()
+        return current_app.storage.list_agents(slug)
 
     @blp.arguments(AgentIn)
     @blp.response(201, AgentOut)
     def post(self, data, slug):
         """Register an agent in this project (idempotent upsert by slug)."""
         require_api_key()
-        project = get_project_or_404(slug)
-        agent = db.session.execute(
-            sa.select(Agent).where(
-                Agent.project_id == project.id, Agent.slug == data["slug"]
-            )
-        ).scalar_one_or_none()
-        if agent is None:
-            agent = Agent(project_id=project.id, **data)
-            db.session.add(agent)
-        else:
-            for k, v in data.items():
-                setattr(agent, k, v)
-        db.session.commit()
-        return agent
+        return current_app.storage.upsert_agent(slug, data)
