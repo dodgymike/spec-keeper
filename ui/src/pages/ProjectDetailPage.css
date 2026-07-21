@@ -1,0 +1,15 @@
+.project-detail-page__back {
+  margin-bottom: var(--space-4);
+  font-size: var(--font-size-sm);
+}
+
+.project-detail-page__slug {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xl);
+  font-weight: 700;
+  margin-bottom: var(--space-2);
+}
+
+.project-detail-page__placeholder {
+  color: var(--color-text-muted);
+}

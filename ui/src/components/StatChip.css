@@ -18,3 +18,32 @@
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
 }
+
+/* Status-coloured variant, mirrors Badge's [data-status] palette. */
+.stat-chip--status[data-status="todo"] .stat-chip__value {
+  color: var(--color-status-todo);
+}
+
+.stat-chip--status[data-status="in_progress"] .stat-chip__value {
+  color: var(--color-status-in_progress);
+}
+
+.stat-chip--status[data-status="blocked"] .stat-chip__value {
+  color: var(--color-status-blocked);
+}
+
+.stat-chip--status[data-status="deferred"] .stat-chip__value {
+  color: var(--color-status-deferred);
+}
+
+.stat-chip--status[data-status="done"] .stat-chip__value {
+  color: var(--color-status-done);
+}
+
+.stat-chip--status[data-status="superseded"] .stat-chip__value {
+  color: var(--color-status-superseded);
+}
+
+.stat-chip--status[data-status="cancelled"] .stat-chip__value {
+  color: var(--color-status-cancelled);
+}
