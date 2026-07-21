@@ -4,8 +4,50 @@ How an AI agent uses the Spec Server to manage its work. The authoritative, mach
 contract is `GET /openapi.json` (Swagger UI at `/docs`); this file is the human-readable map from the
 SPEC-driven workflow to concrete calls.
 
-Base URL: `http://localhost:8080/api/v1`. If `API_KEYS` is configured, send
-`Authorization: Bearer <key>` on every request.
+Base URL: `http://localhost:8080/api/v1`. Every request needs `Authorization: Bearer <token>`
+under whichever auth mode is configured — see "Authentication" below for which kind of token
+and which scope a given call needs.
+
+## Authentication
+
+Auth is evaluated per request with a precedence ladder (`app/helpers.require_api_key`):
+
+1. **`COGNITO_ISSUER` configured** — every request must carry a valid Cognito RS256 JWT bearer
+   token, and the token's `scope` claim must contain the scope required for that request (see
+   the table below). Get a token via the OAuth2 `client_credentials` grant: `POST` your
+   `client_id`/`client_secret` (from Secrets Manager — see `infra/terraform/cognito.tf`,
+   `cognito_m2m_secret_arns`) to `cognito_token_endpoint`, requesting the API scopes
+   (`cognito_api_scope_identifiers`). Example:
+   ```bash
+   curl -s -X POST "$TOKEN_ENDPOINT" \
+     -u "$CLIENT_ID:$CLIENT_SECRET" \
+     -d grant_type=client_credentials -d scope="$SCOPES" \
+     | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])"
+   # -> use as: -H "Authorization: Bearer <access_token>"
+   ```
+2. **else `API_KEYS` configured** — the legacy static bearer token, unchanged: send
+   `Authorization: Bearer <key>` where `<key>` is one of the comma-separated `API_KEYS` values.
+3. **else** — open (local-only default, no `Authorization` header needed).
+
+Only one mode is active at a time: a configured `COGNITO_ISSUER` takes priority over `API_KEYS`,
+which takes priority over no auth.
+
+**Method/resource → required scope** (default scope names shown; configurable via
+`AUTH_SCOPE_READ`/`WRITE`/`ADMIN`):
+
+| Request | Required scope |
+|---|---|
+| `GET` / `HEAD` (any resource) | `tasks.read` |
+| Mutating calls on `projects` / `agents` | `projects.admin` |
+| All other mutating calls (tasks, epics, reservations, ports, log, chains) | `tasks.write` |
+
+A granted scope may be either the bare name (`tasks.write`) or the full
+`<resource-server>/<name>` identifier the JWT actually carries (e.g.
+`https://api.spec-server/tasks.write`) — both satisfy the requirement.
+
+**Failure modes:** missing/malformed/expired/wrong-audience/wrong-issuer JWT (or a missing/wrong
+static key) → **401**; a valid, verified token that simply lacks the required scope → **403**.
+Both use the standard flask-smorest `{code, status, message}` error envelope.
 
 ## The workflow → API mapping
 

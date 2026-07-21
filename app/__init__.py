@@ -24,6 +24,7 @@ def create_app(config_object: type = Config) -> Flask:
     # Storage abstraction (SLS-2 / DEC-4): blueprints call current_app.storage.
     app.storage = make_storage(app.config)
     _register_error_handlers(app)
+    _register_cors(app)
 
     # Plain Flask blueprint (health probes) — not part of the OpenAPI surface.
     from .blueprints.health import bp as health_bp
@@ -73,6 +74,36 @@ def _register_error_handlers(app: Flask) -> None:
     app.register_error_handler(Conflict, _handler(409))
     app.register_error_handler(VersionConflict, _handler(412))
     app.register_error_handler(BackendUnavailable, _handler(503))
+
+
+def _register_cors(app: Flask) -> None:
+    """Config-driven CORS for the dashboard (AUTH-7).
+
+    Echoes only exact allow-listed origins — never ``*`` — because the API is
+    used with ``Authorization``/credentials, and ``*`` with credentials is both
+    forbidden by browsers and unsafe. No-op when ``CORS_ORIGINS`` is empty."""
+    from flask import request
+
+    allow = set(app.config.get("CORS_ORIGINS") or [])
+    if not allow:
+        return
+
+    methods = app.config.get("CORS_ALLOW_METHODS", "GET, HEAD, POST, PATCH, PUT, DELETE, OPTIONS")
+    headers = app.config.get("CORS_ALLOW_HEADERS", "Authorization, Content-Type, If-Match, Idempotency-Key")
+    max_age = str(app.config.get("CORS_MAX_AGE", 600))
+
+    @app.after_request
+    def _apply_cors(resp):
+        origin = request.headers.get("Origin")
+        if origin and origin in allow:
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers.add("Vary", "Origin")
+            resp.headers["Access-Control-Allow-Credentials"] = "true"
+            if request.method == "OPTIONS":
+                resp.headers["Access-Control-Allow-Methods"] = methods
+                resp.headers["Access-Control-Allow-Headers"] = headers
+                resp.headers["Access-Control-Max-Age"] = max_age
+        return resp
 
 
 def _register_cli(app: Flask) -> None:

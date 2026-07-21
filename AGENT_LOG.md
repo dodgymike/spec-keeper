@@ -109,3 +109,32 @@ to the server's `/events` endpoint.
   layer. Status code and envelope are identical.
 - **Not committed** (code-only run). FILES FOR COORDINATED COMMIT handed to the
   orchestrator. Reserved: nothing.
+
+## AUTH-2 + AUTH-7 — Cognito JWT validation + dashboard CORS (feature-runner)
+- **Chain:** implementer + test-engineer (feature-runner inline) -> reviewer (PASS on code)
+  -> security (PASS, no P0/P1) -> documentation. Both reviews independently flagged a
+  JWKS unknown-kid refetch-per-request DoS; fixed with a 30s refetch cooldown + regression test.
+- **AUTH-2:** app-level Cognito RS256 JWT validation in `require_api_key()`
+  (`app/helpers.py`). Precedence ladder: `COGNITO_ISSUER` set -> require & validate JWT +
+  enforce scope; elif `API_KEYS` -> legacy static bearer (unchanged); else -> open (local
+  default, unchanged). JWKS fetched from `COGNITO_JWKS_URI` and cached (TTL + unknown-kid
+  refetch, cooldown-bounded). RS256 pinned (alg=none / HS256-with-RSA-key rejected); checks
+  iss, exp/nbf/iat, token_use (default "access"), audience (aud OR client_id in
+  `COGNITO_AUDIENCE`). Scope map (method + blueprint, since blueprints call
+  `require_api_key()` with no args): GET/HEAD -> tasks.read; projects/agents mutations ->
+  projects.admin; other mutations -> tasks.write. 401 missing/invalid/expired, 403
+  valid-but-insufficient-scope, flask-smorest `{code,status,message}` envelope.
+- **AUTH-7:** config-driven CORS (`_register_cors` in `app/__init__.py`). `CORS_ORIGINS` is an
+  exact-match allow-list; empty => disabled. Echoes only an allow-listed Origin (never `*`),
+  `Allow-Credentials: true`, `Vary: Origin`, OPTIONS preflight headers.
+- **Config knobs (`app/config.py`):** COGNITO_ISSUER, COGNITO_JWKS_URI, COGNITO_AUDIENCE,
+  COGNITO_TOKEN_USE, JWKS_CACHE_TTL, JWKS_MIN_REFRESH_INTERVAL, AUTH_LEEWAY,
+  AUTH_SCOPE_READ/WRITE/ADMIN, CORS_ORIGINS, CORS_MAX_AGE, CORS_ALLOW_HEADERS,
+  CORS_ALLOW_METHODS. TestConfig pins auth OFF (baseline unaffected).
+- **Deps:** PyJWT>=2.8,<3.0 + cryptography>=42.0 added to `requirements.txt`.
+- **Tests:** `tests/test_auth.py` = 21 passed (RSA keypair minted in-process, JWKS fetch
+  monkeypatched); full suite = 63 passed (42 baseline auth-off + 21 new). Run in-container via
+  `docker cp` of the working tree (baked image predates SLS-2; repo not volume-mounted);
+  PyJWT/cryptography pip-installed into the running container ephemerally.
+- **Not committed** (code-only run). FILES FOR COORDINATED COMMIT handed to the orchestrator.
+  Reserved: nothing. Chain-batched AUTH-2+AUTH-7 per explicit instruction ("do them together").

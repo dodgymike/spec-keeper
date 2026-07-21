@@ -60,6 +60,14 @@ Full agent recipe book: **`AGENTS_API.md`**.
 Migrating an existing repo's `SPEC.md` onto the server? See **`INTEGRATION_GUIDE.md`** and
 `scripts/migrate-repo.sh <slug> <path/to/SPEC.md>`.
 
+**Auth is off by default** (local-only, no `Authorization` header needed). Set `COGNITO_ISSUER`
+to require a Cognito RS256 JWT with a per-request scope (`tasks.read`/`tasks.write`/
+`projects.admin`), or set `API_KEYS` for the simpler legacy static-bearer-token mode — Cognito
+takes precedence if both are set. **CORS is off by default** too; set `CORS_ORIGINS` (an
+exact-match allow-list, never `*`) to let the dashboard call the API from a browser. See
+`AGENTS_API.md` → "Authentication" for the full precedence ladder, the scope table, and how to
+mint a token, and `.env.example` for every knob.
+
 ## What's included
 
 - **Tasks** — CRUD, atomic `claim-next`, `complete`, `release`, `status`, relations, commit refs;
@@ -132,7 +140,9 @@ stamping it first); the test suite builds its schema directly from the models.
 | `DATABASE_URL` | `postgresql+psycopg://spec:spec@db:5432/specserver` | SQLAlchemy connection |
 | `STORAGE_BACKEND` | `postgres` | Storage adapter selected by `make_storage()`. Only `postgres` is implemented; `dynamodb` is reserved for a future adapter. |
 | `LEASE_DEFAULT_TTL` | `1800` | Claimed-task lease seconds |
-| `API_KEYS` | _(empty)_ | Comma-separated bearer tokens. Empty ⇒ auth off (local-only). |
+| `API_KEYS` | _(empty)_ | Comma-separated bearer tokens (legacy static auth). Empty ⇒ auth off (local-only). Ignored if `COGNITO_ISSUER` is set. |
+| `COGNITO_ISSUER` | _(empty)_ | OIDC issuer for Cognito RS256 JWT auth (AUTH-2). When set, takes precedence over `API_KEYS`. See `AGENTS_API.md` → "Authentication" and `.env.example` for the full `COGNITO_*`/`JWKS_*`/`AUTH_SCOPE_*` knob set. |
+| `CORS_ORIGINS` | _(empty)_ | Comma-separated exact-match browser-origin allow-list for the dashboard (AUTH-7). Empty ⇒ CORS off. `*` is never honoured. |
 
 ## Backups
 

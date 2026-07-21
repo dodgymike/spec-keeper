@@ -72,3 +72,24 @@ objects with lazy relationships — the load-bearing prerequisite, tracked as SL
 concurrency/parity test suite must run against BOTH backends (Postgres + DynamoDB Local, SLS-8).
 Cost posture improves (serverless, scales to zero) at the price of GSI write amplification and a
 potential hot partition on a very busy project. Full design in `STORAGE_ABSTRACTION_DEEPDIVE.md`.
+
+## DEC-5 — App-level Cognito JWT auth: scope inference from request, lazy PyJWT, JWKS anti-DoS (AUTH-2/AUTH-7)
+Context: AUTH-2 adds real Cognito RS256 JWT validation alongside the legacy static `API_KEYS`,
+and AUTH-7 adds dashboard CORS, without editing the per-endpoint blueprints (owned/off-limits).
+Decisions:
+- **Scope is inferred inside `require_api_key()` from `request.method` + `request.blueprint`**
+  (not passed per-endpoint), because every blueprint already calls `require_api_key()` with no
+  arguments and the blueprints were out of scope to change. Mapping: GET/HEAD -> tasks.read;
+  mutations on the `projects`/`agents` blueprints -> projects.admin; all other mutations ->
+  tasks.write. Trade-off: a new blueprint whose mutations should be admin must be added to
+  `_ADMIN_BLUEPRINTS`.
+- **`verify_aud=False` in `jwt.decode` + a manual audience check** that accepts `aud` OR
+  `client_id`, because Cognito M2M (client_credentials) access tokens carry no `aud` claim.
+  Empty `COGNITO_AUDIENCE` skips the check (documented) — real deploys must set it.
+- **PyJWT/cryptography imported lazily** inside the verify path so the app still imports with
+  auth off or the libs absent (preserves the 42-test auth-off baseline).
+- **JWKS anti-DoS:** unknown-kid refetches are bounded by `JWKS_MIN_REFRESH_INTERVAL` (30s
+  default) so a flood of bogus-kid tokens cannot amplify into a flood of outbound JWKS fetches
+  (raised as P2 by both reviewer and security; fixed with a regression test).
+- **CORS is exact-match only, never `*`**, because the API is used with `Authorization`
+  credentials and wildcard-with-credentials is unsafe/forbidden.
