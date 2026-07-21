@@ -90,7 +90,12 @@ resource "aws_budgets_budget" "monthly" {
 # Cost Explorer / Cost Anomaly Detection is a us-east-1-only API, so these
 # resources are pinned to the us_east_1 aliased provider regardless of the
 # stack's primary region (var.aws_region), which may be e.g. eu-west-1.
+# Gated off by default: AWS caps dimensional anomaly monitors per account, and
+# this account may already have one (e.g. from another stack). The Budget above
+# already provides cost alerting; enable this only where a free monitor slot
+# exists (set enable_cost_anomaly = true).
 resource "aws_ce_anomaly_monitor" "service" {
+  count             = var.enable_cost_anomaly ? 1 : 0
   provider          = aws.us_east_1
   name              = "${local.name_prefix}-anomaly-monitor"
   monitor_type      = "DIMENSIONAL"
@@ -98,11 +103,12 @@ resource "aws_ce_anomaly_monitor" "service" {
 }
 
 resource "aws_ce_anomaly_subscription" "daily" {
+  count     = var.enable_cost_anomaly ? 1 : 0
   provider  = aws.us_east_1
   name      = "${local.name_prefix}-anomaly-sub"
   frequency = "DAILY"
 
-  monitor_arn_list = [aws_ce_anomaly_monitor.service.arn]
+  monitor_arn_list = [aws_ce_anomaly_monitor.service[0].arn]
 
   subscriber {
     type    = "SNS"

@@ -62,3 +62,9 @@ locals {
     environment = var.environment
   }
 }
+
+variable "enable_cost_anomaly" {
+  description = "Create the Cost Anomaly Detection monitor/subscription. Off by default: AWS caps dimensional monitors per account, and the Budget already alerts. Enable only where a free monitor slot exists."
+  type        = bool
+  default     = false
+}

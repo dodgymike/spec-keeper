@@ -184,8 +184,14 @@ resource "aws_cognito_user_pool" "this" {
   # (software_token) is enabled — no SMS, so no per-message SNS cost.
   mfa_configuration = var.enable_mfa ? "OPTIONAL" : "OFF"
 
-  software_token_mfa_configuration {
-    enabled = var.enable_mfa
+  # Cognito rejects a software_token_mfa_configuration block when MFA is OFF
+  # ("can't turn off MFA and configure an MFA together"), so only emit it when
+  # MFA is enabled.
+  dynamic "software_token_mfa_configuration" {
+    for_each = var.enable_mfa ? [1] : []
+    content {
+      enabled = true
+    }
   }
 
   # AUTH-8 — Cognito advanced security (adaptive/compromised-credential risk
