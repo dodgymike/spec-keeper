@@ -1,4 +1,16 @@
-import type { Counter, Epic, Project, Task, TaskListParams } from "./types";
+import type {
+  ChainRun,
+  Counter,
+  Decision,
+  Epic,
+  EventListParams,
+  Project,
+  ProjectEvent,
+  ProjectNote,
+  ProjectNoteListParams,
+  Task,
+  TaskListParams,
+} from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8080";
 
@@ -104,4 +116,40 @@ export function listTasks(slug: string, params?: TaskListParams): Promise<Task[]
 /** Current reservation-counter value per namespace (e.g. `dynamo-gsi -> 5`). */
 export function listCounters(slug: string): Promise<Counter[]> {
   return request<Counter[]>(`/api/v1/projects/${encodeURIComponent(slug)}/counters`);
+}
+
+/** Project-wide notes feed (`app/blueprints/log.py`), newest first, tagged by scope. */
+export function listProjectNotes(slug: string, params?: ProjectNoteListParams): Promise<ProjectNote[]> {
+  return request<ProjectNote[]>(`/api/v1/projects/${encodeURIComponent(slug)}/notes`, { params });
+}
+
+/** Append-only event stream (`app/blueprints/log.py`), newest first. */
+export function listEvents(slug: string, params?: EventListParams): Promise<ProjectEvent[]> {
+  return request<ProjectEvent[]>(`/api/v1/projects/${encodeURIComponent(slug)}/events`, { params });
+}
+
+/** ADR-style decision records (`app/blueprints/log.py`), newest first. */
+export function listDecisions(slug: string): Promise<Decision[]> {
+  return request<Decision[]>(`/api/v1/projects/${encodeURIComponent(slug)}/decisions`);
+}
+
+/**
+ * Chain runs for one task (`app/blueprints/chains.py`). NOTE: as of this
+ * writing the backend only exposes `POST .../tasks/{ident}/chain-runs`
+ * (start a run) - there is no `GET` list route, so this call currently
+ * 404/405s. Kept so the activity feed picks it up automatically once the
+ * backend gains the list endpoint; callers must treat failures as "no
+ * chain-run data available" rather than a hard error.
+ */
+export function listChainRuns(slug: string, taskIdent: string): Promise<ChainRun[]> {
+  return request<ChainRun[]>(
+    `/api/v1/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(taskIdent)}/chain-runs`
+  );
+}
+
+/** A single chain run (and its steps), by run public_id. */
+export function getChainRun(slug: string, runId: string): Promise<ChainRun> {
+  return request<ChainRun>(
+    `/api/v1/projects/${encodeURIComponent(slug)}/chain-runs/${encodeURIComponent(runId)}`
+  );
 }

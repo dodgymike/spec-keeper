@@ -89,6 +89,12 @@ export function ProjectDetailPage() {
               Updated {formatRelativeTime(now - lastUpdated)}
             </span>
           )}
+          <Link
+            to={`/projects/${encodeURIComponent(slug)}/activity`}
+            className="project-detail-page__activity-link"
+          >
+            Activity
+          </Link>
           <button type="button" className="project-detail-page__refresh-button" onClick={refresh}>
             Refresh
           </button>

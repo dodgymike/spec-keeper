@@ -48,7 +48,8 @@
 }
 
 .project-detail-page__refresh-button,
-.project-detail-page__retry-button {
+.project-detail-page__retry-button,
+.project-detail-page__activity-link {
   padding: var(--space-1) var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -58,8 +59,14 @@
   cursor: pointer;
 }
 
+.project-detail-page__activity-link {
+  text-decoration: none;
+  display: inline-block;
+}
+
 .project-detail-page__refresh-button:hover,
-.project-detail-page__retry-button:hover {
+.project-detail-page__retry-button:hover,
+.project-detail-page__activity-link:hover {
   border-color: var(--color-accent);
 }
 
