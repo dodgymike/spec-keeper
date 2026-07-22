@@ -142,6 +142,18 @@ resource "aws_lambda_function" "app" {
       # UpdateItem/DeleteItem scoped to this table ARN) is in iam.tf.
       AGENT_ENROLLMENTS_TABLE = aws_dynamodb_table.agent_enrollments.name
 
+      # ONBOARD-3 — the redeem response hands a freshly-enrolled agent the client
+      # id it authenticates with (USER_PASSWORD_AUTH against the `agents` client).
+      # Unset => the recipe returns client_id=null and the new agent cannot mint a
+      # token. The other ENROLL_* knobs use their correct app/config.py defaults.
+      ENROLL_COGNITO_CLIENT_ID = aws_cognito_user_pool_client.agents.id
+
+      # ISO-6 — flip per-project isolation ON. Guarded by the ISO-7 boot check
+      # (requires COGNITO_ISSUER, which is set above). Non-members are scoped out
+      # (404 reads / 403 writes); the 19 platform agents were backfilled as
+      # spec-server members first, so no lockout.
+      PROJECT_ISOLATION_ENFORCED = "true"
+
       # HA-7 — public request->approve signup queue (signups.tf). The public
       # POST /api/v1/signup enqueues to SQS; GET /api/v1/validate + the admin
       # signups bridge read/write the signups table; the per-IP limiter uses the
