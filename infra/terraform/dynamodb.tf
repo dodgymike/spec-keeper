@@ -28,6 +28,7 @@
 #   value 3 -> GSI3  (task-key, sparse)
 #   value 4 -> GSI4  (feed: events / notes)
 #   value 5 -> GSI5  (all-projects)
+#   value 6 -> GSI6  (project membership: list a principal's projects, ISO-1/2)
 # The reservation is monotonic + collision-proof, so these names are stable and
 # were not hand-picked by reading max+1.
 # =============================================================================
@@ -99,6 +100,16 @@ resource "aws_dynamodb_table" "app" {
     type = "S"
   }
 
+  # GSI6 project membership (sparse): PK MEMBER#<sub>, SK <project-slug>
+  attribute {
+    name = "GSI6PK"
+    type = "S"
+  }
+  attribute {
+    name = "GSI6SK"
+    type = "S"
+  }
+
   # --- GSI1: claim-next candidate query + list_tasks?status= (ordered by
   # priority_rank#position). Serves the hot claim path and the primary
   # status-filtered task listing that returns full task cards -> ALL. ---
@@ -146,6 +157,18 @@ resource "aws_dynamodb_table" "app" {
     name            = "GSI5"
     hash_key        = "GSI5PK"
     range_key       = "GSI5SK"
+    projection_type = "ALL"
+  }
+
+  # --- GSI6: list a principal's projects (list_projects_for_principal, ISO-1).
+  # Sparse — GSI6PK/GSI6SK are written only on MEMBER#<sub> items. The adapter
+  # queries this index and builds MemberDTOs (project_slug + role + name +
+  # created_at) straight from the projected rows with NO follow-up GetItem, so
+  # the non-key member attributes must be projected -> ALL. ---
+  global_secondary_index {
+    name            = "GSI6"
+    hash_key        = "GSI6PK"
+    range_key       = "GSI6SK"
     projection_type = "ALL"
   }
 
@@ -203,6 +226,6 @@ output "dynamodb_table_index_arn_pattern" {
 }
 
 output "dynamodb_gsi_names" {
-  description = "GSI names in reserved order: GSI1 claim/status, GSI2 owner, GSI3 task-key, GSI4 feed, GSI5 all-projects."
-  value       = ["GSI1", "GSI2", "GSI3", "GSI4", "GSI5"]
+  description = "GSI names in reserved order: GSI1 claim/status, GSI2 owner, GSI3 task-key, GSI4 feed, GSI5 all-projects, GSI6 project-membership."
+  value       = ["GSI1", "GSI2", "GSI3", "GSI4", "GSI5", "GSI6"]
 }
