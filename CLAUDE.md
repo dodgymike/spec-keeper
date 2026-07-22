@@ -52,10 +52,22 @@ and **deploy-coordinator** (deploy) — never `terraform apply` from a generic a
 
 ## Source of truth
 
-- **Pre-migration (now):** `SPEC.md` at the repo root is the single source of truth.
-- **Post-migration (the `DOGFOOD` epic):** the running Spec Server is the source of truth.
-  The backlog lives in the database under project slug `spec-server`; `SPEC.md` is regenerated
-  from the server as a readable mirror. spec-keeper talks to the API instead of editing the file.
+**The source of truth is now the DEPLOYED cloud Spec Server** (this project dogfoods its own
+production deployment):
+
+- **API (source of truth):** `https://api.spec.elasticninja.com` — Cloudflare-fronted API Gateway →
+  Cognito-JWT-validated Lambda → DynamoDB (`eu-west-1`, account `985722751424`). Backlog under
+  project slug `spec-server`.
+- **Dashboard:** `https://spec.elasticninja.com` (React SPA; humans sign in with Cognito passkeys /
+  email-OTP via invite).
+- **Auth (REQUIRED against the cloud):** every write needs a Cognito bearer token — agents mint one
+  via `scripts/agent_token.py` (Cognito `USER_PASSWORD_AUTH`, creds in the `spec-server-dev/
+  agent-credentials` Secrets Manager secret) and send `Authorization: Bearer <jwt>`; authorization is
+  by `cognito:groups` (`spec-admins`/`spec-writers`/`spec-readers`). Locally (the `docker compose`
+  dogfood on `:8080`, now SECONDARY) auth is off.
+- Older phases: `SPEC.md` was the original flat-file source; then the local `docker compose` Spec
+  Server (Postgres). Both are now mirrors/dev-only — the cloud DynamoDB instance is authoritative.
+  `SPEC.md` is regenerated from the server as a readable mirror; spec-keeper talks to the API.
 
 The whole point of this server is to replace fragile flat-file task management. The two
 hard problems it solves — and which every agent must rely on rather than work around:
