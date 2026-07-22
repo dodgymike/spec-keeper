@@ -85,6 +85,10 @@ data "aws_iam_policy_document" "lambda_permissions" {
       "dynamodb:GetItem",
       "dynamodb:UpdateItem",
       "dynamodb:DeleteItem",
+      # The admin list endpoint and the ONBOARD-3a mint-dedupe
+      # (_active_enrollment_exists) paginate the table with Scan. Scoped to this
+      # one small (single-use, TTL'd) table ARN — still no GSI/wildcard/other table.
+      "dynamodb:Scan",
     ]
     resources = [
       aws_dynamodb_table.agent_enrollments.arn,
