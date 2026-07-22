@@ -844,7 +844,17 @@ function abbreviate(value: string): string {
 
 function EnrollmentsPanel({ reload, onChanged }: { reload: number; onChanged: () => void }) {
   const [projectsState, setProjectsState] = useState<ProjectsState>({ status: "loading" });
+  // `selected` is the live-typed slug (drives the input + datalist instantly);
+  // `committed` is the settled value that drives isNew/isExisting and the child
+  // props. Debouncing the committed value keeps a keystroke from thrash-resetting
+  // EnrollMint's once-shown minted token or the typed project name.
   const [selected, setSelected] = useState<string>("");
+  const [committed, setCommitted] = useState<string>("");
+
+  useEffect(() => {
+    const id = setTimeout(() => setCommitted(selected.trim()), 350);
+    return () => clearTimeout(id);
+  }, [selected]);
 
   useEffect(() => {
     let cancelled = false;
@@ -857,7 +867,10 @@ function EnrollmentsPanel({ reload, onChanged }: { reload: number; onChanged: ()
         if (cancelled) return;
         setProjectsState({ status: "ready", projects });
         // Default to the first project once, without clobbering a live selection.
-        setSelected((prev) => prev || projects[0]?.slug || "");
+        // Seed `committed` too so the panel renders immediately (no debounce wait).
+        const first = projects[0]?.slug || "";
+        setSelected((prev) => prev || first);
+        setCommitted((prev) => prev || first);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -875,35 +888,59 @@ function EnrollmentsPanel({ reload, onChanged }: { reload: number; onChanged: ()
   if (projectsState.status === "error") return <PanelError message={projectsState.error.message} />;
 
   const projects = projectsState.projects;
-  if (projects.length === 0) {
-    return (
-      <Card>
-        <p>No projects. Create one before enrolling agents.</p>
-      </Card>
-    );
-  }
+  const slug = committed;
+  // The datalist offers existing slugs, but the admin may also type a brand-new
+  // one: the mint endpoint creates the project on the fly (ONBOARD-7).
+  const isExisting = projects.some((p) => p.slug === slug);
+  const isNew = slug !== "" && !isExisting;
 
   return (
     <div className="admin-panel">
-      <label className="admin-field admin-panel__project-select">
-        <span className="admin-field__label">Project</span>
-        <select
+      <div className="admin-field admin-panel__project-select">
+        {/* Explicit label + aria-describedby so the "new project" hint is a
+            description, not part of the input's accessible name. */}
+        <label className="admin-field__label" htmlFor="admin-enroll-slug">
+          Project slug
+        </label>
+        <input
+          id="admin-enroll-slug"
+          type="text"
           className="admin-field__input"
+          list="admin-enroll-projects"
           value={selected}
           onChange={(e) => setSelected(e.target.value)}
-        >
+          autoComplete="off"
+          placeholder="existing or new project slug"
+          aria-describedby={isNew ? "admin-enroll-slug-hint" : undefined}
+        />
+        <datalist id="admin-enroll-projects">
           {projects.map((p) => (
             <option key={p.slug} value={p.slug}>
-              {p.name} ({p.slug})
+              {p.name}
             </option>
           ))}
-        </select>
-      </label>
+        </datalist>
+        {isNew ? (
+          <p id="admin-enroll-slug-hint" className="admin-field__hint">
+            New project — created on mint.
+          </p>
+        ) : null}
+      </div>
 
-      {selected ? (
+      {slug ? (
         <>
-          <EnrollMint projectSlug={selected} reload={reload} onChanged={onChanged} />
-          <MembersSection projectSlug={selected} reload={reload} onChanged={onChanged} />
+          <EnrollMint projectSlug={slug} isNew={isNew} reload={reload} onChanged={onChanged} />
+          {/* Members only exist for an already-created project. */}
+          {isExisting ? (
+            <MembersSection projectSlug={slug} reload={reload} onChanged={onChanged} />
+          ) : (
+            <>
+              <h2 className="admin-page__section-title">Members</h2>
+              <Card>
+                <p>Members appear after the project is created.</p>
+              </Card>
+            </>
+          )}
         </>
       ) : null}
     </div>
@@ -917,16 +954,21 @@ type EnrollmentsListState =
 
 function EnrollMint({
   projectSlug,
+  isNew,
   reload,
   onChanged,
 }: {
   projectSlug: string;
+  /** True when `projectSlug` is not an existing project — the mint creates it. */
+  isNew: boolean;
   reload: number;
   onChanged: () => void;
 }) {
   const [agentName, setAgentName] = useState("");
   const [role, setRole] = useState<MemberRole>("reader");
   const [ttl, setTtl] = useState("");
+  // Optional display name used ONLY when creating a brand-new project.
+  const [projectName, setProjectName] = useState("");
   const [minting, setMinting] = useState(false);
   // The minted token/URL lives ONLY in component state — never storage, never a
   // log. It clears on unmount (tab/project switch) and on a hard page refresh.
@@ -946,10 +988,17 @@ function EnrollMint({
     setMinted(null);
     setCopied(false);
     setError("");
+    setProjectName("");
   }, [projectSlug]);
 
   useEffect(() => {
     let cancelled = false;
+    // A not-yet-created project has no enrollments to fetch (the list endpoint is
+    // project-scoped); show it as empty rather than making a doomed call.
+    if (isNew) {
+      setListState({ status: "ready", enrollments: [] });
+      return;
+    }
     setListState({ status: "loading" });
     listEnrollments(projectSlug)
       .then((enrollments) => {
@@ -963,7 +1012,7 @@ function EnrollMint({
     return () => {
       cancelled = true;
     };
-  }, [projectSlug, reload, localReload]);
+  }, [projectSlug, isNew, reload, localReload]);
 
   async function handleMint(event: FormEvent) {
     event.preventDefault();
@@ -979,6 +1028,8 @@ function EnrollMint({
         agent_name: agentName.trim(),
         role,
         ttl_seconds: ttlSeconds,
+        // Only meaningful when creating; the server ignores it for an existing project.
+        project_name: isNew && projectName.trim() !== "" ? projectName.trim() : undefined,
       });
       setMinted(result);
       setAgentName("");
@@ -1011,6 +1062,19 @@ function EnrollMint({
       <Card className="admin-invite-mint">
         <h2 className="admin-invite-mint__title">Enroll an agent</h2>
         <form className="admin-invite-mint__form" onSubmit={(e) => void handleMint(e)}>
+          {isNew ? (
+            <label className="admin-field">
+              <span className="admin-field__label">Project name (optional)</span>
+              <input
+                type="text"
+                className="admin-field__input"
+                value={projectName}
+                onChange={(e) => setProjectName(e.target.value)}
+                autoComplete="off"
+                placeholder={projectSlug}
+              />
+            </label>
+          ) : null}
           <label className="admin-field">
             <span className="admin-field__label">Agent name</span>
             <input
@@ -1064,9 +1128,12 @@ function EnrollMint({
         ) : null}
         {minted ? (
           <div className="admin-invite-mint__result" role="status" aria-live="polite">
-            <p className="admin-invite-mint__once">
-              Shown once - copy it now; it will not be shown again.
-            </p>
+            {minted.project_created ? (
+              <p className="admin-invite-mint__created">
+                Created project {minted.project_slug} and minted enrollment.
+              </p>
+            ) : null}
+            <p className="admin-invite-mint__once">Shown once - copy it now.</p>
             <p className="admin-invite-mint__url">
               <span className="admin-invite-mint__code-label">Enrollment URL</span>
               <code>{minted.enrollment_url}</code>

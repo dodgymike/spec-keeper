@@ -237,6 +237,12 @@ export interface EnrollmentIn {
   role: MemberRole;
   /** Override the token validity window in seconds (default server ENROLL_TTL_SECONDS). */
   ttl_seconds?: number | null;
+  /**
+   * Name for the project when `project_slug` names a NOT-YET-EXISTING project:
+   * the mint endpoint creates the project on the fly (ONBOARD-7). Ignored when
+   * the project already exists; the server is authoritative.
+   */
+  project_name?: string | null;
 }
 
 // app.schemas.EnrollmentOut — a listed enrollment. `token_hash` is the SHA-256
@@ -260,6 +266,11 @@ export interface EnrollmentMint {
   role: string;
   agent_name: string;
   expires_at: number;
+  /**
+   * True when the mint CREATED `project_slug` (it did not exist before) rather
+   * than enrolling onto an existing project (ONBOARD-7).
+   */
+  project_created: boolean;
 }
 
 // app.schemas.MemberOut — a listed project member.

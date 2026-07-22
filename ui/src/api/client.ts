@@ -267,7 +267,12 @@ export function listEnrollments(projectSlug?: string): Promise<Enrollment[]> {
   });
 }
 
-/** Mint a single-use agent-enrollment token; the plaintext token + URL come back ONCE. */
+/**
+ * Mint a single-use agent-enrollment token; the plaintext token + URL come back
+ * ONCE. When `project_slug` names a not-yet-existing project the server CREATES
+ * it (using the optional `project_name`) and sets `project_created` on the
+ * response (ONBOARD-7).
+ */
 export function mintEnrollment(body: EnrollmentIn): Promise<EnrollmentMint> {
   return request<EnrollmentMint>("/api/v1/admin/agent-enrollments", { method: "POST", body });
 }
