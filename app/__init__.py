@@ -14,6 +14,8 @@ def create_app(config_object: type = Config) -> Flask:
     app = Flask(__name__)
     app.config.from_object(config_object)
 
+    _validate_config(app)
+
     db.init_app(app)
     api.init_app(app)
 
@@ -59,6 +61,25 @@ def create_app(config_object: type = Config) -> Flask:
 
     _register_cli(app)
     return app
+
+
+def _validate_config(app: Flask) -> None:
+    """Fail-closed boot guards for config foot-guns (ISO-7).
+
+    ``PROJECT_ISOLATION_ENFORCED`` (ISO-4) authorizes project-scoped routes off
+    the VERIFIED caller ``sub``, which exists ONLY on the Cognito JWT path. If it
+    is turned ON while Cognito auth is not configured (``COGNITO_ISSUER`` unset —
+    i.e. local/auth-off mode), ``require_project_perm`` has no verified identity
+    and fails closed on EVERY project-scoped route, bricking the whole API with
+    misleading 403/404s. Refuse to boot rather than come up in that state."""
+    if app.config.get("PROJECT_ISOLATION_ENFORCED") and not app.config.get("COGNITO_ISSUER"):
+        raise RuntimeError(
+            "PROJECT_ISOLATION_ENFORCED is ON but COGNITO_ISSUER is unset: "
+            "per-project isolation enforcement requires Cognito JWT auth so the "
+            "caller has a verified identity to authorize against. Without it every "
+            "project-scoped route fails closed (403/404), bricking the API. Set "
+            "COGNITO_ISSUER, or turn PROJECT_ISOLATION_ENFORCED off."
+        )
 
 
 def _register_error_handlers(app: Flask) -> None:
