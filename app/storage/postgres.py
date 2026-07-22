@@ -31,6 +31,7 @@ from ..models import (
     LeaseState,
     Priority,
     Project,
+    ProjectMember,
     RelationKind,
     Reservation,
     Tag,
@@ -58,6 +59,7 @@ from .dto import (
     EpicDTO,
     EventDTO,
     IdempotentOutcome,
+    MemberDTO,
     NoteDTO,
     ProjectDTO,
     ProjectNoteDTO,
@@ -81,6 +83,13 @@ def _agent_dto(a: Agent) -> AgentDTO:
     return AgentDTO(
         public_id=a.public_id, project=a.project.slug if a.project else None,
         slug=a.slug, display_name=a.display_name, kind=a.kind, created_at=a.created_at,
+    )
+
+
+def _member_dto(m: ProjectMember, slug: str) -> MemberDTO:
+    return MemberDTO(
+        project_slug=slug, principal_sub=m.principal_sub,
+        principal_name=m.principal_name, role=m.role, created_at=m.created_at,
     )
 
 
@@ -280,6 +289,70 @@ class PostgresBackend:
         dto = _agent_dto(agent)
         db.session.commit()
         return dto
+
+    # ----- project membership (ISO-1; dormant) -------------------------
+    def get_membership(self, project_slug: str, principal_sub: str) -> MemberDTO | None:
+        project = self._project(project_slug)
+        member = db.session.execute(
+            sa.select(ProjectMember).where(
+                ProjectMember.project_id == project.id,
+                ProjectMember.principal_sub == principal_sub,
+            )
+        ).scalar_one_or_none()
+        return _member_dto(member, project_slug) if member is not None else None
+
+    def list_members(self, project_slug: str) -> list[MemberDTO]:
+        project = self._project(project_slug)
+        rows = db.session.execute(
+            sa.select(ProjectMember)
+            .where(ProjectMember.project_id == project.id)
+            .order_by(ProjectMember.principal_sub)
+        ).scalars().all()
+        return [_member_dto(m, project_slug) for m in rows]
+
+    def add_member(self, project_slug: str, principal_sub: str,
+                   principal_name: str | None, role: str) -> MemberDTO:
+        project = self._project(project_slug)
+        member = db.session.execute(
+            sa.select(ProjectMember).where(
+                ProjectMember.project_id == project.id,
+                ProjectMember.principal_sub == principal_sub,
+            )
+        ).scalar_one_or_none()
+        if member is None:
+            member = ProjectMember(
+                project_id=project.id, principal_sub=principal_sub,
+                principal_name=principal_name, role=role,
+            )
+            db.session.add(member)
+        else:
+            member.principal_name = principal_name
+            member.role = role
+        db.session.flush()
+        dto = _member_dto(member, project_slug)
+        db.session.commit()
+        return dto
+
+    def remove_member(self, project_slug: str, principal_sub: str) -> None:
+        project = self._project(project_slug)
+        member = db.session.execute(
+            sa.select(ProjectMember).where(
+                ProjectMember.project_id == project.id,
+                ProjectMember.principal_sub == principal_sub,
+            )
+        ).scalar_one_or_none()
+        if member is not None:
+            db.session.delete(member)
+            db.session.commit()
+
+    def list_projects_for_principal(self, principal_sub: str) -> list[MemberDTO]:
+        rows = db.session.execute(
+            sa.select(ProjectMember, Project.slug)
+            .join(Project, Project.id == ProjectMember.project_id)
+            .where(ProjectMember.principal_sub == principal_sub)
+            .order_by(Project.slug)
+        ).all()
+        return [_member_dto(m, slug) for m, slug in rows]
 
     # ----- epics -------------------------------------------------------
     def list_epics(self, slug: str) -> list[EpicDTO]:

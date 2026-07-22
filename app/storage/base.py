@@ -26,6 +26,7 @@ from .dto import (
     EpicDTO,
     EventDTO,
     IdempotentOutcome,
+    MemberDTO,
     NoteDTO,
     ProjectDTO,
     ProjectNoteDTO,
@@ -51,6 +52,18 @@ class StorageBackend(Protocol):
     # --- agents ---------------------------------------------------------
     def list_agents(self, slug: str) -> list[AgentDTO]: ...
     def upsert_agent(self, slug: str, data: dict) -> AgentDTO: ...
+
+    # --- project membership (ISO-1; dormant — no enforcement yet) -------
+    # ``principal_sub`` is the server-verified, immutable Cognito ``sub``; callers
+    # MUST pass the identity proven by the auth layer, never a client-supplied one.
+    def get_membership(self, project_slug: str,
+                       principal_sub: str) -> MemberDTO | None: ...          # NotFound (project)
+    def list_members(self, project_slug: str) -> list[MemberDTO]: ...        # NotFound (project)
+    def add_member(self, project_slug: str, principal_sub: str,
+                   principal_name: str | None, role: str) -> MemberDTO: ...  # NotFound; idempotent upsert
+    def remove_member(self, project_slug: str, principal_sub: str) -> None: ...  # NotFound (project); idempotent
+    def list_projects_for_principal(self,
+                                    principal_sub: str) -> list[MemberDTO]: ...
 
     # --- epics ----------------------------------------------------------
     def list_epics(self, slug: str) -> list[EpicDTO]: ...

@@ -100,6 +100,19 @@ class TaskDTO:
 
 
 @dataclass(frozen=True)
+class MemberDTO:
+    """A membership of a principal (an immutable Cognito ``sub``) in a project
+    (ISO-1). Dormant: nothing enforces authorization from it yet. ``role`` is one
+    of ``reader``/``writer``/``admin``; ``principal_name`` is an informational
+    display label only (never an identity — authorization keys off ``principal_sub``)."""
+    project_slug: str
+    principal_sub: str
+    principal_name: str | None
+    role: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class ReservationDTO:
     namespace: str
     value: int

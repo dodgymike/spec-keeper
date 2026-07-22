@@ -27,6 +27,7 @@ GSI2 = "GSI2"   # owner (sparse)
 GSI3 = "GSI3"   # task-key (sparse)
 GSI4 = "GSI4"   # feed: events / notes
 GSI5 = "GSI5"   # all-projects
+GSI6 = "GSI6"   # project membership: list a principal's projects (ISO-1)
 
 # Feed "kind" discriminators for GSI4.
 FEED_EVENT = "EVT"
@@ -57,6 +58,15 @@ def agent_sk(slug: str) -> str:
 
 def epic_sk(key: str) -> str:
     return f"EPIC#{key}"
+
+
+def member_sk(sub: str) -> str:
+    return f"MEMBER#{sub}"
+
+
+def member_prefix() -> str:
+    """begins_with prefix returning a project's membership item collection."""
+    return "MEMBER#"
 
 
 def epic_note_sk(key: str, ts: str, uid: str) -> str:
@@ -165,4 +175,15 @@ def gsi5_pk() -> str:
 
 
 def gsi5_sk(slug: str) -> str:
+    return slug
+
+
+# GSI6: list a principal's projects. Reserved index number 6 (namespace
+# "dynamo-gsi"). PK=MEMBER#<sub> gathers every project a principal belongs to;
+# SK=<slug> so a principal's projects sort by slug. Member items only.
+def gsi6_member_pk(sub: str) -> str:
+    return f"MEMBER#{sub}"
+
+
+def gsi6_sk(slug: str) -> str:
     return slug

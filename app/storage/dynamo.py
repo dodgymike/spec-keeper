@@ -56,6 +56,7 @@ from .dto import (
     EpicDTO,
     EventDTO,
     IdempotentOutcome,
+    MemberDTO,
     NoteDTO,
     ProjectDTO,
     ProjectNoteDTO,
@@ -331,6 +332,61 @@ class DynamoBackend:
                 item[k] = v
         self._put(item)
         return self._agent_dto(slug, item)
+
+    # ----- project membership (ISO-1; dormant) ------------------------- #
+    def _member_dto(self, it) -> MemberDTO:
+        return MemberDTO(
+            project_slug=it["project_slug"], principal_sub=it["principal_sub"],
+            principal_name=it.get("principal_name"), role=it["role"],
+            created_at=_dt(it["created_at"]),
+        )
+
+    def get_membership(self, project_slug: str, principal_sub: str) -> MemberDTO | None:
+        self._project_item(project_slug)
+        it = self._get(K.pk(project_slug), K.member_sk(principal_sub))
+        return self._member_dto(it) if it is not None else None
+
+    def list_members(self, project_slug: str) -> list[MemberDTO]:
+        self._project_item(project_slug)
+        rows = self._query(
+            KeyConditionExpression=Key("PK").eq(K.pk(project_slug))
+            & Key("SK").begins_with(K.member_prefix())
+        )
+        rows.sort(key=lambda r: r["principal_sub"])
+        return [self._member_dto(r) for r in rows]
+
+    def add_member(self, project_slug: str, principal_sub: str,
+                   principal_name: str | None, role: str) -> MemberDTO:
+        self._project_item(project_slug)
+        existing = self._get(K.pk(project_slug), K.member_sk(principal_sub))
+        # idempotent upsert: keep the original created_at, update role/name.
+        created_at = existing["created_at"] if existing else _now_iso()
+        item = {
+            "PK": K.pk(project_slug), "SK": K.member_sk(principal_sub),
+            "type": "member", "project_slug": project_slug,
+            "principal_sub": principal_sub, "principal_name": principal_name,
+            "role": role, "created_at": created_at,
+            "GSI6PK": K.gsi6_member_pk(principal_sub),
+            "GSI6SK": K.gsi6_sk(project_slug),
+        }
+        self._put(item)
+        return self._member_dto(item)
+
+    def remove_member(self, project_slug: str, principal_sub: str) -> None:
+        self._project_item(project_slug)
+        # idempotent: deleting an absent item is a no-op on DynamoDB.
+        self.table.delete_item(
+            Key={"PK": K.pk(project_slug), "SK": K.member_sk(principal_sub)}
+        )
+
+    def list_projects_for_principal(self, principal_sub: str) -> list[MemberDTO]:
+        rows = self._query(
+            IndexName=K.GSI6,
+            KeyConditionExpression=Key("GSI6PK").eq(
+                K.gsi6_member_pk(principal_sub)),
+        )
+        rows.sort(key=lambda r: r["project_slug"])
+        return [self._member_dto(r) for r in rows]
 
     # ----- epics ------------------------------------------------------- #
     def _epic_item(self, slug: str, key: str):

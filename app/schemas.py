@@ -12,6 +12,7 @@ from .models import Priority, RelationKind, TaskStatus, LeaseState  # noqa: F401
 STATUS_VALUES = [s.value for s in TaskStatus]
 PRIORITY_VALUES = [p.value for p in Priority]
 RELATION_VALUES = [r.value for r in RelationKind]
+ROLE_VALUES = ["reader", "writer", "admin"]  # project-membership roles (ISO-1)
 
 
 # --------------------------------------------------------------------------- #
@@ -55,6 +56,33 @@ class AgentOut(Schema):
     slug = fields.Str()
     display_name = fields.Str(allow_none=True)
     kind = fields.Str()
+    created_at = fields.DateTime(dump_only=True)
+
+
+# --------------------------------------------------------------------------- #
+# Project membership (ISO-1) — dormant: the data model + validation only. No
+# route wires these up and nothing enforces authorization from them yet.
+# --------------------------------------------------------------------------- #
+class MemberIn(Schema):
+    principal_sub = fields.Str(
+        required=True,
+        metadata={"description": (
+            "The principal's immutable Cognito 'sub'. Server-verified identity — "
+            "callers pass the sub proven by the auth layer, never a client value."
+        )},
+    )
+    principal_name = fields.Str(
+        allow_none=True,
+        metadata={"description": "Display label only (e.g. agent/user name); informational, not an identity."},
+    )
+    role = fields.Str(required=True, validate=validate.OneOf(ROLE_VALUES))
+
+
+class MemberOut(Schema):
+    project_slug = fields.Str(dump_only=True)
+    principal_sub = fields.Str()
+    principal_name = fields.Str(allow_none=True)
+    role = fields.Str()
     created_at = fields.DateTime(dump_only=True)
 
 
