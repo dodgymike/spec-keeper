@@ -73,12 +73,33 @@ data "aws_iam_policy_document" "lambda_permissions" {
     ]
   }
 
+  # ONBOARD-1 — the dedicated agent-enrollments token store (agent_enrollments.tf).
+  # ONBOARD-2 mints a single-use token (PutItem); ONBOARD-3 redeems it (GetItem +
+  # conditional UpdateItem/DeleteItem). Scoped to EXACTLY this table ARN — no
+  # GSIs, no wildcards, no other table. Mirrors the invites-table grant idiom.
+  statement {
+    sid    = "AppManageAgentEnrollments"
+    effect = "Allow"
+    actions = [
+      "dynamodb:PutItem",
+      "dynamodb:GetItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+    ]
+    resources = [
+      aws_dynamodb_table.agent_enrollments.arn,
+    ]
+  }
+
   # Cognito user-lifecycle admin actions (HA-5): the admin API approves/rejects/
   # blocks/deletes/promotes human (and agent) users by GROUP membership. Scoped
   # to EXACTLY the one user pool ARN (from cognito.tf) — never "*". Only the
   # specific admin actions the endpoints call; no pool-admin (Create/DeleteGroup,
   # UpdateUserPool) and no wildcard. ListUsersInGroup backs the last-admin
   # guardrail; AdminGetUser backs the unknown-user 404 + self-action check.
+  # ONBOARD-3 (agent-enrollment redeem) also creates the agent's Cognito user
+  # (AdminCreateUser + AdminSetUserPassword) and adds it to its group
+  # (AdminAddUserToGroup, already present) — still scoped to this one pool ARN.
   statement {
     sid    = "CognitoUserAdmin"
     effect = "Allow"
@@ -86,6 +107,8 @@ data "aws_iam_policy_document" "lambda_permissions" {
       "cognito-idp:ListUsers",
       "cognito-idp:ListUsersInGroup",
       "cognito-idp:AdminGetUser",
+      "cognito-idp:AdminCreateUser",
+      "cognito-idp:AdminSetUserPassword",
       "cognito-idp:AdminListGroupsForUser",
       "cognito-idp:AdminAddUserToGroup",
       "cognito-idp:AdminRemoveUserFromGroup",

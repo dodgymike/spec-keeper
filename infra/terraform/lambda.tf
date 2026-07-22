@@ -137,6 +137,11 @@ resource "aws_lambda_function" "app" {
       # PreSignUp burn Lambda reads the same table). Unset => the endpoints 501.
       INVITES_TABLE = aws_dynamodb_table.invites.name
 
+      # ONBOARD-1 — the agent-enrollments table backing the single-use enrollment
+      # tokens (ONBOARD-2 mints, ONBOARD-3 redeems). IAM (PutItem/GetItem/
+      # UpdateItem/DeleteItem scoped to this table ARN) is in iam.tf.
+      AGENT_ENROLLMENTS_TABLE = aws_dynamodb_table.agent_enrollments.name
+
       # HA-7 — public request->approve signup queue (signups.tf). The public
       # POST /api/v1/signup enqueues to SQS; GET /api/v1/validate + the admin
       # signups bridge read/write the signups table; the per-IP limiter uses the
