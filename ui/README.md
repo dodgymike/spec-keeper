@@ -136,6 +136,27 @@ widening the SPA's CSP (`script-src`/`frame-src` to allow
 `https://challenges.cloudflare.com`) before the widget can render for real;
 until then, setting `VITE_TURNSTILE_SITE_KEY` only renders the placeholder.
 
+### Public agent enrollment (ONBOARD-5)
+
+`/enroll` is a public, **unauthenticated** route (`src/pages/EnrollPage.tsx`)
+rendered outside the signed-in app shell, alongside `/join` and `/request` -
+a brand-new agent/operator with no session opens the single-use URL an admin
+minted from the Enrollments tab (`…/enroll#token=<token>`) and the page reads
+the token from the URL **hash** (never sent to the server on page load).
+Redemption is **never automatic** - a single-use token must not be burned by a
+link preview or prefetch - so the page shows a "Redeem / activate" button and
+only calls `POST /api/v1/agent-enrollments/redeem` (via the API client's
+`noAuth` option, i.e. no bearer token) when the human clicks it. On success it
+renders the returned credentials (username, password, API base, region,
+client ID, project, role) **once**, each with a copy-to-clipboard button and a
+"save them now" warning, followed by the response's `recipe` - a copy-paste
+setup + local-to-cloud migration guide, with a reminder that API calls need a
+real `User-Agent` header (Cloudflare blocks the default `python-urllib`
+agent). On failure it shows a generic "invalid, already used, or expired"
+message (matching the backend's no-enumeration-oracle behaviour) or, on a 429,
+an ask to try again shortly. Credentials live in component state only - never
+localStorage/sessionStorage, never logged.
+
 ## Building
 
 ```bash
@@ -183,13 +204,18 @@ functions consumed by `/admin` and `/request`: `listAdminUsers(params)`,
 `listInvites()`, `mintInvite(body)`, and `requestAccess(body)` (unauthenticated).
 (ONBOARD-4) `listEnrollments(projectSlug?)`, `mintEnrollment(body)`,
 `revokeEnrollment(tokenHash)`, `listMembers(slug)`, and
-`removeMember(slug, principalSub)`.
+`removeMember(slug, principalSub)`. (ONBOARD-5) `redeemEnrollment(token)`
+(unauthenticated) - consumed by `/enroll`.
 All go through a shared `request()` helper (`src/api/client.ts`) that:
 
 - Resolves URLs against `import.meta.env.VITE_API_BASE`.
 - Attaches `Authorization: Bearer <token>` when `getToken()` returns a value
   - the live Cognito access token (`src/auth/session.ts`) when configured,
-  falling back to `VITE_DEV_TOKEN` otherwise (see "Human sign-in" above).
+  falling back to `VITE_DEV_TOKEN` otherwise (see "Human sign-in" above) -
+  unless the caller passes `{ noAuth: true }` (ONBOARD-5, used by
+  `redeemEnrollment`), which suppresses both the `Authorization` header and
+  the 401 silent-refresh retry below, for calls that must never carry
+  whatever credential the caller happens to hold.
 - On a `401` with Cognito configured, attempts one silent token refresh and
   retries once; if that also fails, `session.ts` clears the session (no
   redirect) and `App.tsx` renders `LoginPage` in its place.

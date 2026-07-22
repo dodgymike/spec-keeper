@@ -4,6 +4,7 @@ import { AppLayout } from "./components/AppLayout";
 import { ActivityPage } from "./pages/ActivityPage";
 import { AdminPage } from "./pages/AdminPage";
 import { CoordinationPage } from "./pages/CoordinationPage";
+import { EnrollPage } from "./pages/EnrollPage";
 import { JoinPage } from "./pages/JoinPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ProgressPage } from "./pages/ProgressPage";
@@ -104,6 +105,13 @@ export default function App() {
 
   if (location.pathname.startsWith("/join")) {
     return <JoinPage />;
+  }
+
+  // `/enroll` is the public ONBOARD-5 agent-onboarding page: like `/join` it
+  // renders regardless of auth status (a brand-new agent holds only a single-use
+  // enrollment token, no session) and lives OUTSIDE the signed-in app shell.
+  if (location.pathname.startsWith("/enroll")) {
+    return <EnrollPage />;
   }
 
   // `/request` is the public HA-7 access-request page: like `/join` it renders

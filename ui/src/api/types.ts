@@ -271,6 +271,32 @@ export interface Member {
   created_at: string;
 }
 
+// ---- Public agent-enrollment REDEEM (ONBOARD-3 / ONBOARD-5) ------------
+// Mirrors app/schemas.py: EnrollRedeemIn / EnrollRedeemOut. This is the ONE
+// PUBLIC (no-bearer) enrollment call: a brand-new agent posts the single-use
+// token it was handed and the server burns it + provisions a real Cognito
+// credential, returning working creds + a setup recipe EXACTLY ONCE.
+
+// app.schemas.EnrollRedeemIn — the single-use token to burn.
+export interface EnrollRedeemIn {
+  token: string;
+}
+
+// app.schemas.EnrollRedeemOut — the redeem response. `password` is emitted
+// ONCE and never stored/logged; a lost password means minting a fresh token.
+// `recipe` is a small ordered guide keyed `1_mint_token` / `2_first_call` /
+// `3_migrate_local_backlog`, each a copy-paste string.
+export interface EnrollRedeemOut {
+  username: string;
+  password: string;
+  api_base: string;
+  region: string | null;
+  client_id: string | null;
+  project_slug: string;
+  role: string;
+  recipe: Record<string, string>;
+}
+
 // HA-7 public access-request intake. The body is deliberately minimal; the
 // server always answers with a uniform 202 (never reveals whether the address
 // is known/eligible).

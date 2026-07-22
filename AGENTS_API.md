@@ -392,6 +392,10 @@ curl -s -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/j
 ```
 - `role` is one of `reader`/`writer`/`admin` — the project role granted on redemption.
 - `ttl_seconds` is optional (60-604800, default `ENROLL_TTL_SECONDS`).
+- Returns **409** when an active, unexpired enrollment already exists for the same
+  `(project_slug, agent_name)` (ONBOARD-3a) — a best-effort guard against two concurrent live
+  tokens for one target. A prior enrollment that is used, expired, or revoked does not block a
+  fresh mint.
 - Returns **501** when `AGENT_ENROLLMENTS_TABLE` is unset (local-dev graceful default).
 
 **List / revoke** (same admin gate; metadata only — never the token or its hash's plaintext):
@@ -416,11 +420,20 @@ project), and returns working credentials **exactly once**:
 ```bash
 curl -s -H 'Content-Type: application/json' \
   -X POST $B/agent-enrollments/redeem -d '{"token":"kX9f..."}'
-# -> 201 {"username":"alice@agents.spec-server.internal", "password":"Ag1!...",
+# -> 201 {"username":"alice.corsearch.3f9a1b2c4d5e6f70@agents.spec-server.internal",
+#         "password":"Ag1!...",
 #         "api_base":"https://api.spec.elasticninja.com", "region":"eu-west-1",
 #         "client_id":"1agentsclient23id", "project_slug":"corsearch", "role":"writer",
 #         "recipe": {"1_mint_token": "...", "2_first_call": "...", "3_migrate_local_backlog": "..."}}
 ```
+- The provisioned Cognito **username is project-namespaced** (ONBOARD-3a):
+  `<sanitized-agent-name>.<sanitized-project-slug>.<16-hex-digest-of-agent_name-NUL-project_slug>@
+  <ENROLL_AGENT_DOMAIN>`. The same `agent_name` redeemed into different projects always provisions
+  a *different* Cognito user (cross-tenant isolation); re-enrolling the same `(project_slug,
+  agent_name)` pair rotates the password on the *same* user (a legitimate credential rotation, not
+  a takeover). The `spec-writers` group and the granted project role are unaffected by this change.
+  This does NOT affect the 19 platform agents provisioned by `scripts/enrol_agents.py`, which still
+  use the plain `<name>@<ENROLL_AGENT_DOMAIN>` scheme.
 - `password` and the full `recipe` — a copy-paste setup guide: mint an access token (via
   `scripts/agent_token.py` or a raw `InitiateAuth` curl), make the first authenticated call (note
   Cloudflare 1010-blocks the default `python-urllib` User-Agent, so send a real one and the
@@ -437,6 +450,11 @@ ONBOARD-2); `ENROLL_API_BASE` / `ENROLL_COGNITO_CLIENT_ID` / `ENROLL_AGENT_DOMAI
 ONBOARD-3 — describe the deployed API/pool so the returned recipe is copy-paste ready). See
 `.env.example`. Infra: `POST /api/v1/agent-enrollments/redeem` is listed in
 `local.public_routes` (`infra/terraform/apigw.tf`) so it bypasses the JWT authorizer.
+
+The `…/enroll#token=…` URL is a dashboard route (ONBOARD-5): `ui/src/pages/EnrollPage.tsx` reads
+the token from the URL hash and calls this redeem endpoint only on an explicit button click (never
+auto-redeemed), rendering the one-time credentials + recipe once. See `ui/README.md` → "Public
+agent enrollment (ONBOARD-5)".
 
 ## Admin: invite-only human signup
 

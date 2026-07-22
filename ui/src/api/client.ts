@@ -5,6 +5,7 @@ import type {
   ChainRun,
   Counter,
   Decision,
+  EnrollRedeemOut,
   Enrollment,
   EnrollmentIn,
   EnrollmentMint,
@@ -61,6 +62,13 @@ interface RequestOptions {
   params?: object;
   body?: unknown;
   headers?: Record<string, string>;
+  /**
+   * Skip the Authorization header (and the 401 silent-refresh retry) entirely.
+   * For PUBLIC endpoints a signed-out caller must reach without a session — e.g.
+   * the agent-enrollment redeem (ONBOARD-5), which a brand-new agent hits before
+   * it holds any credential. Keeps a stray token from leaking onto a public call.
+   */
+  noAuth?: boolean;
 }
 
 function buildUrl(path: string, params?: object): string {
@@ -84,7 +92,7 @@ function buildUrl(path: string, params?: object): string {
  * bounds this to a single attempt).
  */
 async function request<T>(path: string, options: RequestOptions = {}, _retried = false): Promise<T> {
-  const { method = "GET", params, body, headers = {} } = options;
+  const { method = "GET", params, body, headers = {}, noAuth = false } = options;
 
   const finalHeaders: Record<string, string> = {
     Accept: "application/json",
@@ -93,9 +101,11 @@ async function request<T>(path: string, options: RequestOptions = {}, _retried =
   if (body !== undefined) {
     finalHeaders["Content-Type"] = "application/json";
   }
-  const token = await getToken();
-  if (token) {
-    finalHeaders["Authorization"] = `Bearer ${token}`;
+  if (!noAuth) {
+    const token = await getToken();
+    if (token) {
+      finalHeaders["Authorization"] = `Bearer ${token}`;
+    }
   }
 
   let response: Response;
@@ -109,7 +119,7 @@ async function request<T>(path: string, options: RequestOptions = {}, _retried =
     throw new ApiError(0, "Network error contacting the Spec Server API.", cause);
   }
 
-  if (response.status === 401 && !_retried && isCognitoConfigured()) {
+  if (response.status === 401 && !_retried && !noAuth && isCognitoConfigured()) {
     const refreshedToken = await recoverFromUnauthorized();
     if (refreshedToken) {
       return request<T>(path, options, true);
@@ -266,6 +276,22 @@ export function mintEnrollment(body: EnrollmentIn): Promise<EnrollmentMint> {
 export function revokeEnrollment(tokenHash: string): Promise<void> {
   return request<void>(`/api/v1/admin/agent-enrollments/${encodeURIComponent(tokenHash)}`, {
     method: "DELETE",
+  });
+}
+
+/**
+ * PUBLIC single-use enrollment redeem (ONBOARD-3 / ONBOARD-5, UNAUTHENTICATED).
+ * A brand-new agent posts the token it was handed; the server BURNS it (single
+ * use) and provisions a real Cognito credential, returning working creds + a
+ * setup recipe EXACTLY ONCE. Sends NO bearer token (`noAuth`) — the caller holds
+ * nothing but the token. A bad/used/expired token is a generic 400; 429 is
+ * rate-limited. Never persist the response: it carries a one-time password.
+ */
+export function redeemEnrollment(token: string): Promise<EnrollRedeemOut> {
+  return request<EnrollRedeemOut>("/api/v1/agent-enrollments/redeem", {
+    method: "POST",
+    body: { token },
+    noAuth: true,
   });
 }
 
