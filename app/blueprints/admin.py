@@ -32,6 +32,7 @@ from flask_smorest import Blueprint, abort
 from .. import signup as signup_lib  # HA-7 signup-queue primitives
 from .. import signup_aws  # HA-7 boto3 glue (signups table / SES)
 from ..helpers import current_identity, require_api_key, require_project_perm
+from ..storage.errors import Conflict, NotFound
 from ..schemas import (
     AdminApproveIn,
     AdminRejectIn,
@@ -268,6 +269,54 @@ def _caller_actor() -> str:
     return ident.get("sub") or ident.get("username") or "admin"
 
 
+def _derived_project_name(slug: str) -> str:
+    """Derive a human display name from a slug when the caller supplies none
+    (ONBOARD-7): dashes/underscores -> spaces, title-cased (e.g. ``bird-viz`` ->
+    ``Bird Viz``). Falls back to the raw slug if that collapses to empty."""
+    return slug.replace("-", " ").replace("_", " ").strip().title() or slug
+
+
+def _ensure_project_for_mint(slug: str, project_name: str | None) -> bool:
+    """Guarantee the target project exists before minting an enrollment (ONBOARD-7).
+
+    Returns True iff THIS call created the project.
+
+    * Project already exists -> unchanged: gate on ``require_project_perm(slug,
+      "admin")`` (a global spec-admin, subsuming, or — under isolation — a
+      project-admin who also clears that global gate) and return False.
+    * Project is new -> require the caller be a GLOBAL admin (the same effective
+      gate minting already applies), then create it via the storage abstraction so
+      the VERIFIED caller becomes its auto-admin member (ISO-4, atomic on both
+      backends). The creator identity comes ONLY from the verified token, never a
+      body value. Return True.
+    * Create race (ISO-8): another request created the slug first -> the storage
+      ``Conflict`` is caught and treated as "already exists, proceed to mint"
+      (idempotent; never a 500), returning False.
+    """
+    try:
+        current_app.storage.get_project(slug)
+    except NotFound:
+        pass
+    else:
+        require_project_perm(slug, "admin")
+        return False
+
+    # New project: only a global admin may create-via-mint.
+    require_api_key(required="admin")
+    ident = current_identity() or {}
+    name = (project_name or "").strip() or _derived_project_name(slug)
+    try:
+        current_app.storage.create_project(
+            {"slug": slug, "name": name},
+            creator_sub=ident.get("sub"),
+            creator_name=ident.get("username"),
+        )
+    except Conflict:
+        # Lost the create race — the slug now exists; fall through to mint.
+        return False
+    return True
+
+
 def _enrollment_view(item: dict) -> dict:
     """Shape a stored row for EnrollmentOut — metadata + the token_hash.
 
@@ -329,10 +378,22 @@ class AgentEnrollmentsCollection(MethodView):
         Only the SHA-256 ``token_hash`` is persisted (with project/role/agent/TTL
         and ``status='active'``). The plaintext token is returned in this response
         and never stored or logged. AuthZ: project-admin on ``project_slug`` (a
-        global spec-admin bypasses membership)."""
-        require_project_perm(data["project_slug"], "admin")
+        global spec-admin bypasses membership).
+
+        ONBOARD-7: when ``project_slug`` is NEW the project is created in the same
+        call (caller must be a global admin; the verified caller becomes its
+        auto-admin member) and ``project_created=true`` is returned."""
         cfg = current_app.config
+        # Fail fast if enrollments are not configured (501) BEFORE any storage
+        # write, so a misconfigured server never creates an orphan project as a
+        # side effect of a request that then reports failure.
         table = _require_enrollments_table(cfg)
+        # Ensure the project exists (creating it, gated on global admin, when new).
+        # This applies the admin gate for BOTH the exists and create paths, so no
+        # unauthenticated caller can mint or create through here.
+        project_created = _ensure_project_for_mint(
+            data["project_slug"], data.get("project_name")
+        )
 
         now = int(time.time())
         # ONBOARD-3a: refuse a SECOND live token for the same (project, agent_name)
@@ -379,6 +440,7 @@ class AgentEnrollmentsCollection(MethodView):
             "role": data["role"],
             "agent_name": data["agent_name"],
             "expires_at": expires_at,
+            "project_created": project_created,
         }
 
 

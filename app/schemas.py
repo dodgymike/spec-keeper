@@ -469,6 +469,16 @@ class EnrollmentIn(Schema):
         validate=validate.OneOf(ROLE_VALUES),
         metadata={"description": "Role to grant on redemption: one of reader/writer/admin."},
     )
+    project_name = fields.Str(
+        allow_none=True,
+        load_default=None,
+        validate=validate.Length(min=1, max=200),
+        metadata={"description": (
+            "Display name to use IF this call creates the project (project_slug is "
+            "new). Ignored when the project already exists. Omitted -> a name is "
+            "derived from the slug (dashes/underscores -> spaces, title-cased)."
+        )},
+    )
     ttl_seconds = fields.Int(
         allow_none=True,
         load_default=None,
@@ -485,6 +495,14 @@ class EnrollmentMintOut(Schema):
     role = fields.Str(dump_only=True)
     agent_name = fields.Str(dump_only=True)
     expires_at = fields.Int(dump_only=True, metadata={"description": "Epoch seconds when the token expires (TTL)."})
+    project_created = fields.Bool(
+        dump_only=True,
+        metadata={"description": (
+            "True iff THIS call created the project (project_slug was new). False "
+            "when the project already existed (or a concurrent request created it "
+            "first). Either way the enrollment token was minted."
+        )},
+    )
 
 
 class EnrollmentOut(Schema):

@@ -20,6 +20,7 @@ The enrollments table is faked in-memory (monkeypatched into
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 import uuid
 
@@ -268,6 +269,18 @@ def test_unconfigured_table_returns_501():
     assert c.delete(f"/api/v1/admin/agent-enrollments/{_sha('x')}").status_code == 501
 
 
+def test_unconfigured_table_does_not_create_project():
+    """ONBOARD-7 regression: when the enrollments table is unset the mint 501s
+    BEFORE any storage write — a brand-new slug must NOT be created as an orphan."""
+    app = _app()  # AGENT_ENROLLMENTS_TABLE unset
+    c = app.test_client()
+    slug = f"orphan-{uuid.uuid4().hex[:8]}"
+    r = c.post("/api/v1/admin/agent-enrollments",
+               json={"project_slug": slug, "agent_name": "bot", "role": "writer"})
+    assert r.status_code == 501, r.get_json()
+    assert c.get(f"/api/v1/projects/{slug}").status_code == 404
+
+
 def test_bad_role_is_422(fake_table):
     app = _app(AGENT_ENROLLMENTS_TABLE="t")
     r = app.test_client().post("/api/v1/admin/agent-enrollments",
@@ -423,3 +436,145 @@ def test_confirmed_semantics_writer_project_admin_still_403(cognito_app_enforced
     r2 = c.post("/api/v1/admin/agent-enrollments",
                 json=_body(project_slug=slug), headers=_auth(writer))
     assert r2.status_code == 403, r2.get_json()
+
+
+# --------------------------------------------------------------------------- #
+# ONBOARD-7 — mint auto-creates the project when project_slug is new.
+#
+# These run cross-backend (postgres + dynamodb) via the parity ``app`` fixture so
+# the storage create/exists/race path is proven identically on both adapters. The
+# enrollments table itself stays the in-memory ``FakeTable`` (an auth artifact, not
+# storage). Auth is OFF here, so the global-admin gate is a no-op and no creator
+# member is stamped (creator_sub is None) — the Cognito cases below prove the
+# authz + creator-becomes-admin-member invariants.
+# --------------------------------------------------------------------------- #
+def _wire_enrollments(app, monkeypatch):
+    """Point the mint endpoint at a fresh in-memory FakeTable for a parity app."""
+    t = FakeTable()
+    monkeypatch.setattr(admin_bp, "_enrollments_table", lambda cfg: t)
+    monkeypatch.setitem(app.config, "AGENT_ENROLLMENTS_TABLE", "t")
+    return t
+
+
+def test_mint_creates_missing_project(app, monkeypatch):
+    ft = _wire_enrollments(app, monkeypatch)
+    c = app.test_client()
+    slug = f"newproj-{uuid.uuid4().hex[:8]}"
+    r = c.post("/api/v1/admin/agent-enrollments",
+               json={"project_slug": slug, "agent_name": "bot", "role": "writer"})
+    assert r.status_code == 201, r.get_json()
+    body = r.get_json()
+    assert body["project_created"] is True
+    assert body["token"]  # the token is still issued once
+    assert body["project_slug"] == slug
+    # The project now exists and is readable.
+    pr = c.get(f"/api/v1/projects/{slug}")
+    assert pr.status_code == 200, pr.get_json()
+    # The enrollment token was stored (active).
+    assert len(ft.items) == 1 and ft.items[0]["status"] == "active"
+
+
+def test_mint_derives_display_name_from_slug(app, monkeypatch):
+    _wire_enrollments(app, monkeypatch)
+    c = app.test_client()
+    slug = f"bird-viz-{uuid.uuid4().hex[:8]}"
+    r = c.post("/api/v1/admin/agent-enrollments",
+               json={"project_slug": slug, "agent_name": "bot", "role": "writer"})
+    assert r.status_code == 201, r.get_json()
+    # dashes/underscores -> spaces, title-cased.
+    name = c.get(f"/api/v1/projects/{slug}").get_json()["name"]
+    assert name == slug.replace("-", " ").title()
+
+
+def test_mint_uses_supplied_project_name(app, monkeypatch):
+    _wire_enrollments(app, monkeypatch)
+    c = app.test_client()
+    slug = f"named-{uuid.uuid4().hex[:8]}"
+    r = c.post("/api/v1/admin/agent-enrollments",
+               json={"project_slug": slug, "agent_name": "bot", "role": "writer",
+                     "project_name": "My Fancy Project"})
+    assert r.status_code == 201, r.get_json()
+    assert c.get(f"/api/v1/projects/{slug}").get_json()["name"] == "My Fancy Project"
+
+
+def test_mint_existing_project_reports_not_created(app, monkeypatch):
+    ft = _wire_enrollments(app, monkeypatch)
+    c = app.test_client()
+    slug = f"exists-{uuid.uuid4().hex[:8]}"
+    # Pre-create the project (unchanged path).
+    assert c.post("/api/v1/projects",
+                  json={"slug": slug, "name": "Preexisting"}).status_code == 201
+    r = c.post("/api/v1/admin/agent-enrollments",
+               json={"project_slug": slug, "agent_name": "bot", "role": "writer"})
+    assert r.status_code == 201, r.get_json()
+    body = r.get_json()
+    assert body["project_created"] is False
+    assert body["token"]
+    # The pre-existing name was NOT overwritten.
+    assert c.get(f"/api/v1/projects/{slug}").get_json()["name"] == "Preexisting"
+    assert len(ft.items) == 1 and ft.items[0]["status"] == "active"
+
+
+def test_concurrent_same_new_slug_mints_one_creates(app, monkeypatch):
+    """Two concurrent mints for the SAME brand-new slug: exactly one creates the
+    project, the other catches the storage Conflict and proceeds to mint (never a
+    500). Cross-backend via the parity app. Distinct agent_names so the per-(project,
+    agent) dedupe guard does not turn the second mint into a 409."""
+    _wire_enrollments(app, monkeypatch)
+    slug = f"race-{uuid.uuid4().hex[:8]}"
+    results: list = []
+    lock = threading.Lock()
+
+    def worker(idx):
+        r = app.test_client().post(
+            "/api/v1/admin/agent-enrollments",
+            json={"project_slug": slug, "agent_name": f"bot-{idx}", "role": "writer"},
+        )
+        with lock:
+            results.append((r.status_code, r.get_json()))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    codes = [sc for sc, _ in results]
+    assert all(sc == 201 for sc in codes), results  # never a 500
+    created_flags = [body["project_created"] for _, body in results]
+    assert sorted(created_flags) == [False, True]  # exactly one creator
+    assert app.test_client().get(f"/api/v1/projects/{slug}").status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# ONBOARD-7 authz (Cognito on) — only a GLOBAL admin can create-via-mint, and the
+# VERIFIED caller becomes the new project's admin member.
+# --------------------------------------------------------------------------- #
+def test_admin_create_via_mint_records_caller_as_admin_member(
+    cognito_app_enforced, rsa_key, _patch_jwks, fake_table
+):
+    c = cognito_app_enforced.test_client()
+    slug = f"onb7-{uuid.uuid4().hex[:8]}"
+    admin = _mint(rsa_key, sub="founder", groups=["spec-admins"])
+    r = c.post("/api/v1/admin/agent-enrollments",
+               json=_body(project_slug=slug), headers=_auth(admin))
+    assert r.status_code == 201, r.get_json()
+    assert r.get_json()["project_created"] is True
+    # The VERIFIED caller (sub 'founder'), not a body value, is the admin member.
+    members = c.get(f"/api/v1/projects/{slug}/members", headers=_auth(admin)).get_json()
+    assert any(m["principal_sub"] == "founder" and m["role"] == "admin" for m in members)
+
+
+def test_non_admin_cannot_create_via_mint(cognito_app, rsa_key, _patch_jwks, fake_table):
+    """A non-admin (writer) cannot create a project through the mint path: 403 and
+    the project is NOT created."""
+    c = cognito_app.test_client()
+    slug = f"onb7-deny-{uuid.uuid4().hex[:8]}"
+    writer = _mint(rsa_key, sub="w", groups=["spec-writers"])
+    r = c.post("/api/v1/admin/agent-enrollments",
+               json=_body(project_slug=slug), headers=_auth(writer))
+    assert r.status_code == 403, r.get_json()
+    assert fake_table.items == []  # nothing minted
+    # The project was NOT created (an admin read still 404s it).
+    admin = _mint(rsa_key, sub="a", groups=["spec-admins"])
+    assert c.get(f"/api/v1/projects/{slug}", headers=_auth(admin)).status_code == 404
