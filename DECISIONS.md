@@ -160,3 +160,30 @@ Decisions:
 - **Tests follow the HA-2 fake-client monkeypatch pattern (no moto).** moto is not a project
   dependency; an in-memory FakeCognito monkeypatched into admin._cognito_client mirrors the existing
   FakeTable approach for invites, keeping the test suite dependency-free.
+
+## DEC — 2026-07-22 — HA-7 signup queue: bounded Path A (synchronous provisioning; optional pepper; WORM deferred)
+- **Provisioning is SYNCHRONOUS on approve, not a second SQS queue.** The task allowed "provisioner
+  Lambda OR synchronous on approve". The admin approve endpoint (app Lambda) mints the HA-2 invite +
+  SES-es the join link + stamps `provisioned` inline. This drops a whole SQS provisioning queue +
+  Lambda while keeping the load-bearing decoupling — the INTAKE queue — which is what makes the
+  public path existence-free. Ordering: mint+email BEFORE the terminal `mark_provisioned` stamp, so a
+  failure leaves the row `admin-approved` for a safe retry (at worst a second harmless TTL-invite to
+  the same owner); mark_provisioned is conditional (`attribute_not_exists(provisioned_at)`) so a
+  concurrent double-approve can only stamp once.
+- **email_hash uses an OPTIONAL pepper (SIGNUP_PEPPER), plain SHA-256 fallback.** The bird design
+  peppers email_hash via a Secrets-Manager secret. Bounded: a terraform var (sensitive, default "")
+  wired identically to the app + worker Lambdas; unset → plain SHA-256 (fine for dev). Avoids standing
+  up Secrets Manager + its IAM for this internal admin surface while keeping the faithful HMAC path
+  available in prod. The plaintext email is stored ONLY as an SSE-KMS attribute value, never a key/GSI.
+- **S3 WORM audit bucket + peppered ip/ua fingerprints DEFERRED (documented, not built).** Per the
+  task's explicit defer list. The enumeration-privacy crux is preserved without them: uniform-202,
+  the async existence branch behind SQS, hashed-identity-only logs, single-use hash-only token,
+  constant-time verify.
+- **Existing-user "already have an account" notice is CAPPED (signup.bump_notify).** Security review
+  flagged that branch (a) of the worker had no per-email cap (the pending path has bump_resend, but a
+  registered user has no profile row to count against) → a replayed known-registered victim address
+  is a mail-bomb amplifier. Fixed with a standalone TTL'd `NOTIFY#<eh>` conditional counter mirroring
+  bump_resend; still async/owner-only, so never an enumeration oracle.
+- **Worker Lambda vendors a byte-identical copy of app/signup.py** (mirrors the bird "common/ copied
+  into each lambda zip" packaging) so `terraform validate`/the archive-file zip need no build tooling;
+  a re-vendor step + a diff assertion keep the two copies in lockstep.

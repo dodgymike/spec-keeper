@@ -6,7 +6,10 @@ SPEC-driven workflow to concrete calls.
 
 Base URL: `http://localhost:8080/api/v1`. Every request needs `Authorization: Bearer <token>`
 under whichever auth mode is configured — see "Authentication" below for which kind of token
-and which group permission a given call needs.
+and which group permission a given call needs. **Two routes are the exception and are always
+public, in every auth mode:** `POST /signup` and `GET /validate` (the human signup queue, HA-7 —
+see "Public signup queue" below) — a not-yet-a-user has no token to present, so they protect
+themselves instead with an origin-guard, a honeypot, a per-IP rate-limit, and optional Turnstile.
 
 **Storage backend is transparent.** `STORAGE_BACKEND` selects Postgres (default) or DynamoDB; the
 HTTP API — every route, status code, and concurrency guarantee (atomic claim, collision-proof
@@ -51,6 +54,8 @@ which takes priority over no auth.
 | All other mutating calls (tasks, epics, reservations, ports, log, chains) | write |
 | `GET` / `POST /admin/invites` | admin (both methods — invite listing/minting is admin-only, overriding the default `read` a `GET` would otherwise get) |
 | `/admin/users` and `/admin/users/{username}/*` (list/approve/reject/block/unblock/promote/demote/delete) | admin (all methods, overriding the default `read` a `GET` would otherwise get) |
+| `/admin/signups` and `/admin/signups/{email_hash}/*` (list/approve/reject) | admin (all methods) |
+| `POST /signup`, `GET /validate` | **none — always public**, in every auth mode (see above) |
 
 A request succeeds if ANY of the caller's groups grant the required permission — e.g. a
 `spec-writers` member has read+write but not admin; a `spec-admins` member has all three.
@@ -470,6 +475,111 @@ curl -s -H 'Authorization: Bearer <admin-token>' -X DELETE $B/admin/users/jdoe  
   than run the guard blind — approve/unblock/promote/list are unaffected since they carry no
   self-lockout risk.
 - Configured via `COGNITO_USER_POOL_ID` (env); `AWS_REGION` is reused from the existing AWS knobs.
+
+## Public signup queue (HA-7)
+
+The public request→approve human signup path (bird "Path A"): a human requests access, confirms
+their email via a single-use magic link, and an admin approves before they're provisioned. This
+is for a human landing page, not the agent workflow — but the two intake routes are unauthenticated
+public HTTP, so document them precisely to avoid accidental misuse.
+
+**`POST /api/v1/signup`** — PUBLIC, no auth. The uniform-202 anti-enumeration intake:
+
+```bash
+curl -s -H 'Content-Type: application/json' \
+  -X POST $B/signup -d '{"email":"newhire@example.com","display_name":"New Hire"}'
+# -> 202 {"message":"If that email can sign up, we've emailed you a confirmation link.
+#          Check your inbox."}
+```
+- Body: `email` (required), `display_name` (optional, <=64 chars), `turnstile_token` (optional,
+  Cloudflare Turnstile response, verified server-side only when `TURNSTILE_SECRET` is
+  configured), `hp_website` (honeypot — must stay empty; a non-empty value is silently dropped).
+- **Always** returns the identical `202` body for any processable OR silently-dropped request —
+  by design there is no way to distinguish unknown / pending / already-registered by status,
+  body, or timing (no enumeration oracle). The only other possible outcomes are `400` (grossly
+  malformed email) and `429` (per-IP rate-limited — see below); neither is keyed on the email.
+- Does **zero** existence work synchronously. Order of guards: origin-guard (opt-in via
+  `SIGNUP_ENFORCE_ORIGIN`/`SIGNUP_ALLOWED_ORIGINS`) → honeypot → per-IP DynamoDB fixed-window
+  rate-limit (`SIGNUP_RATELIMIT_TABLE`/`MAX`/`WINDOW_S`, fails open) → optional Turnstile
+  (`TURNSTILE_SECRET`) → enqueue to SQS (`SIGNUP_INTAKE_QUEUE_URL`). All state-dependent work
+  (Cognito existence check, writing the `requested` row, emailing the magic link) happens in the
+  async signup worker Lambda draining that queue, off the observable HTTP path.
+- Unconfigured (no `SIGNUP_INTAKE_QUEUE_URL`) ⇒ still returns the uniform 202, just without
+  enqueuing — a local run degrades gracefully rather than erroring.
+
+**`GET /api/v1/validate?token=<token_id.secret>`** — PUBLIC, no auth. Redeems the magic link the
+worker emailed:
+
+```bash
+curl -s "$B/validate?token=Yt3f...ab12.9Fq2...Zx0"
+# -> 200 {"outcome":"confirmed"}    # or {"outcome":"invalid"}
+```
+- Every failure mode — missing, malformed, wrong, expired, or already-used token — folds into the
+  SAME neutral `"invalid"` outcome (no oracle). A valid re-click of an already-redeemed token is
+  idempotently `"confirmed"` (same success page, no second write).
+- Constant-time hash compare (`hmac.compare_digest`) + a single conditional single-use flip
+  transition the signup row `requested` → `email-validated`.
+- Has its own per-IP rate-limit budget, independent of the intake's (a magic-link click never
+  eats a submission's allowance).
+- Unconfigured (no `SIGNUPS_TABLE`) ⇒ returns the neutral `{"outcome":"invalid"}` rather than
+  erroring.
+
+### Admin: the signups bridge
+
+Three endpoints under `/api/v1/admin`, all admin-gated (`spec-admins`, same as invites/users
+above). All return **501** when `SIGNUPS_TABLE` is unset, mirroring the invites/users
+501-when-unconfigured contract.
+
+**List signup requests** (any state, or filtered; newest first):
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' "$B/admin/signups?status=email-validated&limit=50"
+# -> [{"email_hash":"3fa8...", "email":"newhire@example.com", "display_name":"New Hire",
+#      "status":"email-validated", "created_at":1753600000, "updated_at":1753600300,
+#      "validated_at":1753600300, "approved_at":null, "approved_by":null,
+#      "rejected_by":null, "reject_reason":null, "provisioned_at":null,
+#      "resend_count":0}, ...]
+```
+`?status=` is one of `requested`, `email-validated`, `admin-approved`, `provisioned`, `rejected`,
+`expired`; omit it to list every state. `?limit` bounds rows returned **per state queried**
+(default 200, max 1000). Admins see the plaintext `email` (an SSE-KMS-protected attribute value)
+to make the call; keys and logs stay hashed (`email_hash`) throughout.
+
+**Approve** — valid ONLY from `email-validated` (409 otherwise: a partial `requested` row must be
+validated first); provisions synchronously in the same request:
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' \
+  -X POST $B/admin/signups/3fa8.../approve
+# -> 200 {"email_hash":"3fa8...", "status":"provisioned", "approved_by":"admin-alice",
+#         "approved_at":1753600400, "provisioned_at":1753600401, ...}
+```
+Approve moves `email-validated` → `admin-approved`, mints an approved + email-bound HA-2 invite
+(see "Admin: invite-only human signup" above), SES-emails the join link
+(`https://spec.elasticninja.com/join?code=...`) to the requester, then stamps the row
+`provisioned`. Idempotent: re-approving an already-approved/provisioned row is a no-op that
+returns the current row (and retries provisioning if a prior attempt minted-but-didn't-stamp).
+
+**Reject** — valid from any non-terminal state, including a partial `requested` row:
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
+  -X POST $B/admin/signups/3fa8.../reject -d '{"reason":"spam"}'
+# -> 200 {"email_hash":"3fa8...", "status":"rejected", "rejected_by":"admin-alice",
+#         "reject_reason":"spam", ...}
+```
+`reason` is optional free text (truncated to 200 chars). Idempotent: re-rejecting an already-
+rejected row is a no-op that returns the current row.
+
+**Configuration knobs** (all unset by default so a local run degrades gracefully — see
+`.env.example` for the full set): `SIGNUPS_TABLE`, `SIGNUP_INTAKE_QUEUE_URL`,
+`SIGNUP_RATELIMIT_TABLE`/`MAX`/`WINDOW_S`, `TURNSTILE_SECRET`, `SIGNUP_PEPPER` (optional HMAC
+pepper for `email_hash`; falls back to a plain SHA-256), `SIGNUP_VALIDATE_BASE_URL`,
+`SIGNUP_ENFORCE_ORIGIN`/`SIGNUP_ALLOWED_ORIGINS`, `SES_FROM_ADDRESS`/`SES_CONFIG_SET` (reused
+from the HA-6 SES setup). Infra: `infra/terraform/signups.tf` + `signup_worker_lambda/` — the
+signups DynamoDB table, the rate-limit counter table, the SQS intake queue + DLQ, and the async
+signup worker Lambda. **Deferred, not shipped:** an S3 WORM audit bucket and peppered ip/ua
+fingerprints (documented as a follow-up, not built).
 
 ## Conventions agents must honour
 

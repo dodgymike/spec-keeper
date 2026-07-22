@@ -455,3 +455,93 @@ class AdminApproveIn(Schema):
             "'spec-writers'. Admin promotion is a separate /promote action."
         )},
     )
+
+
+# --------------------------------------------------------------------------- #
+# Public request->approve signup queue (HA-7, bird Path A).
+#
+# POST /api/v1/signup is the uniform-202 anti-enumeration intake: it does ZERO
+# existence work and ALWAYS returns the identical accepted body, so it is never
+# an enumeration oracle. GET /api/v1/validate redeems the single-use magic link.
+# The admin signups endpoints list/approve/reject requests (approve only from
+# email-validated). The plaintext email is stored ONLY as an SSE-KMS attribute
+# value (never a key/GSI); logs + keys carry the email_hash.
+# --------------------------------------------------------------------------- #
+class SignupIn(Schema):
+    email = fields.Email(
+        required=True,
+        metadata={"description": "The email requesting access. Existence is NEVER checked on this path."},
+    )
+    display_name = fields.Str(
+        allow_none=True, load_default=None,
+        validate=validate.Length(max=64),
+        metadata={"description": "Optional display name for the request (<=64 chars)."},
+    )
+    turnstile_token = fields.Str(
+        load_default="",
+        validate=validate.Length(max=4096),
+        metadata={"description": "Cloudflare Turnstile token; verified server-side only when TURNSTILE_SECRET is configured."},
+    )
+    hp_website = fields.Str(
+        load_default="",
+        metadata={"description": "Honeypot — must stay empty. A non-empty value is silently dropped as a bot."},
+    )
+
+
+class SignupAcceptedOut(Schema):
+    """The ONE fixed body every processable/dropped intake returns (no oracle)."""
+    message = fields.Str(dump_only=True)
+
+
+class ValidateQuery(Schema):
+    token = fields.Str(
+        required=True,
+        metadata={"description": "The single-use magic-link token (token_id.secret) from the email."},
+    )
+
+
+class ValidateOut(Schema):
+    outcome = fields.Str(
+        dump_only=True,
+        metadata={"description": "'confirmed' (valid/idempotent re-click) or 'invalid' (missing/wrong/expired/used) — never distinguished."},
+    )
+
+
+class AdminSignupsQuery(Schema):
+    status = fields.Str(
+        required=False,
+        validate=validate.OneOf([
+            "requested", "email-validated", "admin-approved",
+            "provisioned", "rejected", "expired",
+        ]),
+        metadata={"description": "Filter to one signup state. Omit to list every state (newest first)."},
+    )
+    limit = fields.Int(
+        load_default=200, validate=validate.Range(min=1, max=1000),
+        metadata={"description": "Max rows to return PER state queried (newest first)."},
+    )
+
+
+class AdminSignupOut(Schema):
+    """An admin view of a signup request. Admins may see the plaintext email (an
+    SSE-KMS attribute value) to decide; logs/keys stay hashed-only."""
+    email_hash = fields.Str(dump_only=True)
+    email = fields.Str(dump_only=True, allow_none=True)
+    display_name = fields.Str(dump_only=True, allow_none=True)
+    status = fields.Str(dump_only=True)
+    created_at = fields.Int(dump_only=True, allow_none=True)
+    updated_at = fields.Int(dump_only=True, allow_none=True)
+    validated_at = fields.Int(dump_only=True, allow_none=True)
+    approved_at = fields.Int(dump_only=True, allow_none=True)
+    approved_by = fields.Str(dump_only=True, allow_none=True)
+    rejected_by = fields.Str(dump_only=True, allow_none=True)
+    reject_reason = fields.Str(dump_only=True, allow_none=True)
+    provisioned_at = fields.Int(dump_only=True, allow_none=True)
+    resend_count = fields.Int(dump_only=True, allow_none=True)
+
+
+class AdminRejectIn(Schema):
+    reason = fields.Str(
+        load_default="", allow_none=True,
+        metadata={"description": "Optional free-text reason recorded on the rejected row."},
+    )

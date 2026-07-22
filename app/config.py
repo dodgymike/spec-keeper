@@ -48,6 +48,56 @@ class Config:
     DYNAMODB_ENDPOINT_URL = os.environ.get("DYNAMODB_ENDPOINT_URL") or None
     AWS_REGION = os.environ.get("AWS_REGION") or None
 
+    # --- Public request->approve signup queue (HA-7, bird Path A) ----------
+    # The heavy public self-service path: POST /api/v1/signup (uniform-202
+    # anti-enumeration intake) -> SQS -> worker -> GET /api/v1/validate magic
+    # link -> admin approve -> provision (mint an HA-2 invite + SES join link).
+    # Every knob is UNSET by default so a local run degrades gracefully: the
+    # intake still returns its uniform 202 (without enqueuing), validate returns
+    # the neutral "invalid", and approve provisions without sending email.
+    #
+    # Dedicated signups DynamoDB table (${name_prefix}-signups). Wired from the
+    # signups.tf output `signups_table_name`. UNSET => validate/admin-signups
+    # endpoints return the neutral/501 graceful paths.
+    SIGNUPS_TABLE = os.environ.get("SIGNUPS_TABLE") or None
+    # SQS intake queue URL the public POST /signup enqueues to (signups.tf output
+    # `signup_intake_queue_url`). UNSET => intake returns 202 without enqueuing.
+    SIGNUP_INTAKE_QUEUE_URL = os.environ.get("SIGNUP_INTAKE_QUEUE_URL") or None
+    SQS_ENDPOINT_URL = os.environ.get("SQS_ENDPOINT_URL") or None
+    # Per-IP fixed-window DynamoDB rate-limit counter for the public routes
+    # (${name_prefix}-signup-ratelimit). UNSET => the in-app limiter fails open
+    # (the edge/CDN limiter is the durable backstop).
+    SIGNUP_RATELIMIT_TABLE = os.environ.get("SIGNUP_RATELIMIT_TABLE") or None
+    SIGNUP_RATELIMIT_MAX = int(os.environ.get("SIGNUP_RATELIMIT_MAX", "5"))
+    SIGNUP_RATELIMIT_WINDOW_S = int(os.environ.get("SIGNUP_RATELIMIT_WINDOW_S", "60"))
+    # Cloudflare Turnstile server-side secret. When SET, POST /signup verifies the
+    # submitted turnstile_token server-side (a failed/absent token is dropped as a
+    # bot). UNSET (dev default) => the Turnstile check is skipped entirely.
+    TURNSTILE_SECRET = os.environ.get("TURNSTILE_SECRET") or None
+    # Optional origin allow-list for the public routes. When SIGNUP_ENFORCE_ORIGIN
+    # is on AND this is non-empty, POST /signup requires the Origin/Referer to
+    # match one of these; UNSET/off => skipped (dev). Exact-scheme+host match.
+    SIGNUP_ALLOWED_ORIGINS = [
+        o.strip() for o in os.environ.get("SIGNUP_ALLOWED_ORIGINS", "").split(",") if o.strip()
+    ]
+    SIGNUP_ENFORCE_ORIGIN = _bool("SIGNUP_ENFORCE_ORIGIN", False)
+    # Optional pepper for email_hash (HMAC-SHA256). Recommended in production so a
+    # leaked table cannot be dictionary-reversed; UNSET => a plain SHA-256 hash
+    # (fine for local dev). MUST match between the app Lambda and the worker.
+    SIGNUP_PEPPER = os.environ.get("SIGNUP_PEPPER") or None
+    # Base URL the magic-link validation link is built from (e.g.
+    # https://spec.elasticninja.com). The worker appends /validate?token=<link>.
+    SIGNUP_VALIDATE_BASE_URL = os.environ.get("SIGNUP_VALIDATE_BASE_URL", "")
+    # Per-email resend cap enforced async by the worker (never an oracle).
+    SIGNUP_RESEND_CAP = int(os.environ.get("SIGNUP_RESEND_CAP", "3"))
+
+    # --- SES transactional email (HA-6) --------------------------------------
+    # Verified SES sender + configuration set for the auth/signup emails. Wired
+    # from ses.tf outputs `ses_email_verification_pending`/`ses_from_address` and
+    # `ses_configuration_set_name`. UNSET => email sends are skipped in dev.
+    SES_FROM_ADDRESS = os.environ.get("SES_FROM_ADDRESS") or None
+    SES_CONFIG_SET = os.environ.get("SES_CONFIG_SET") or None
+
     # Optional bearer tokens. Empty => auth disabled (local-only default).
     API_KEYS = [
         k.strip() for k in os.environ.get("API_KEYS", "").split(",") if k.strip()
@@ -154,3 +204,14 @@ class TestConfig(Config):
     # User-admin pool off by default (same rationale) — tests that exercise the
     # admin user endpoints set COGNITO_USER_POOL_ID explicitly on a subclass.
     COGNITO_USER_POOL_ID = None
+    # Signup queue (HA-7) off by default so a stray env var can't flip the
+    # baseline; the signup tests set these explicitly on a subclass.
+    SIGNUPS_TABLE = None
+    SIGNUP_INTAKE_QUEUE_URL = None
+    SIGNUP_RATELIMIT_TABLE = None
+    TURNSTILE_SECRET = None
+    SIGNUP_ALLOWED_ORIGINS = []
+    SIGNUP_ENFORCE_ORIGIN = False
+    SIGNUP_PEPPER = None
+    SES_FROM_ADDRESS = None
+    SES_CONFIG_SET = None

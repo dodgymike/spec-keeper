@@ -69,12 +69,19 @@ variable "apigw_log_retention_days" {
 # id]. AUTH-9 replaced the old per-agent M2M client_ids with that pair.
 # ---------------------------------------------------------------------------
 locals {
-  # Public routes (no authorizer): health/readiness + the OpenAPI contract/docs.
+  # Public routes (no authorizer): health/readiness + the OpenAPI contract/docs,
+  # plus the HA-7 public signup queue surface. POST /api/v1/signup (uniform-202
+  # anti-enumeration intake) and GET /api/v1/validate (magic-link redeem) are
+  # PUBLIC BY DESIGN — the public request page is unauthenticated. They are
+  # listed here explicitly so the JWT-authorized `ANY /api/v1/{proxy+}` route
+  # below does NOT capture them; the app itself does no auth on these two.
   public_routes = [
     "GET /readyz",
     "GET /healthz",
     "GET /openapi.json",
     "GET /docs",
+    "POST /api/v1/signup",
+    "GET /api/v1/validate",
   ]
 }
 

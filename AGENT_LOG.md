@@ -302,3 +302,39 @@ to the server's `/events` endpoint.
 - Did NOT touch ui/ (HA-4 owns it) or cognito.tf. NOT committed — files listed above are for the
   coordinated commit. Orchestrator note: COGNITO_USER_POOL_ID was added to lambda.tf, so no manual
   env wiring is needed at cutover.
+
+## 2026-07-22 — HA-7 Public request→approve signup queue (bird Path A, BACKEND+INFRA)
+- Un-deferred HA-7 and built bird "Path A" code-only (no deploy): the public self-service
+  request→approve signup queue. Owner feature-runner; SPEC via running Spec Server.
+- Scope (backend + infra ONLY; the public request PAGE is a separate UI task — did NOT touch ui/,
+  did NOT touch cognito.tf):
+  * `POST /api/v1/signup` (PUBLIC, no auth) — uniform-202 anti-enumeration intake. ZERO existence
+    work: origin-guard → honeypot → per-IP DynamoDB fixed-window rate-limit (fail-open) → optional
+    Cloudflare Turnstile (server-side, gated on TURNSTILE_SECRET; skipped when unset) → normalize →
+    SQS SendMessage → ALWAYS the identical 202. No DynamoDB/Cognito/email/latency branch.
+  * `GET /api/v1/validate?token=` (PUBLIC) — magic-link redeem: constant-time hmac.compare_digest,
+    single-use conditional flip, requested→email-validated; every failure folds to neutral "invalid".
+    Per-IP floor (independent `val#ip#` budget).
+  * SQS intake queue + DLQ + worker Lambda (signups.tf + signup_worker_lambda/): Cognito ListUsers
+    by email; new → write `requested` row + SES magic link (stores only the token HASH, 24h TTL);
+    existing → capped "you already have an account" notice; ReportBatchItemFailures.
+  * Admin bridge (admin.py, spec-admins-gated): GET /api/v1/admin/signups[?status=&limit=],
+    POST .../{email_hash}/approve (email-validated ONLY → provision SYNCHRONOUSLY: mint an HA-2
+    invite approved+email-bound + SES join link → mark_provisioned exactly-once), POST .../reject.
+  * Reused the HA-6 SES send policy + config set (attached to the worker + app roles); least-priv
+    IAM scoped to exact table/queue/pool ARNs (no dynamodb:*, no Resource="*").
+- DEFERRED (documented, NOT built): S3 WORM audit bucket + peppered ip/ua fingerprints + their
+  Secrets-Manager pepper. email_hash uses an OPTIONAL pepper (SIGNUP_PEPPER, terraform var; plain
+  SHA-256 fallback when unset). The enumeration-privacy crux (uniform-202 + async existence branch +
+  hashed-identity logs) is kept.
+- Verify: new tests/test_signup.py **19 passed**; full suite **126 passed**
+  (TEST_DATABASE_URL=…specserver_test). `terraform fmt` clean; `terraform validate` => "Success!".
+  Worker vendored signup.py is byte-identical to app/signup.py.
+- Chain: spec-keeper (claim + no numeric reservation needed — all resources name-prefixed) →
+  implementer → test-engineer → reviewer (APPROVE; P1 was commit-hygiene: don't let the unrelated
+  ui/ tree ride along — only my 15 files staged, not committing) → security (PASS, no P0; P1
+  mail-bomb amplification on the existing-user notice FIXED via signup.bump_notify capped counter;
+  P2s display_name Length + validate rate-limit + admin-list limit all applied) → documentation.
+- NOT committed — files listed below are for the coordinated commit. The dirty ui/ + docker-compose
+  + install-and-run.sh/restore_backup.py in the tree are NOT mine (pre-existing / Path-B UI) — must
+  NOT be included in the HA-7 commit.

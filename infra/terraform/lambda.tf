@@ -136,6 +136,24 @@ resource "aws_lambda_function" "app" {
       # HA-2 — the invites table backing POST/GET /api/v1/admin/invites (the
       # PreSignUp burn Lambda reads the same table). Unset => the endpoints 501.
       INVITES_TABLE = aws_dynamodb_table.invites.name
+
+      # HA-7 — public request->approve signup queue (signups.tf). The public
+      # POST /api/v1/signup enqueues to SQS; GET /api/v1/validate + the admin
+      # signups bridge read/write the signups table; the per-IP limiter uses the
+      # ratelimit counter. TURNSTILE_SECRET/SIGNUP_PEPPER are optional (see
+      # signups.tf vars). SES_* let the approve step email the join link (HA-6).
+      SIGNUPS_TABLE             = aws_dynamodb_table.signups.name
+      SIGNUP_INTAKE_QUEUE_URL   = aws_sqs_queue.signup_intake.url
+      SIGNUP_RATELIMIT_TABLE    = aws_dynamodb_table.signup_ratelimit.name
+      SIGNUP_RATELIMIT_MAX      = tostring(var.signup_ratelimit_max)
+      SIGNUP_RATELIMIT_WINDOW_S = tostring(var.signup_ratelimit_window_seconds)
+      TURNSTILE_SECRET          = var.turnstile_secret
+      SIGNUP_PEPPER             = var.signup_pepper
+      SIGNUP_VALIDATE_BASE_URL  = var.signup_validate_base_url
+      SIGNUP_ENFORCE_ORIGIN     = tostring(var.signup_enforce_origin)
+      SIGNUP_ALLOWED_ORIGINS    = var.signup_allowed_origins
+      SES_FROM_ADDRESS          = var.ses_from_address
+      SES_CONFIG_SET            = aws_sesv2_configuration_set.auth.configuration_set_name
     }
   }
 

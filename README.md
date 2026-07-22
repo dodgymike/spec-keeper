@@ -71,6 +71,12 @@ both are set. **CORS is off by default** too; set `CORS_ORIGINS` (an exact-match
 the full precedence ladder, the group table, and how to mint a token, and `.env.example` for
 every knob.
 
+Two routes are **always** public regardless of the auth mode — `POST /api/v1/signup` and
+`GET /api/v1/validate` (the public request→approve signup queue, HA-7; see "Public signup queue"
+below) — since a not-yet-a-user has no token to present. They are deliberately excluded from
+`require_api_key` and instead protect themselves with an origin-guard, a honeypot, a per-IP
+rate-limit, and (optionally) Cloudflare Turnstile.
+
 ## What's included
 
 - **Tasks** — CRUD, atomic `claim-next`, `complete`, `release`, `status`, relations, commit refs;
@@ -94,6 +100,11 @@ every knob.
 - **Admin user-lifecycle endpoints** (HA-5) — list/approve/reject/block/unblock/promote/demote/
   delete Cognito pool users (including agent users), admin-gated; see "Admin: user lifecycle"
   below.
+- **Public request→approve signup queue** (HA-7) — a uniform-202, anti-enumeration
+  `POST /api/v1/signup` intake + `GET /api/v1/validate` magic-link redeem (both PUBLIC, no
+  auth), decoupled behind SQS to an async worker Lambda, plus an admin bridge
+  (`/api/v1/admin/signups*`) to list/approve/reject requests; approval synchronously mints an
+  HA-2 invite and emails the join link. See "Public signup queue" below.
 - **Alembic migrations**, **OpenAPI 3** + Swagger UI, **Docker** compose, and a **scheduled daily
   backup** (`scripts/backup.sh` via a launchd LaunchAgent).
 
@@ -109,7 +120,10 @@ every knob.
 | Storage abstraction (backend-neutral port + Postgres/DynamoDB adapters) | `app/storage/` |
 | Idempotency-Key store | `app/idempotency.py` |
 | `SPEC.md` import/export parser + renderer | `app/specmd.py` |
-| REST blueprints (projects · agents · epics · tasks · reservations · ports · log · chains) | `app/blueprints/` |
+| Signup queue primitives (normalize/hash email, mint/verify magic-link token, state machine, conditional DynamoDB writes) | `app/signup.py` |
+| Signup queue boto3 glue (signups table, SQS enqueue, SES send) | `app/signup_aws.py` |
+| Per-IP fixed-window rate limiter for the public signup routes | `app/signup_ratelimit.py` |
+| REST blueprints (projects · agents · epics · tasks · reservations · ports · log · chains · admin · signup) | `app/blueprints/` |
 | Alembic migrations (run on boot) | `migrations/` |
 | Tests (concurrency + round-trip + idempotency) | `tests/` |
 | Backup / migrate / schedule scripts | `scripts/` |
@@ -190,6 +204,18 @@ optimistic-lock/412 contract — passes identically on both backends.
 | `INVITE_TTL_DAYS` | `14` | Default validity window (days) for a freshly minted invite; overridable per-invite via the mint request's `ttl_days` (1-90). |
 | `INVITE_JOIN_BASE_URL` | _(empty)_ | Base URL prefixed to the `join_url` the mint endpoint returns (e.g. `https://spec.example.com`); empty ⇒ a relative `/join?code=...` link. |
 | `COGNITO_USER_POOL_ID` | _(none)_ | Cognito user pool backing the admin user-lifecycle endpoints (HA-5): `/api/v1/admin/users*` (list/approve/reject/block/unblock/promote/demote/delete). Unset ⇒ every `/admin/users*` endpoint returns 501 (local-dev graceful default), same contract as `INVITES_TABLE` above. Reuses `AWS_REGION`. Wired from terraform output `cognito_user_pool_id` (`infra/terraform/cognito.tf`). |
+| `SIGNUPS_TABLE` | _(none)_ | Dedicated DynamoDB table backing the public signup queue (HA-7): `GET /api/v1/validate` and the admin `/api/v1/admin/signups*` bridge. Unset ⇒ validate returns the neutral `invalid` outcome and the admin endpoints return 501 (same graceful-default contract as `INVITES_TABLE`). Wired from terraform output `signups_table_name` (`infra/terraform/signups.tf`). |
+| `SIGNUP_INTAKE_QUEUE_URL` | _(none)_ | SQS queue URL the public `POST /api/v1/signup` intake enqueues to. Unset ⇒ intake still returns its uniform 202 without enqueuing (local-dev graceful default). Wired from terraform output `signup_intake_queue_url`. |
+| `SQS_ENDPOINT_URL` | _(none)_ | Endpoint override for the SQS client used by the intake enqueue (e.g. a local SQS emulator). Unset ⇒ boto3 talks to real AWS. |
+| `SIGNUP_RATELIMIT_TABLE` | _(none)_ | Per-IP fixed-window DynamoDB counter table for the public signup routes (`${name_prefix}-signup-ratelimit`, terraform output `signup_ratelimit_table_name`). Unset ⇒ the in-app limiter fails open (the CDN/edge limiter is the durable backstop). |
+| `SIGNUP_RATELIMIT_MAX` | `5` | Max requests per source IP per window before a 429, for `POST /signup` and (independently) `GET /validate`. |
+| `SIGNUP_RATELIMIT_WINDOW_S` | `60` | The fixed per-IP rate-limit window, in seconds. |
+| `TURNSTILE_SECRET` | _(none)_ | Cloudflare Turnstile server-side secret. Set ⇒ `POST /signup` verifies the submitted `turnstile_token` server-side (a failed/absent token is silently dropped as a bot, still returning the uniform 202). Unset (dev default) ⇒ the Turnstile check is skipped entirely. |
+| `SIGNUP_PEPPER` | _(none)_ | Optional pepper for `email_hash` (`HMAC-SHA256(pepper, email)` instead of a plain `SHA-256`), defeating offline dictionary reversal of a leaked signups table. Must match between the app and the signup worker Lambda. Unset ⇒ a plain SHA-256 hash (fine for local dev). |
+| `SIGNUP_VALIDATE_BASE_URL` | _(empty)_ | Base URL the signup worker prefixes to the magic-link validation URL it emails (e.g. `https://spec.elasticninja.com/validate?token=...`); empty ⇒ a relative link. |
+| `SIGNUP_ENFORCE_ORIGIN` | `false` | When `true` AND `SIGNUP_ALLOWED_ORIGINS` is non-empty, `POST /signup` requires the `Origin` (or `Referer` host) to match one of the allowed origins, else 403. Off by default (dev). |
+| `SIGNUP_ALLOWED_ORIGINS` | _(empty)_ | Comma-separated exact-match origin allow-list used only when `SIGNUP_ENFORCE_ORIGIN=true`, e.g. `https://spec.elasticninja.com`. |
+| `SES_FROM_ADDRESS` / `SES_CONFIG_SET` | _(none)_ | Verified SES sender address + configuration set, reused from the HA-6 transactional-email setup, for the signup-approve join-link email. Unset ⇒ the send is skipped (logged), so approve still provisions in dev, just without an email. |
 | `LEASE_DEFAULT_TTL` | `1800` | Claimed-task lease seconds |
 | `API_KEYS` | _(empty)_ | Comma-separated bearer tokens (legacy static auth). Empty ⇒ auth off (local-only). Ignored if `COGNITO_ISSUER` is set. |
 | `COGNITO_ISSUER` | _(empty)_ | OIDC issuer for Cognito RS256 JWT auth (AUTH-2/AUTH-10). When set, takes precedence over `API_KEYS`. Authorization is by Cognito group membership (`AUTH_GROUPS_CLAIM`, `AUTH_GROUP_READ`/`WRITE`/`ADMIN`), not scopes. See `AGENTS_API.md` → "Authentication" and `.env.example` for the full `COGNITO_*`/`JWKS_*`/`AUTH_GROUP_*` knob set. |
@@ -238,6 +264,51 @@ above. Self-lockout guards refuse to let an admin block/reject/delete/demote the
 refuse to demote the last remaining admin; those guarded mutations need the caller's verified
 Cognito identity, so they return 501 under static `API_KEYS` auth (no `COGNITO_ISSUER`). See
 `AGENTS_API.md` → "Admin: user lifecycle" for the request/response shapes.
+
+### Public signup queue (HA-7)
+
+The public self-service path (bird "Path A"): a human requests access, confirms their email via a
+magic link, and an admin approves before they're provisioned — decoupled behind SQS so the public
+HTTP path never does existence-dependent work (the enumeration-privacy crux).
+
+- `POST /api/v1/signup` — **PUBLIC, no auth.** The uniform-202 intake: always returns the same
+  `202 {"message": "If that email can sign up, we've emailed you a confirmation link. Check your
+  inbox."}` for any processable or silently-dropped request — no enumeration oracle by body,
+  status, or timing. Order of the cheap synchronous guards: origin-guard → honeypot
+  (`hp_website`) → per-IP DynamoDB fixed-window rate-limit (fails open; 429 over budget) →
+  optional Cloudflare Turnstile (verified server-side only when `TURNSTILE_SECRET` is set) →
+  enqueue to SQS. All existence-dependent work (Cognito check, row create, magic-link email)
+  happens in the async signup worker Lambda off SQS, which an attacker can neither observe nor
+  time.
+- `GET /api/v1/validate?token=<token_id.secret>` — **PUBLIC, no auth.** Redeems the single-use
+  magic link: `200 {"outcome": "confirmed"}` or `{"outcome": "invalid"}` — every failure mode
+  (missing/malformed/wrong/expired/already-used token) folds to the same neutral `invalid` (no
+  oracle). Constant-time hash compare + a single conditional single-use flip transition the row
+  `requested` → `email-validated`. Has its own independent per-IP rate-limit floor.
+- `GET /api/v1/admin/signups[?status=&limit=]` — admin-gated (`spec-admins`). Lists signup
+  requests in any state, newest first (states: `requested`, `email-validated`,
+  `admin-approved`, `provisioned`, `rejected`, `expired`). Admins see the plaintext email (an
+  SSE-KMS-protected attribute value); keys/logs stay hashed (`email_hash`).
+- `POST /api/v1/admin/signups/{email_hash}/approve` — admin-gated. Approves ONLY from
+  `email-validated` (409 otherwise), then provisions **synchronously**: mints an HA-2 invite
+  (`approved=true`, email-bound) and SES-emails the join link
+  (`https://spec.elasticninja.com/join?code=...`), then stamps `provisioned` (idempotent).
+- `POST /api/v1/admin/signups/{email_hash}/reject` — admin-gated. Rejects from any
+  non-terminal state (including a partial `requested` row); optional body `{"reason": "..."}`.
+  Idempotent.
+
+Every knob is unset by default so a local run degrades gracefully: intake still 202s (without
+enqueuing), validate returns the neutral `invalid`, and the admin `/signups*` endpoints return
+501 when `SIGNUPS_TABLE` is unset — mirroring the invites 501 contract. Infra
+(`infra/terraform/signups.tf` + `signup_worker_lambda/`): a dedicated `${name_prefix}-signups`
+DynamoDB table (SSE-KMS, PITR, TTL, a `GSI1` status index), a `${name_prefix}-signup-ratelimit`
+counter table, an SQS intake queue + DLQ, and the signup worker Lambda (Cognito `ListUsers`,
+writes the `requested` row, SES's the magic link storing only the token hash) — least-privilege
+IAM scoped to exact ARNs, reusing the HA-6 SES send policy + configuration set. See
+`AGENTS_API.md` → "Public signup queue" for full request/response shapes and examples.
+
+**Deferred, not shipped:** an S3 WORM audit bucket and peppered ip/ua fingerprints — documented as
+a follow-up, tracked separately from this backend + infra slice.
 
 ## Backups
 

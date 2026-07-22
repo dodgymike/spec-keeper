@@ -39,6 +39,7 @@ def create_app(config_object: type = Config) -> Flask:
     from .blueprints.ports import blp as ports_blp
     from .blueprints.projects import blp as projects_blp
     from .blueprints.reservations import blp as reservations_blp
+    from .blueprints.signup import blp as signup_blp  # HA-7
     from .blueprints.tasks import blp as tasks_blp
 
     api.register_blueprint(projects_blp)
@@ -50,6 +51,7 @@ def create_app(config_object: type = Config) -> Flask:
     api.register_blueprint(log_blp)
     api.register_blueprint(chains_blp)
     api.register_blueprint(admin_blp)
+    api.register_blueprint(signup_blp)  # HA-7 public signup queue
 
     _register_cli(app)
     return app

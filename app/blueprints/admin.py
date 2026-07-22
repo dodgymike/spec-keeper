@@ -29,9 +29,14 @@ from flask import current_app
 from flask.views import MethodView
 from flask_smorest import Blueprint, abort
 
+from .. import signup as signup_lib  # HA-7 signup-queue primitives
+from .. import signup_aws  # HA-7 boto3 glue (signups table / SES)
 from ..helpers import current_identity, require_api_key
 from ..schemas import (
     AdminApproveIn,
+    AdminRejectIn,
+    AdminSignupOut,
+    AdminSignupsQuery,
     AdminUserOut,
     AdminUsersQuery,
     InviteIn,
@@ -486,3 +491,239 @@ class DemoteUser(MethodView):
             UserPoolId=pool_id, Username=username, GroupName=admin_group
         )
         return ""
+
+
+# =========================================================================== #
+# HA-7 — Public request->approve signup queue: the ADMIN bridge.
+#
+# All endpoints are spec-admins-gated (require_api_key(required="admin")). They
+# read the dedicated ${name_prefix}-signups DynamoDB table (via signup_aws, the
+# same isolated-boto3 pattern as _invites_table). When SIGNUPS_TABLE is unset
+# (local-dev default) every endpoint returns 501 gracefully, mirroring invites.
+#
+# State machine (app/signup.py): a partial (`requested`, unvalidated) row is
+# listed and MAY be rejected, but APPROVE is valid ONLY from `email-validated`
+# (Confirmed Decision 3). On approve the row transitions email-validated ->
+# admin-approved and is PROVISIONED synchronously in the same request: an HA-2
+# invite is minted (approved=true + email-bound) and the join link is SES-emailed
+# to the requester, then the row is stamped `provisioned` (idempotent).
+# =========================================================================== #
+_MAX_REJECT_REASON_LEN = 200
+
+
+def _signups_table(cfg):
+    """Return the boto3 signups Table, or None. Isolated (like _invites_table) so
+    tests monkeypatch it with an in-memory fake."""
+    return signup_aws.signups_table(cfg)
+
+
+def _require_signups_table(cfg):
+    table = _signups_table(cfg)
+    if table is None:
+        abort(
+            501,
+            message=(
+                "The signup queue is not configured on this server "
+                "(set SIGNUPS_TABLE to the signups DynamoDB table)."
+            ),
+        )
+    return table
+
+
+def _signup_view(item: dict) -> dict:
+    """Shape a signups row for AdminSignupOut. Admins may see the plaintext email
+    (an SSE-KMS attribute value) to decide; keys/logs stay hashed-only."""
+    def _int(v):
+        return int(v) if v is not None else None
+    return {
+        "email_hash": item.get("email_hash"),
+        "email": item.get("email"),
+        "display_name": item.get("display_name") or None,
+        "status": item.get("status"),
+        "created_at": _int(item.get("created_at")),
+        "updated_at": _int(item.get("updated_at")),
+        "validated_at": _int(item.get("validated_at")),
+        "approved_at": _int(item.get("approved_at")),
+        "approved_by": item.get("approved_by"),
+        "rejected_by": item.get("rejected_by"),
+        "reject_reason": item.get("reject_reason"),
+        "provisioned_at": _int(item.get("provisioned_at")),
+        "resend_count": _int(item.get("resend_count")),
+    }
+
+
+def _get_signup(table, email_hash: str):
+    resp = table.get_item(
+        Key={"pk": signup_lib.signup_pk(email_hash), "sk": signup_lib.PROFILE_SK}
+    )
+    return resp.get("Item")
+
+
+def _list_signups(table, status: str | None, limit: int = 200) -> list[dict]:
+    """Query the status GSI (facet==filter: the status predicate IS the query),
+    newest-first, bounded to ``limit`` rows PER state. Omitted status -> every
+    state merged."""
+    from boto3.dynamodb.conditions import Key
+
+    states = [status] if status else list(signup_lib.VALID_STATES)
+    items: list[dict] = []
+    for st in states:
+        resp = table.query(
+            IndexName="GSI1",
+            KeyConditionExpression=Key("gsi1pk").eq(signup_lib.status_gsi_pk(st)),
+            ScanIndexForward=False,  # newest first
+            Limit=limit,
+        )
+        items.extend(resp.get("Items", []))
+    items.sort(key=lambda it: int(it.get("gsi1sk", 0) or 0), reverse=True)
+    return items
+
+
+def _provision_signup(cfg, row: dict, actor: str) -> None:
+    """Synchronous provisioning: mint an approved, email-bound HA-2 invite and SES
+    the join link, then stamp the signups row `provisioned` (exactly-once).
+
+    Ordering: mint+email BEFORE the terminal stamp, so a failure leaves the row
+    `admin-approved` (a retry re-mints a harmless second invite) rather than
+    marking it provisioned without a redeemable invite. If the invites table is
+    unconfigured the row stays `admin-approved` (provisioning skipped, logged)."""
+    email = row.get("email")
+    email_hash = row.get("email_hash")
+    if not email or not email_hash:
+        return
+    invites = _invites_table(cfg)
+    if invites is None:
+        current_app.logger.warning(
+            "signup_admin: INVITES_TABLE unset; approved row left un-provisioned eh=%s",
+            email_hash,
+        )
+        return
+
+    # Mint an approved + email-bound single-use invite (mirrors InvitesCollection
+    # .post's item shape). Only the code HASH is stored; the plaintext code rides
+    # only in the join link we email to the requester.
+    code = secrets.token_urlsafe(_CODE_BYTES)
+    now = int(time.time())
+    ttl_days = int(cfg.get("INVITE_TTL_DAYS", 14))
+    invites.put_item(
+        Item={
+            "code_hash": _hash(code),
+            "status": "active",
+            "created_at": now,
+            "expires_at": now + ttl_days * 86400,
+            "approved": True,
+            "email_binding": _hash(_norm_email(email)),
+        },
+        ConditionExpression="attribute_not_exists(code_hash)",
+    )
+    base = (cfg.get("INVITE_JOIN_BASE_URL") or "").rstrip("/")
+    join_url = f"{base}/join?code={code}" if base else f"/join?code={code}"
+
+    body = (
+        "Good news — your Spec Server signup has been approved.\n\n"
+        "Complete your account by opening this single-use link:\n\n"
+        f"{join_url}\n\n"
+        "The link expires soon. If you did not request an account you can ignore "
+        "this email.\n"
+    )
+    try:
+        signup_aws.ses_send(
+            cfg, to_addr=email,
+            subject="Your Spec Server signup is approved", body=body,
+        )
+    except Exception:  # noqa: BLE001 — a send failure must not double-provision
+        current_app.logger.exception("signup_admin: join-link email failed eh=%s", email_hash)
+        raise
+
+    # Stamp provisioned exactly-once (conditional guard). False = a concurrent
+    # approve already stamped it — the invite we minted is a harmless duplicate.
+    signup_lib.mark_provisioned(_signups_table(cfg), email_hash)
+
+
+@blp.route("/signups")
+class SignupsCollection(MethodView):
+    @blp.arguments(AdminSignupsQuery, location="query")
+    @blp.response(200, AdminSignupOut(many=True))
+    def get(self, query):
+        """List signup requests (every state, or one via ?status=), newest first.
+        Admin-only. Partial (unvalidated) rows are first-class + listed."""
+        require_api_key(required="admin")
+        cfg = current_app.config
+        table = _require_signups_table(cfg)
+        rows = _list_signups(table, query.get("status"), query.get("limit", 200))
+        return [_signup_view(it) for it in rows]
+
+
+@blp.route("/signups/<email_hash>/approve")
+class ApproveSignup(MethodView):
+    @blp.response(200, AdminSignupOut)
+    def post(self, email_hash):
+        """Approve a signup — ONLY valid from email-validated — then provision
+        synchronously (mint an approved+email-bound invite + SES the join link).
+        Idempotent: re-approving an already-approved/provisioned row is a no-op."""
+        require_api_key(required="admin")
+        cfg = current_app.config
+        table = _require_signups_table(cfg)
+        actor = (current_identity() or {}).get("username") or (current_identity() or {}).get("sub") or "admin"
+
+        item = _get_signup(table, email_hash)
+        if not item:
+            abort(404, message="signup not found")
+        status = item.get("status")
+
+        # Idempotent: already approved-or-further along -> return current row.
+        if status in (signup_lib.STATE_ADMIN_APPROVED, signup_lib.STATE_PROVISIONED):
+            if status == signup_lib.STATE_ADMIN_APPROVED:
+                # A prior approve may have failed to provision — try again.
+                _provision_signup(cfg, item, actor)
+                item = _get_signup(table, email_hash) or item
+            return _signup_view(item)
+
+        if not signup_lib.can_approve(status):
+            abort(409, message="approve requires the signup be email-validated first")
+
+        now = int(time.time())
+        moved = signup_lib.transition_signup(
+            table, email_hash,
+            from_state=signup_lib.STATE_EMAIL_VALIDATED,
+            to_state=signup_lib.STATE_ADMIN_APPROVED,
+            extra_set={"approved_by": actor, "approved_at": now},
+            now=now,
+        )
+        refreshed = _get_signup(table, email_hash) or item
+        if not moved:
+            # Lost a race to a concurrent admin action; respond off the real row.
+            if refreshed.get("status") in (
+                signup_lib.STATE_ADMIN_APPROVED, signup_lib.STATE_PROVISIONED
+            ):
+                return _signup_view(refreshed)
+            abort(409, message="conflict")
+
+        _provision_signup(cfg, refreshed, actor)
+        return _signup_view(_get_signup(table, email_hash) or refreshed)
+
+
+@blp.route("/signups/<email_hash>/reject")
+class RejectSignup(MethodView):
+    @blp.arguments(AdminRejectIn)
+    @blp.response(200, AdminSignupOut)
+    def post(self, data, email_hash):
+        """Reject a signup from any non-terminal state (incl. a partial
+        `requested` row). Idempotent: re-rejecting is a no-op."""
+        require_api_key(required="admin")
+        cfg = current_app.config
+        table = _require_signups_table(cfg)
+        actor = (current_identity() or {}).get("username") or (current_identity() or {}).get("sub") or "admin"
+        reason = str(data.get("reason") or "").strip()[:_MAX_REJECT_REASON_LEN]
+
+        item = _get_signup(table, email_hash)
+        if not item:
+            abort(404, message="signup not found")
+        status = item.get("status")
+        if status == signup_lib.STATE_REJECTED:
+            return _signup_view(item)
+        if not signup_lib.can_reject(status):
+            abort(409, message="signup is not in a rejectable state")
+
+        signup_lib.reject_signup(table, email_hash, actor=actor, reason=reason)
+        return _signup_view(_get_signup(table, email_hash) or item)
