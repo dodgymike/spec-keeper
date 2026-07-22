@@ -100,8 +100,12 @@ def test_list_projects_for_principal_across_projects(app, project):
         assert [r.project_slug for r in rows] == ["beta", "demo"]
 
 
-def test_membership_is_dormant_no_route(app, project):
-    """ISO-1 adds NO HTTP surface: there is no members route (a no-op on all
-    existing behaviour). Guards against an accidental blueprint wiring."""
+def test_members_route_wired_by_iso3(app, project):
+    """ISO-3 wires the storage membership methods up as an HTTP surface, so the
+    members route now exists (auth off in this suite -> 200 with an empty list
+    for a project that has no members yet). The full HTTP behaviour + admin
+    gating is covered in ``tests/test_members.py``."""
     c = app.test_client()
-    assert c.get("/api/v1/projects/demo/members").status_code == 404
+    r = c.get("/api/v1/projects/demo/members")
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json() == []

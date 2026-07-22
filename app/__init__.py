@@ -36,6 +36,7 @@ def create_app(config_object: type = Config) -> Flask:
     from .blueprints.chains import blp as chains_blp  # LOG-3
     from .blueprints.epics import blp as epics_blp
     from .blueprints.log import blp as log_blp
+    from .blueprints.members import blp as members_blp  # ISO-3
     from .blueprints.ports import blp as ports_blp
     from .blueprints.projects import blp as projects_blp
     from .blueprints.reservations import blp as reservations_blp
@@ -45,6 +46,7 @@ def create_app(config_object: type = Config) -> Flask:
     api.register_blueprint(projects_blp)
     api.register_blueprint(agents_blp)
     api.register_blueprint(epics_blp)
+    api.register_blueprint(members_blp)  # ISO-3 project-membership management
     api.register_blueprint(tasks_blp)
     api.register_blueprint(reservations_blp)
     api.register_blueprint(ports_blp)
