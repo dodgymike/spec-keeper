@@ -31,7 +31,7 @@ from flask_smorest import Blueprint, abort
 
 from .. import signup as signup_lib  # HA-7 signup-queue primitives
 from .. import signup_aws  # HA-7 boto3 glue (signups table / SES)
-from ..helpers import current_identity, require_api_key
+from ..helpers import current_identity, require_api_key, require_project_perm
 from ..schemas import (
     AdminApproveIn,
     AdminRejectIn,
@@ -39,6 +39,10 @@ from ..schemas import (
     AdminSignupsQuery,
     AdminUserOut,
     AdminUsersQuery,
+    EnrollmentIn,
+    EnrollmentMintOut,
+    EnrollmentOut,
+    EnrollmentsQuery,
     InviteIn,
     InviteMintOut,
     InviteOut,
@@ -178,6 +182,198 @@ class InvitesCollection(MethodView):
             "email_bound": bool(email),
             "approved": bool(data.get("approved")),
         }
+
+
+# =========================================================================== #
+# ONBOARD-2 — Agent-enrollment tokens: mint / list / revoke.
+#
+# A single-use token an operator mints so a new AGENT can self-enroll (ONBOARD-3
+# redeems it -> creates the agent's Cognito user). Like invites, this is an AUTH
+# ARTIFACT living in its own dedicated DynamoDB table (${name_prefix}-agent-
+# enrollments), reached via boto3 — NOT part of the storage abstraction. When
+# AGENT_ENROLLMENTS_TABLE is unset (local-dev default) every endpoint returns 501
+# gracefully (mirrors invites). Only the SHA-256 token_hash is ever stored; the
+# plaintext token is returned ONCE by mint and never persisted, listed, or logged.
+#
+# AuthZ: mint/revoke gate on require_project_perm(project_slug, "admin") — a
+# global spec-admin (bypasses membership) OR, under PROJECT_ISOLATION_ENFORCED, a
+# project-admin member who ALSO clears the subsuming global admin gate. Listing
+# scoped to a project uses the same gate; the unscoped listing is global-admin.
+# =========================================================================== #
+# 32 bytes = 256 bits of entropy, url-safe (~43 chars). Only its SHA-256 is stored.
+_ENROLL_TOKEN_BYTES = 32
+
+
+def _enrollments_table(cfg):
+    """Return a boto3 DynamoDB Table for the agent-enrollments store, or ``None``.
+
+    Isolated (like ``_invites_table``) so unit tests monkeypatch it with an
+    in-memory fake and the 501-when-unconfigured path is the single source of
+    truth."""
+    name = cfg.get("AGENT_ENROLLMENTS_TABLE")
+    if not name:
+        return None
+    import boto3  # lazy: keeps boto3 off the import path when enrollments are unused
+
+    kwargs = {}
+    if cfg.get("AWS_REGION"):
+        kwargs["region_name"] = cfg["AWS_REGION"]
+    if cfg.get("DYNAMODB_ENDPOINT_URL"):
+        kwargs["endpoint_url"] = cfg["DYNAMODB_ENDPOINT_URL"]
+    return boto3.resource("dynamodb", **kwargs).Table(name)
+
+
+def _require_enrollments_table(cfg):
+    table = _enrollments_table(cfg)
+    if table is None:
+        abort(
+            501,
+            message=(
+                "Agent enrollment is not configured on this server "
+                "(set AGENT_ENROLLMENTS_TABLE to the enrollments DynamoDB table)."
+            ),
+        )
+    return table
+
+
+def _caller_actor() -> str:
+    """The verified caller's identity (sub preferred, then username), for audit.
+
+    Read ONLY from the verified token; ``"admin"`` when auth is off (local dev)."""
+    ident = current_identity() or {}
+    return ident.get("sub") or ident.get("username") or "admin"
+
+
+def _enrollment_view(item: dict) -> dict:
+    """Shape a stored row for EnrollmentOut — metadata only, NEVER token_hash."""
+    def _int(v):
+        return int(v) if v is not None else None
+    return {
+        "project_slug": item.get("project_slug"),
+        "agent_name": item.get("agent_name"),
+        "role": item.get("role"),
+        "created_by": item.get("created_by"),
+        "created_at": _int(item.get("created_at")),
+        "expires_at": _int(item.get("expires_at")),
+        "status": item.get("status"),
+    }
+
+
+@blp.route("/agent-enrollments")
+class AgentEnrollmentsCollection(MethodView):
+    @blp.arguments(EnrollmentsQuery, location="query")
+    @blp.response(200, EnrollmentOut(many=True))
+    def get(self, query):
+        """List enrollments (metadata only — never token_hash or token material).
+
+        A ``?project_slug=`` scopes the listing to one project and gates on
+        project-admin (require_project_perm); the unscoped listing is global-admin
+        only. Low-volume + TTL-swept, so a full scan filtered in-process suffices."""
+        cfg = current_app.config
+        project_slug = query.get("project_slug")
+        if project_slug:
+            require_project_perm(project_slug, "admin")
+        else:
+            require_api_key(required="admin")
+        table = _require_enrollments_table(cfg)
+
+        items: list[dict] = []
+        resp = table.scan()
+        items.extend(resp.get("Items", []))
+        while resp.get("LastEvaluatedKey"):
+            resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
+            items.extend(resp.get("Items", []))
+
+        return [
+            _enrollment_view(it)
+            for it in items
+            if not project_slug or it.get("project_slug") == project_slug
+        ]
+
+    @blp.arguments(EnrollmentIn)
+    @blp.response(201, EnrollmentMintOut)
+    def post(self, data):
+        """Mint a single-use enrollment token; return the plaintext token + URL ONCE.
+
+        Only the SHA-256 ``token_hash`` is persisted (with project/role/agent/TTL
+        and ``status='active'``). The plaintext token is returned in this response
+        and never stored or logged. AuthZ: project-admin on ``project_slug`` (a
+        global spec-admin bypasses membership)."""
+        require_project_perm(data["project_slug"], "admin")
+        cfg = current_app.config
+        table = _require_enrollments_table(cfg)
+
+        token = secrets.token_urlsafe(_ENROLL_TOKEN_BYTES)
+        token_hash = _hash(token)
+        now = int(time.time())
+        ttl = data.get("ttl_seconds") or cfg.get("ENROLL_TTL_SECONDS", 3600)
+        expires_at = now + int(ttl)
+
+        item = {
+            "token_hash": token_hash,
+            "project_slug": data["project_slug"],
+            "role": data["role"],
+            "agent_name": data["agent_name"],
+            "created_by": _caller_actor(),
+            "created_at": now,
+            "expires_at": expires_at,
+            "status": "active",
+        }
+        # Collision guard (astronomically unlikely for a 256-bit token): never
+        # overwrite an existing row.
+        table.put_item(Item=item, ConditionExpression="attribute_not_exists(token_hash)")
+
+        base = (cfg.get("ENROLL_BASE_URL") or "").rstrip("/")
+        enrollment_url = f"{base}/enroll#token={token}" if base else f"/enroll#token={token}"
+
+        return {
+            "enrollment_url": enrollment_url,
+            "token": token,
+            "project_slug": data["project_slug"],
+            "role": data["role"],
+            "agent_name": data["agent_name"],
+            "expires_at": expires_at,
+        }
+
+
+@blp.route("/agent-enrollments/<token_hash>")
+class AgentEnrollmentItem(MethodView):
+    @blp.response(204)
+    def delete(self, token_hash):
+        """Revoke an enrollment token (flip status -> 'revoked'). Idempotent: 204.
+
+        AuthZ: project-admin on the token's project (a global spec-admin bypasses
+        membership). A missing/unknown token is a global-admin-gated no-op so a
+        non-admin cannot probe token_hashes, and revocation stays idempotent."""
+        from botocore.exceptions import ClientError
+
+        cfg = current_app.config
+        table = _require_enrollments_table(cfg)
+        resp = table.get_item(Key={"token_hash": token_hash})
+        item = resp.get("Item")
+        if item is None:
+            # Nothing to revoke: gate on global admin (we can't know a project for
+            # an unknown token) and return the idempotent 204 without leaking.
+            require_api_key(required="admin")
+            return ""
+
+        require_project_perm(item.get("project_slug") or "", "admin")
+
+        # Conditional flip so a raced double-revoke stays idempotent. Values bind
+        # via ExpressionAttributeValues; "status" is reserved -> ExpressionAttributeNames.
+        try:
+            table.update_item(
+                Key={"token_hash": token_hash},
+                UpdateExpression="SET #s = :revoked",
+                ConditionExpression="attribute_exists(token_hash)",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":revoked": "revoked"},
+            )
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return ""  # already gone -> idempotent
+            raise
+        return ""
 
 
 # =========================================================================== #

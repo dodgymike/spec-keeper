@@ -448,6 +448,65 @@ class InviteOut(Schema):
 
 
 # --------------------------------------------------------------------------- #
+# Agent enrollment tokens (ONBOARD-2) — single-use tokens an operator mints so a
+# new AGENT can self-enroll (ONBOARD-3 redeems -> creates the Cognito user). Like
+# invites: the plaintext token is returned ONCE by mint and NEVER stored/listed;
+# the table (and every read schema below) only ever carries the SHA-256 token_hash.
+# --------------------------------------------------------------------------- #
+class EnrollmentIn(Schema):
+    project_slug = fields.Str(
+        required=True,
+        validate=validate.Length(min=1, max=100),
+        metadata={"description": "Project the enrolled agent will be scoped to."},
+    )
+    agent_name = fields.Str(
+        required=True,
+        validate=validate.Length(min=1, max=100),
+        metadata={"description": "Name of the agent being enrolled (the future Cognito user)."},
+    )
+    role = fields.Str(
+        required=True,
+        validate=validate.OneOf(ROLE_VALUES),
+        metadata={"description": "Role to grant on redemption: one of reader/writer/admin."},
+    )
+    ttl_seconds = fields.Int(
+        allow_none=True,
+        load_default=None,
+        validate=validate.Range(min=60, max=604800),
+        metadata={"description": "Override the token validity window in seconds (default ENROLL_TTL_SECONDS)."},
+    )
+
+
+class EnrollmentMintOut(Schema):
+    """The mint response — the ONLY place the plaintext token is ever emitted."""
+    enrollment_url = fields.Str(dump_only=True, metadata={"description": "The self-enroll link carrying the token in its fragment (#token=...)."})
+    token = fields.Str(dump_only=True, metadata={"description": "The plaintext single-use token. Shown ONCE; never stored or logged."})
+    project_slug = fields.Str(dump_only=True)
+    role = fields.Str(dump_only=True)
+    agent_name = fields.Str(dump_only=True)
+    expires_at = fields.Int(dump_only=True, metadata={"description": "Epoch seconds when the token expires (TTL)."})
+
+
+class EnrollmentOut(Schema):
+    """A listed enrollment — metadata only, NEVER the token_hash or token material."""
+    project_slug = fields.Str(dump_only=True)
+    agent_name = fields.Str(dump_only=True)
+    role = fields.Str(dump_only=True)
+    created_by = fields.Str(dump_only=True, allow_none=True)
+    created_at = fields.Int(dump_only=True, allow_none=True)
+    expires_at = fields.Int(dump_only=True, allow_none=True)
+    status = fields.Str(dump_only=True)
+
+
+class EnrollmentsQuery(Schema):
+    project_slug = fields.Str(
+        required=False,
+        validate=validate.Length(min=1, max=100),
+        metadata={"description": "Scope the listing to one project (project-admin scoped when set)."},
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Admin user lifecycle (HA-5) — approve/reject/block/delete/promote the Cognito
 # users (humans AND agents) backing the pool. Approval is by GROUP membership:
 # a pending human is in NO spec-* group; approve adds spec-readers/spec-writers,

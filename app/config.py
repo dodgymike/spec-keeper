@@ -59,6 +59,22 @@ class Config:
     DYNAMODB_ENDPOINT_URL = os.environ.get("DYNAMODB_ENDPOINT_URL") or None
     AWS_REGION = os.environ.get("AWS_REGION") or None
 
+    # --- Agent enrollment tokens (ONBOARD-1/2) --------------------------
+    # Dedicated DynamoDB table backing single-use agent-enrollment tokens (an
+    # auth artifact, like invites — NOT the app single-table store). The admin
+    # endpoints (POST/GET/DELETE /api/v1/admin/agent-enrollments) mint/list/revoke
+    # via boto3. Wired from terraform output `agent_enrollments_table_name`. UNSET
+    # (the local-dev default) => those endpoints return 501 so a local run without
+    # the table is graceful rather than crashing. Only the SHA-256 token_hash is
+    # ever stored; the plaintext token is returned ONCE and never persisted/logged.
+    AGENT_ENROLLMENTS_TABLE = os.environ.get("AGENT_ENROLLMENTS_TABLE") or None
+    # Seconds a freshly-minted enrollment token stays valid (TTL). Short-lived by
+    # design (default 1h) — the redeem step (ONBOARD-3) also bounds on expires_at.
+    ENROLL_TTL_SECONDS = int(os.environ.get("ENROLL_TTL_SECONDS", "3600"))
+    # Base URL the enrollment link is built from (the UI origin). The plaintext
+    # token rides in the fragment: f"{ENROLL_BASE_URL}/enroll#token=<token>".
+    ENROLL_BASE_URL = os.environ.get("ENROLL_BASE_URL", "https://spec.elasticninja.com")
+
     # --- Public request->approve signup queue (HA-7, bird Path A) ----------
     # The heavy public self-service path: POST /api/v1/signup (uniform-202
     # anti-enumeration intake) -> SQS -> worker -> GET /api/v1/validate magic
@@ -215,6 +231,9 @@ class TestConfig(Config):
     # Invites off by default so a stray INVITES_TABLE env can't flip the baseline;
     # tests that exercise the admin endpoint set it explicitly on a subclass.
     INVITES_TABLE = None
+    # Agent-enrollment token table off by default (same rationale) — tests that
+    # exercise the mint/list/revoke endpoints set it explicitly on a subclass.
+    AGENT_ENROLLMENTS_TABLE = None
     # User-admin pool off by default (same rationale) — tests that exercise the
     # admin user endpoints set COGNITO_USER_POOL_ID explicitly on a subclass.
     COGNITO_USER_POOL_ID = None
