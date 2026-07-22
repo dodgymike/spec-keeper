@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import NoReturn
 
 import sqlalchemy as sa
 from flask import current_app, g, request
@@ -376,7 +377,7 @@ def require_project_perm(slug: str, perm: str) -> None:
         _deny_project_access(slug, perm)
 
 
-def _deny_project_access(slug: str, perm: str) -> None:
+def _deny_project_access(slug: str, perm: str) -> NoReturn:
     """Deny a per-project access decision (ISO-4), hiding existence from non-members.
 
     Reads -> 404 raised via the storage ``NotFound`` path so the response is

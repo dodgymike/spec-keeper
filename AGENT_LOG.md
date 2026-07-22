@@ -394,3 +394,4 @@ to the server's `/events` endpoint.
   `_LOCALPART_MAX` 24→20 (stays ≤64-char local-part), softened the "never collide" docstring, and marked
   the mint-409 a best-effort guard (real invariant = deterministic username + idempotent provisioning).
 - **DECISIONS.md:** ONBOARD-3a entry recorded (username scheme + rationale; 409 semantics).
+2026-07-22T13:30:03Z ISO-9: annotate _deny_project_access -> NoReturn (helpers.py). Light-touch (pure type hint, lazy under 'from __future__ import annotations', zero runtime/behaviour change); py_compile verified; reviewer/security chain skipped as disproportionate for a no-op annotation.
