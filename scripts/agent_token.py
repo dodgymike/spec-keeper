@@ -68,7 +68,10 @@ def _load_config() -> dict:
         os.environ.get("AGENT_CREDENTIALS_SECRET_ARN")
         or os.environ.get("AGENT_CREDENTIALS_SECRET")
     )
-    username = os.environ.get("AGENT_USERNAME")
+    # AGENT_USERNAME is the SELECTOR into the secret's `users` map (the roster
+    # key, e.g. "spec-keeper"); on the inline/dev path (no secret) it is taken as
+    # the literal Cognito username below.
+    selector = os.environ.get("AGENT_USERNAME")
     if secret_id:
         secret = _load_from_secrets_manager(secret_id)
         for k in ("client_id", "region", "pool_id"):
@@ -77,16 +80,20 @@ def _load_config() -> dict:
         users = secret.get("users") or {}
         if isinstance(users, dict) and users:
             # Pick the requested user, or the sole user if the secret has one.
-            if username is None and len(users) == 1:
-                username = next(iter(users))
-            if username and username in users:
-                cfg["username"] = username
-                pw = (users[username] or {}).get("password")
+            if selector is None and len(users) == 1:
+                selector = next(iter(users))
+            if selector and selector in users:
+                rec = users[selector] or {}
+                # The Cognito sign-in USERNAME is the record's `username` (the
+                # pool alias, e.g. "spec-keeper@agents.spec-server.internal") —
+                # NOT the roster key used to select it. Fall back to the key for
+                # legacy secrets written without a `username` field.
+                cfg["username"] = str(rec.get("username") or selector)
+                pw = rec.get("password")
                 if pw:
                     cfg["password"] = str(pw)
     # Env vars win over (and fill gaps in) the secret blob.
     env_map = {
-        "username": "AGENT_USERNAME",
         "password": "AGENT_PASSWORD",
         "client_id": "COGNITO_CLIENT_ID",
         "region": "COGNITO_REGION",
@@ -95,6 +102,10 @@ def _load_config() -> dict:
         val = os.environ.get(env)
         if val:
             cfg[key] = val
+    # Inline/dev path: with no secret-resolved user, AGENT_USERNAME is the
+    # literal Cognito username.
+    if not cfg.get("username") and selector:
+        cfg["username"] = selector
     missing = [k for k in ("username", "password", "client_id", "region") if not cfg.get(k)]
     if missing:
         raise TokenError(
