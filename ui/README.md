@@ -96,7 +96,7 @@ nav link (`src/components/AppLayout.tsx`) and the page itself
 member. This is a UX convenience only: the server re-checks the group on
 every `/api/v1/admin/*` call regardless of what the client shows.
 
-Three tabs:
+Four tabs:
 
 - **Users** - list/filter (pending-only) human users; per-row approve /
   block / unblock / promote / demote / delete, calling `/api/v1/admin/*`.
@@ -107,6 +107,12 @@ Three tabs:
   (owner-held tasks), completed (done tasks the agent noted), token usage
   (summed from model-usage notes), and last-active. Block/unblock/delete
   reuse the same `/api/v1/admin/users/*` endpoints as the Users tab.
+- **Enrollments** (ONBOARD-4) - mint a single-use agent-enrollment token
+  (project, agent name, role reader/writer/admin, optional TTL); the
+  one-time enrollment URL is shown once for the admin to copy. The list of
+  active enrollments shows only the `token_hash`, never the plaintext
+  token, with a per-row Revoke. Also lists/removes the selected project's
+  members.
 - **Invites** - mint a single-use invite (email optional, TTL, pre-approved
   toggle); the one-time plaintext code + join URL are shown once for the
   admin to copy. The list of active invites shows only the code hash,
@@ -175,6 +181,9 @@ functions consumed by `/admin` and `/request`: `listAdminUsers(params)`,
 `approveUser(username, body?)`, `blockUser(username)`, `unblockUser(username)`,
 `promoteUser(username)`, `demoteUser(username)`, `deleteUser(username)`,
 `listInvites()`, `mintInvite(body)`, and `requestAccess(body)` (unauthenticated).
+(ONBOARD-4) `listEnrollments(projectSlug?)`, `mintEnrollment(body)`,
+`revokeEnrollment(tokenHash)`, `listMembers(slug)`, and
+`removeMember(slug, principalSub)`.
 All go through a shared `request()` helper (`src/api/client.ts`) that:
 
 - Resolves URLs against `import.meta.env.VITE_API_BASE`.

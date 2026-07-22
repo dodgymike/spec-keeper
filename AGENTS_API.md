@@ -398,9 +398,14 @@ curl -s -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/j
 
 ```bash
 curl -s -H 'Authorization: Bearer <admin-token>' "$B/admin/agent-enrollments?project_slug=corsearch"
+# -> [{"token_hash":"3f9a...", "project_slug":"corsearch", "agent_name":"alice",
+#      "role":"writer", "created_by":"root", "created_at":1753600000,
+#      "expires_at":1753603600, "status":"active"}]
 curl -s -H 'Authorization: Bearer <admin-token>' -X DELETE $B/admin/agent-enrollments/<token_hash>
 # -> 204 (idempotent — revoking an already-used/revoked/unknown token is still a 204)
 ```
+- `token_hash` is the SHA-256 hash of the token — the revocation id / `DELETE` key above. It is
+  NOT the plaintext token and cannot be redeemed; the plaintext token is shown only once, by mint.
 
 **Redeem the token** — `POST /api/v1/agent-enrollments/redeem`, **PUBLIC, no auth** (a brand-new
 agent holds only the token, nothing else). Atomically burns it (single-use — a missing, already-

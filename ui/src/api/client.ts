@@ -5,11 +5,15 @@ import type {
   ChainRun,
   Counter,
   Decision,
+  Enrollment,
+  EnrollmentIn,
+  EnrollmentMint,
   Epic,
   EventListParams,
   Invite,
   InviteIn,
   InviteMint,
+  Member,
   Project,
   ProjectEvent,
   ProjectNote,
@@ -236,6 +240,46 @@ export function listInvites(): Promise<Invite[]> {
 /** Mint a single-use invite; the plaintext code + join URL come back ONCE. */
 export function mintInvite(body: InviteIn): Promise<InviteMint> {
   return request<InviteMint>("/api/v1/admin/invites", { method: "POST", body });
+}
+
+// ---- Agent enrollment + membership (ONBOARD-4) -------------------------
+// Admin-only, gated server-side on the spec-admins / project-admin permission.
+// Enrollment endpoints answer 501 when AGENT_ENROLLMENTS_TABLE is unconfigured
+// (local dev) — callers surface that as a normal ApiError.
+
+/**
+ * List agent-enrollment tokens (metadata + the SHA-256 `token_hash` revocation
+ * handle — NEVER the plaintext token). `?project_slug=` scopes to one project.
+ */
+export function listEnrollments(projectSlug?: string): Promise<Enrollment[]> {
+  return request<Enrollment[]>("/api/v1/admin/agent-enrollments", {
+    params: projectSlug ? { project_slug: projectSlug } : undefined,
+  });
+}
+
+/** Mint a single-use agent-enrollment token; the plaintext token + URL come back ONCE. */
+export function mintEnrollment(body: EnrollmentIn): Promise<EnrollmentMint> {
+  return request<EnrollmentMint>("/api/v1/admin/agent-enrollments", { method: "POST", body });
+}
+
+/** Revoke an enrollment token by its `token_hash` (the list's revocation handle). Idempotent. */
+export function revokeEnrollment(tokenHash: string): Promise<void> {
+  return request<void>(`/api/v1/admin/agent-enrollments/${encodeURIComponent(tokenHash)}`, {
+    method: "DELETE",
+  });
+}
+
+/** List a project's members (principal -> role). Global-admin-gated. */
+export function listMembers(slug: string): Promise<Member[]> {
+  return request<Member[]>(`/api/v1/projects/${encodeURIComponent(slug)}/members`);
+}
+
+/** Remove a project member by their Cognito `principal_sub` (idempotent). */
+export function removeMember(slug: string, principalSub: string): Promise<void> {
+  return request<void>(
+    `/api/v1/projects/${encodeURIComponent(slug)}/members/${encodeURIComponent(principalSub)}`,
+    { method: "DELETE" }
+  );
 }
 
 /**

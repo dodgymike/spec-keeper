@@ -222,6 +222,55 @@ export interface InviteMint {
   approved: boolean;
 }
 
+// ---- Agent enrollment + membership (ONBOARD-4) -------------------------
+// Mirrors app/schemas.py: EnrollmentIn, EnrollmentMintOut, EnrollmentOut,
+// MemberIn, MemberOut. All under /api/v1/admin (enrollments) and
+// /api/v1/projects/<slug>/members; gated server-side on the spec-admins group.
+
+/** Project-membership role granted on enrolment / assigned to a member. */
+export type MemberRole = "reader" | "writer" | "admin";
+
+// app.schemas.EnrollmentIn — mint a single-use agent-enrollment token.
+export interface EnrollmentIn {
+  project_slug: string;
+  agent_name: string;
+  role: MemberRole;
+  /** Override the token validity window in seconds (default server ENROLL_TTL_SECONDS). */
+  ttl_seconds?: number | null;
+}
+
+// app.schemas.EnrollmentOut — a listed enrollment. `token_hash` is the SHA-256
+// revocation handle (the DELETE key), NOT the plaintext token, which is never listed.
+export interface Enrollment {
+  token_hash: string;
+  project_slug: string;
+  agent_name: string;
+  role: string;
+  created_by: string | null;
+  created_at: number | null;
+  expires_at: number | null;
+  status: string;
+}
+
+// app.schemas.EnrollmentMintOut — the ONLY place the plaintext token is emitted.
+export interface EnrollmentMint {
+  enrollment_url: string;
+  token: string;
+  project_slug: string;
+  role: string;
+  agent_name: string;
+  expires_at: number;
+}
+
+// app.schemas.MemberOut — a listed project member.
+export interface Member {
+  project_slug: string;
+  principal_sub: string;
+  principal_name: string | null;
+  role: string;
+  created_at: string;
+}
+
 // HA-7 public access-request intake. The body is deliberately minimal; the
 // server always answers with a uniform 202 (never reveals whether the address
 // is known/eligible).

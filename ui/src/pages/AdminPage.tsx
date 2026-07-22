@@ -6,15 +6,31 @@ import {
   deleteUser,
   demoteUser,
   listAdminUsers,
+  listEnrollments,
   listInvites,
+  listMembers,
   listProjectNotes,
   listProjects,
   listTasks,
+  mintEnrollment,
   mintInvite,
   promoteUser,
+  removeMember,
+  revokeEnrollment,
   unblockUser,
 } from "../api/client";
-import type { AdminUser, Invite, InviteMint, ProjectNote, Task } from "../api/types";
+import type {
+  AdminUser,
+  Enrollment,
+  EnrollmentMint,
+  Invite,
+  InviteMint,
+  Member,
+  MemberRole,
+  Project,
+  ProjectNote,
+  Task,
+} from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { adminGroup, isAdminUser } from "../auth/session";
 import { Badge } from "../components/Badge";
@@ -28,7 +44,7 @@ const FETCH_LIMIT = 1000;
 /** Admin data changes rarely; a slower background refresh than the boards. */
 const AUTO_REFRESH_MS = 60_000;
 
-type Tab = "users" | "agents" | "invites";
+type Tab = "users" | "agents" | "enrollments" | "invites";
 
 /**
  * DNS-style domain the pool uses to synthesise agent usernames/emails
@@ -159,6 +175,7 @@ type InvitesState =
 const TABS: ReadonlyArray<{ id: Tab; label: string }> = [
   { id: "users", label: "Users" },
   { id: "agents", label: "Agents" },
+  { id: "enrollments", label: "Enrollments" },
   { id: "invites", label: "Invites" },
 ];
 
@@ -274,6 +291,11 @@ export function AdminPage() {
       {tab === "agents" && (
         <div role="tabpanel" id="admin-panel-agents" aria-labelledby="admin-tab-agents">
           <AgentsPanel state={usersState} reload={reload} now={now} onChanged={refresh} />
+        </div>
+      )}
+      {tab === "enrollments" && (
+        <div role="tabpanel" id="admin-panel-enrollments" aria-labelledby="admin-tab-enrollments">
+          <EnrollmentsPanel reload={reload} onChanged={refresh} />
         </div>
       )}
       {tab === "invites" && (
@@ -793,6 +815,431 @@ function InvitesPanel({ reload, onChanged }: { reload: number; onChanged: () => 
         </div>
       )}
     </div>
+  );
+}
+
+// -------------------------------------------------------------------------
+// Enrollments panel (ONBOARD-4): mint agent-enrollment tokens, list + revoke
+// them, and manage a project's members. Enrollment is the normal way an agent
+// joins a project, so this panel is scoped by a project selector.
+// -------------------------------------------------------------------------
+
+const ROLES: ReadonlyArray<MemberRole> = ["reader", "writer", "admin"];
+
+type ProjectsState =
+  | { status: "loading" }
+  | { status: "error"; error: ApiError | Error }
+  | { status: "ready"; projects: Project[] };
+
+/** Format an epoch-seconds expiry as a local date-time, or a dash when unset. */
+function formatEpoch(seconds: number | null): string {
+  if (!seconds) return "-";
+  return new Date(seconds * 1000).toLocaleString();
+}
+
+/** Abbreviate a long opaque id (Cognito sub) for display; full value in `title`. */
+function abbreviate(value: string): string {
+  return value.length <= 12 ? value : `${value.slice(0, 8)}…${value.slice(-4)}`;
+}
+
+function EnrollmentsPanel({ reload, onChanged }: { reload: number; onChanged: () => void }) {
+  const [projectsState, setProjectsState] = useState<ProjectsState>({ status: "loading" });
+  const [selected, setSelected] = useState<string>("");
+
+  useEffect(() => {
+    let cancelled = false;
+    // Only show the skeleton on the FIRST load. A `reload` bump (manual Refresh
+    // or the 60s auto-refresh) must NOT flip a ready panel back to loading, or it
+    // would unmount EnrollMint and wipe its once-shown minted token mid-copy.
+    setProjectsState((prev) => (prev.status === "ready" ? prev : { status: "loading" }));
+    listProjects()
+      .then((projects) => {
+        if (cancelled) return;
+        setProjectsState({ status: "ready", projects });
+        // Default to the first project once, without clobbering a live selection.
+        setSelected((prev) => prev || projects[0]?.slug || "");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        const err = error instanceof Error ? error : new Error(String(error));
+        // Keep a working panel on a background-refresh failure; only surface the
+        // error when we have nothing to show yet.
+        setProjectsState((prev) => (prev.status === "ready" ? prev : { status: "error", error: err }));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [reload]);
+
+  if (projectsState.status === "loading") return <PanelSkeleton label="Loading projects" />;
+  if (projectsState.status === "error") return <PanelError message={projectsState.error.message} />;
+
+  const projects = projectsState.projects;
+  if (projects.length === 0) {
+    return (
+      <Card>
+        <p>No projects. Create one before enrolling agents.</p>
+      </Card>
+    );
+  }
+
+  return (
+    <div className="admin-panel">
+      <label className="admin-field admin-panel__project-select">
+        <span className="admin-field__label">Project</span>
+        <select
+          className="admin-field__input"
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+        >
+          {projects.map((p) => (
+            <option key={p.slug} value={p.slug}>
+              {p.name} ({p.slug})
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {selected ? (
+        <>
+          <EnrollMint projectSlug={selected} reload={reload} onChanged={onChanged} />
+          <MembersSection projectSlug={selected} reload={reload} onChanged={onChanged} />
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+type EnrollmentsListState =
+  | { status: "loading" }
+  | { status: "error"; error: ApiError | Error }
+  | { status: "ready"; enrollments: Enrollment[] };
+
+function EnrollMint({
+  projectSlug,
+  reload,
+  onChanged,
+}: {
+  projectSlug: string;
+  reload: number;
+  onChanged: () => void;
+}) {
+  const [agentName, setAgentName] = useState("");
+  const [role, setRole] = useState<MemberRole>("reader");
+  const [ttl, setTtl] = useState("");
+  const [minting, setMinting] = useState(false);
+  // The minted token/URL lives ONLY in component state — never storage, never a
+  // log. It clears on unmount (tab/project switch) and on a hard page refresh.
+  const [minted, setMinted] = useState<EnrollmentMint | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState("");
+
+  const [listState, setListState] = useState<EnrollmentsListState>({ status: "loading" });
+  const [localReload, setLocalReload] = useState(0);
+  const { busy, message, run } = useRowAction(() => {
+    setLocalReload((n) => n + 1);
+    onChanged();
+  });
+
+  // A new project scope invalidates the once-shown token — drop it immediately.
+  useEffect(() => {
+    setMinted(null);
+    setCopied(false);
+    setError("");
+  }, [projectSlug]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setListState({ status: "loading" });
+    listEnrollments(projectSlug)
+      .then((enrollments) => {
+        if (!cancelled) setListState({ status: "ready", enrollments });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setListState({ status: "error", error: err instanceof Error ? err : new Error(String(err)) });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectSlug, reload, localReload]);
+
+  async function handleMint(event: FormEvent) {
+    event.preventDefault();
+    if (minting || agentName.trim() === "") return;
+    setError("");
+    setMinted(null);
+    setCopied(false);
+    setMinting(true);
+    try {
+      const ttlSeconds = ttl.trim() === "" ? undefined : Number(ttl);
+      const result = await mintEnrollment({
+        project_slug: projectSlug,
+        agent_name: agentName.trim(),
+        role,
+        ttl_seconds: ttlSeconds,
+      });
+      setMinted(result);
+      setAgentName("");
+      setTtl("");
+      setLocalReload((n) => n + 1);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : String(err));
+    } finally {
+      setMinting(false);
+    }
+  }
+
+  async function copyUrl(mint: EnrollmentMint) {
+    try {
+      await navigator.clipboard.writeText(mint.enrollment_url);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  const sorted = useMemo(() => {
+    if (listState.status !== "ready") return [] as Enrollment[];
+    return [...listState.enrollments].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+  }, [listState]);
+
+  return (
+    <>
+      <Card className="admin-invite-mint">
+        <h2 className="admin-invite-mint__title">Enroll an agent</h2>
+        <form className="admin-invite-mint__form" onSubmit={(e) => void handleMint(e)}>
+          <label className="admin-field">
+            <span className="admin-field__label">Agent name</span>
+            <input
+              type="text"
+              className="admin-field__input"
+              value={agentName}
+              onChange={(e) => setAgentName(e.target.value)}
+              autoComplete="off"
+              required
+            />
+          </label>
+          <label className="admin-field">
+            <span className="admin-field__label">Role</span>
+            <select
+              className="admin-field__input"
+              value={role}
+              onChange={(e) => setRole(e.target.value as MemberRole)}
+            >
+              {ROLES.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="admin-field">
+            <span className="admin-field__label">TTL (seconds, optional)</span>
+            <input
+              type="number"
+              min={60}
+              max={604800}
+              className="admin-field__input"
+              value={ttl}
+              onChange={(e) => setTtl(e.target.value)}
+              placeholder="server default"
+            />
+          </label>
+          <button
+            type="submit"
+            className="admin-invite-mint__submit"
+            aria-busy={minting}
+            disabled={agentName.trim() === ""}
+          >
+            Mint enrollment
+          </button>
+        </form>
+        {error ? (
+          <p className="admin-page__action-msg admin-page__action-msg--error" role="alert">
+            {error}
+          </p>
+        ) : null}
+        {minted ? (
+          <div className="admin-invite-mint__result" role="status" aria-live="polite">
+            <p className="admin-invite-mint__once">
+              Shown once - copy it now; it will not be shown again.
+            </p>
+            <p className="admin-invite-mint__url">
+              <span className="admin-invite-mint__code-label">Enrollment URL</span>
+              <code>{minted.enrollment_url}</code>
+            </p>
+            <button type="button" onClick={() => void copyUrl(minted)}>
+              {copied ? "Copied" : "Copy enrollment URL"}
+            </button>
+          </div>
+        ) : null}
+      </Card>
+
+      <h2 className="admin-page__section-title">Enrollments</h2>
+      <ActionMessage message={message} />
+      {listState.status === "loading" ? (
+        <PanelSkeleton label="Loading enrollments" />
+      ) : listState.status === "error" ? (
+        <PanelError message={listState.error.message} />
+      ) : sorted.length === 0 ? (
+        <Card>
+          <p>No enrollments for this project.</p>
+        </Card>
+      ) : (
+        <div className="admin-table__scroll">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th scope="col">Agent</th>
+                <th scope="col">Role</th>
+                <th scope="col">Status</th>
+                <th scope="col">Expires</th>
+                <th scope="col">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((e) => {
+                const isRowBusy = busy === e.token_hash;
+                const isActive = e.status === "active";
+                return (
+                  <tr key={e.token_hash} aria-busy={isRowBusy}>
+                    <td>{e.agent_name}</td>
+                    <td>{e.role}</td>
+                    <td>
+                      <Badge label={e.status} status={isActive ? "in_progress" : "todo"} />
+                    </td>
+                    <td>{formatEpoch(e.expires_at)}</td>
+                    <td className="admin-table__actions">
+                      {isActive ? (
+                        <button
+                          type="button"
+                          className="admin-table__danger"
+                          disabled={isRowBusy}
+                          onClick={() =>
+                            void run(
+                              e.token_hash,
+                              `Revoked enrollment for ${e.agent_name}`,
+                              () => revokeEnrollment(e.token_hash),
+                              `Revoke the enrollment token for ${e.agent_name}? It can no longer be redeemed.`
+                            )
+                          }
+                        >
+                          Revoke
+                        </button>
+                      ) : (
+                        <span className="admin-table__sub">—</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
+
+type MembersState =
+  | { status: "loading" }
+  | { status: "error"; error: ApiError | Error }
+  | { status: "ready"; members: Member[] };
+
+function MembersSection({
+  projectSlug,
+  reload,
+  onChanged,
+}: {
+  projectSlug: string;
+  reload: number;
+  onChanged: () => void;
+}) {
+  const [state, setState] = useState<MembersState>({ status: "loading" });
+  const [localReload, setLocalReload] = useState(0);
+  const { busy, message, run } = useRowAction(() => {
+    setLocalReload((n) => n + 1);
+    onChanged();
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ status: "loading" });
+    listMembers(projectSlug)
+      .then((members) => {
+        if (!cancelled) setState({ status: "ready", members });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setState({ status: "error", error: err instanceof Error ? err : new Error(String(err)) });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectSlug, reload, localReload]);
+
+  return (
+    <>
+      <h2 className="admin-page__section-title">Members</h2>
+      <ActionMessage message={message} />
+      {state.status === "loading" ? (
+        <PanelSkeleton label="Loading members" />
+      ) : state.status === "error" ? (
+        <PanelError message={state.error.message} />
+      ) : state.members.length === 0 ? (
+        <Card>
+          <p>No members for this project.</p>
+        </Card>
+      ) : (
+        <div className="admin-table__scroll">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th scope="col">Member</th>
+                <th scope="col">Role</th>
+                <th scope="col">Principal</th>
+                <th scope="col">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {state.members.map((m) => {
+                const isRowBusy = busy === m.principal_sub;
+                return (
+                  <tr key={m.principal_sub} aria-busy={isRowBusy}>
+                    <td>{m.principal_name ?? m.principal_sub}</td>
+                    <td>{m.role}</td>
+                    <td className="admin-table__hash" title={m.principal_sub}>
+                      {abbreviate(m.principal_sub)}
+                    </td>
+                    <td className="admin-table__actions">
+                      <button
+                        type="button"
+                        className="admin-table__danger"
+                        disabled={isRowBusy}
+                        onClick={() =>
+                          void run(
+                            m.principal_sub,
+                            `Removed ${m.principal_name ?? m.principal_sub}`,
+                            () => removeMember(projectSlug, m.principal_sub),
+                            `Remove ${m.principal_name ?? m.principal_sub} from ${projectSlug}?`
+                          )
+                        }
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
   );
 }
 

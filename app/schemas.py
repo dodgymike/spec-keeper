@@ -488,7 +488,19 @@ class EnrollmentMintOut(Schema):
 
 
 class EnrollmentOut(Schema):
-    """A listed enrollment — metadata only, NEVER the token_hash or token material."""
+    """A listed enrollment — metadata + the SHA-256 token_hash (the revocation id).
+
+    The ``token_hash`` is a one-way hash, NOT the token: it cannot be redeemed and
+    is the handle ``DELETE /agent-enrollments/<token_hash>`` keys off, so an
+    admin-only list must surface it to enable revocation. The plaintext token is
+    STILL never listed — it is emitted once by mint (EnrollmentMintOut) only."""
+    token_hash = fields.Str(
+        dump_only=True,
+        metadata={"description": (
+            "SHA-256 hash of the token — the revocation id (DELETE key), not a "
+            "secret. The plaintext token cannot be recovered from it."
+        )},
+    )
     project_slug = fields.Str(dump_only=True)
     agent_name = fields.Str(dump_only=True)
     role = fields.Str(dump_only=True)

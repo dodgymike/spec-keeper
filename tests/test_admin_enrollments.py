@@ -156,11 +156,12 @@ def test_list_never_leaks_token_material(fake_table):
     assert row["agent_name"] == "bot-1"
     assert row["role"] == "writer"
     assert row["status"] == "active"
-    # NEITHER the token NOR its hash is ever listed.
+    # The list surfaces the token_hash (the revocation handle / DELETE key) — a
+    # one-way hash, NOT the token — so the UI can revoke. The PLAINTEXT token is
+    # still never listed.
     assert "token" not in row
-    assert "token_hash" not in row
+    assert row["token_hash"] == _sha(minted["token"])
     assert minted["token"] not in row.values()
-    assert _sha(minted["token"]) not in row.values()
 
 
 def test_list_scoped_to_project(fake_table):
@@ -182,6 +183,17 @@ def test_revoke_flips_status(fake_table):
     assert fake_table.items[0]["status"] == "revoked"
     # Idempotent: revoking again (already revoked / present) is still 204.
     assert c.delete(f"/api/v1/admin/agent-enrollments/{token_hash}").status_code == 204
+
+
+def test_list_token_hash_is_a_working_revoke_handle(fake_table):
+    """The token_hash surfaced by GET is the exact DELETE key — the UI lists then
+    revokes with no other handle (and never needs the plaintext token)."""
+    app = _app(AGENT_ENROLLMENTS_TABLE="t")
+    c = app.test_client()
+    c.post("/api/v1/admin/agent-enrollments", json=_body())
+    listed_hash = c.get("/api/v1/admin/agent-enrollments").get_json()[0]["token_hash"]
+    assert c.delete(f"/api/v1/admin/agent-enrollments/{listed_hash}").status_code == 204
+    assert fake_table.items[0]["status"] == "revoked"
 
 
 def test_revoke_unknown_token_is_idempotent_204(fake_table):

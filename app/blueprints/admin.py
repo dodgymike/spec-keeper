@@ -245,10 +245,15 @@ def _caller_actor() -> str:
 
 
 def _enrollment_view(item: dict) -> dict:
-    """Shape a stored row for EnrollmentOut — metadata only, NEVER token_hash."""
+    """Shape a stored row for EnrollmentOut — metadata + the token_hash.
+
+    The ``token_hash`` is the revocation id (the DELETE key), a one-way SHA-256
+    hash that cannot be redeemed — NOT the plaintext token, which is emitted only
+    once by mint and never listed here."""
     def _int(v):
         return int(v) if v is not None else None
     return {
+        "token_hash": item.get("token_hash"),
         "project_slug": item.get("project_slug"),
         "agent_name": item.get("agent_name"),
         "role": item.get("role"),
@@ -264,8 +269,10 @@ class AgentEnrollmentsCollection(MethodView):
     @blp.arguments(EnrollmentsQuery, location="query")
     @blp.response(200, EnrollmentOut(many=True))
     def get(self, query):
-        """List enrollments (metadata only — never token_hash or token material).
+        """List enrollments (metadata + token_hash — never the plaintext token).
 
+        The ``token_hash`` is the revocation handle (the DELETE key), a one-way
+        hash that cannot be redeemed; the plaintext token is never listed.
         A ``?project_slug=`` scopes the listing to one project and gates on
         project-admin (require_project_perm); the unscoped listing is global-admin
         only. Low-volume + TTL-swept, so a full scan filtered in-process suffices."""
