@@ -15,6 +15,7 @@ returned DTO carries server-populated defaults (public_id, timestamps, version).
 from __future__ import annotations
 
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 
 from ..extensions import db
 from ..idempotency import lookup_idempotent, store_idempotent
@@ -246,18 +247,30 @@ class PostgresBackend:
             raise Conflict(f"Project '{data['slug']}' already exists.")
         project = Project(**data)
         db.session.add(project)
-        db.session.flush()
-        # Creator-auto-admin (ISO-4): stamp the verified creator as an ``admin``
-        # member in the SAME transaction as the project row — a project must never
-        # exist without an admin member (that is a lockout). Skipped when there is
-        # no authenticated identity (local/auth-off, ``creator_sub`` is None).
-        if creator_sub:
-            db.session.add(ProjectMember(
-                project_id=project.id, principal_sub=creator_sub,
-                principal_name=creator_name, role="admin",
-            ))
-        dto = _project_dto(project)
-        db.session.commit()
+        # Backend parity (ISO-8): the pre-check above is racy — a concurrent create
+        # can slip a duplicate slug past it, and the UNIQUE(projects.slug) constraint
+        # then trips as an IntegrityError. Postgres enforces it immediately, so the
+        # violation can surface either on the flush (INSERT ... RETURNING) or on the
+        # commit; guard the whole write. Catch it, roll back the entire transaction
+        # (project row AND any creator-admin member, so no partial state survives),
+        # and re-raise the SAME Conflict the DynamoDB adapter raises -> identical 409
+        # on both backends.
+        try:
+            db.session.flush()
+            # Creator-auto-admin (ISO-4): stamp the verified creator as an ``admin``
+            # member in the SAME transaction as the project row — a project must never
+            # exist without an admin member (that is a lockout). Skipped when there is
+            # no authenticated identity (local/auth-off, ``creator_sub`` is None).
+            if creator_sub:
+                db.session.add(ProjectMember(
+                    project_id=project.id, principal_sub=creator_sub,
+                    principal_name=creator_name, role="admin",
+                ))
+            dto = _project_dto(project)
+            db.session.commit()
+        except IntegrityError as exc:
+            db.session.rollback()
+            raise Conflict(f"Project '{data['slug']}' already exists.") from exc
         return dto
 
     def update_project(self, slug: str, patch: dict) -> ProjectDTO:
