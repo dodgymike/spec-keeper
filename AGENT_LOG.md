@@ -339,3 +339,4 @@ to the server's `/events` endpoint.
   + install-and-run.sh/restore_backup.py in the tree are NOT mine (pre-existing / Path-B UI) — must
   NOT be included in the HA-7 commit.
 2026-07-22T08:10:16Z agent_token.py: resolve Cognito USERNAME from the secret record's 'username' field (pool alias), not the roster key. Light-touch (tooling/helper script, not app code); verified by an end-to-end InitiateAuth against the deployed pool. Unblocks ISO-5 backfill + ONBOARD redeem recipe.
+2026-07-22T09:15:05Z agent_token.py: authorized_request now sends User-Agent: spec-agent/1.0 (Cloudflare bot-blocks the default Python-urllib UA with 403/error-1010). Verified live: GET /projects -> 200. Critical for onboarded external agents that use this helper.

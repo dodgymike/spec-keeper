@@ -279,6 +279,10 @@ def authorized_request(
     """
     prov = provider or get_provider()
     hdrs = dict(headers or {})
+    # The deployed API is fronted by Cloudflare, which bot-blocks the default
+    # Python-urllib User-Agent (HTTP 403, error 1010). Send a stable client UA
+    # so agents using this helper aren't fingerprinted; callers may override.
+    hdrs.setdefault("User-Agent", "spec-agent/1.0")
 
     def _send(tok: str):
         h = dict(hdrs, Authorization=f"Bearer {tok}")
