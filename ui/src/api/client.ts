@@ -1,13 +1,20 @@
 import type {
+  AdminApproveIn,
+  AdminUser,
+  AdminUsersQuery,
   ChainRun,
   Counter,
   Decision,
   Epic,
   EventListParams,
+  Invite,
+  InviteIn,
+  InviteMint,
   Project,
   ProjectEvent,
   ProjectNote,
   ProjectNoteListParams,
+  SignupRequestIn,
   Task,
   TaskListParams,
 } from "./types";
@@ -175,4 +182,68 @@ export function getChainRun(slug: string, runId: string): Promise<ChainRun> {
   return request<ChainRun>(
     `/api/v1/projects/${encodeURIComponent(slug)}/chain-runs/${encodeURIComponent(runId)}`
   );
+}
+
+// ---- Admin console (HA-5-UI / UI-9) ------------------------------------
+// All admin endpoints are gated server-side on the spec-admins group; the UI
+// only shows them to admins but the server is the real boundary. Endpoints
+// answer 501 when the pool/invites table is unconfigured (local dev) — callers
+// surface that as a normal ApiError.
+
+/** List pool users (humans AND agents). `?status=pending|active` filters by derived status. */
+export function listAdminUsers(params?: AdminUsersQuery): Promise<AdminUser[]> {
+  return request<AdminUser[]>("/api/v1/admin/users", { params });
+}
+
+/** Approve a pending user by granting a read/write group (default spec-readers). */
+export function approveUser(username: string, body?: AdminApproveIn): Promise<void> {
+  return request<void>(`/api/v1/admin/users/${encodeURIComponent(username)}/approve`, {
+    method: "POST",
+    body: body ?? {},
+  });
+}
+
+/** Block a user: disables the Cognito account and strips its spec-* groups. */
+export function blockUser(username: string): Promise<void> {
+  return request<void>(`/api/v1/admin/users/${encodeURIComponent(username)}/block`, { method: "POST" });
+}
+
+/** Re-enable a previously blocked/rejected user (groups are NOT restored). */
+export function unblockUser(username: string): Promise<void> {
+  return request<void>(`/api/v1/admin/users/${encodeURIComponent(username)}/unblock`, { method: "POST" });
+}
+
+/** Promote a user to admin (adds spec-admins). */
+export function promoteUser(username: string): Promise<void> {
+  return request<void>(`/api/v1/admin/users/${encodeURIComponent(username)}/promote`, { method: "POST" });
+}
+
+/** Demote an admin (removes spec-admins). Refuses self-demote / last admin (409). */
+export function demoteUser(username: string): Promise<void> {
+  return request<void>(`/api/v1/admin/users/${encodeURIComponent(username)}/demote`, { method: "POST" });
+}
+
+/** Hard-delete a user (AdminDeleteUser). Refuses self-delete (409). */
+export function deleteUser(username: string): Promise<void> {
+  return request<void>(`/api/v1/admin/users/${encodeURIComponent(username)}`, { method: "DELETE" });
+}
+
+/** List ACTIVE invites — hashes/status/expiry only, never the plaintext code. */
+export function listInvites(): Promise<Invite[]> {
+  return request<Invite[]>("/api/v1/admin/invites");
+}
+
+/** Mint a single-use invite; the plaintext code + join URL come back ONCE. */
+export function mintInvite(body: InviteIn): Promise<InviteMint> {
+  return request<InviteMint>("/api/v1/admin/invites", { method: "POST", body });
+}
+
+/**
+ * HA-7 public access-request intake (UNAUTHENTICATED). The server always
+ * answers with a uniform 202 regardless of whether the address is eligible, so
+ * the caller must NOT branch on the response — it reveals nothing about
+ * existence. Any non-2xx is surfaced as an ApiError for the retry affordance.
+ */
+export function requestAccess(body: SignupRequestIn): Promise<void> {
+  return request<void>("/api/v1/signup", { method: "POST", body });
 }

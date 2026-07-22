@@ -32,6 +32,9 @@ Copy `.env.example` to `.env.local` and adjust as needed:
 | `VITE_COGNITO_REGION` | `eu-west-1` | AWS region hosting the Cognito user pool (the app calls the regional Cognito-IDP JSON API directly). |
 | `VITE_COGNITO_USER_POOL_ID` | unset | Cognito user pool ID, e.g. `eu-west-1_AbCdEfGhI`. |
 | `VITE_COGNITO_CLIENT_ID` | unset | Public **native** app client ID for the human `ui` client (no secret, no PKCE/OAuth involved). |
+| `VITE_ADMIN_GROUP` | `spec-admins` | Cognito group that gates the admin console (nav link + `/admin` route). Override to match a pool that renamed `AUTH_GROUP_ADMIN`; the server re-checks the group on every admin call regardless of this setting. |
+| `VITE_AGENT_EMAIL_DOMAIN` | `agents.spec-server.internal` | DNS-style domain used to synthesize agent usernames/emails (`<slug>@<domain>`), matching Terraform's `agent_username_domain`. Used by the admin console's Agents tab to tell agent users apart from humans. |
+| `VITE_TURNSTILE_SITE_KEY` | unset | Cloudflare Turnstile site key. When set, a widget placeholder renders on the public `/request` access-request form. Loading the Turnstile script itself is a deploy follow-up (see below). |
 
 Cognito is considered "configured" when `VITE_COGNITO_REGION`,
 `VITE_COGNITO_CLIENT_ID`, and `VITE_COGNITO_USER_POOL_ID` are all set;
@@ -83,6 +86,50 @@ Cognito-IDP JSON API directly via `fetch`, `connect-src` must include
 `https://cognito-idp.eu-west-1.amazonaws.com`). There is no separate Hosted-UI
 domain and no top-level navigation to Cognito.
 
+### Admin console (UI-9 / HA-5-UI)
+
+`/admin` is a signed-in-only route, gated client-side on the `VITE_ADMIN_GROUP`
+(default `spec-admins`) claim read from the decoded ID token's
+`cognito:groups` (`src/auth/session.ts`'s `isAdminUser`/`adminGroup`) - the
+nav link (`src/components/AppLayout.tsx`) and the page itself
+(`src/pages/AdminPage.tsx`) both hide/refuse when the signed-in user isn't a
+member. This is a UX convenience only: the server re-checks the group on
+every `/api/v1/admin/*` call regardless of what the client shows.
+
+Three tabs:
+
+- **Users** - list/filter (pending-only) human users; per-row approve /
+  block / unblock / promote / demote / delete, calling `/api/v1/admin/*`.
+  Surfaces the backend's 409 self/last-admin guardrail messages (e.g.
+  refusing self-demote or demoting the last remaining admin) inline.
+- **Agents** - agent Cognito users, identified by the synthetic
+  `<slug>@<VITE_AGENT_EMAIL_DOMAIN>` email, with client-side stats: active
+  (owner-held tasks), completed (done tasks the agent noted), token usage
+  (summed from model-usage notes), and last-active. Block/unblock/delete
+  reuse the same `/api/v1/admin/users/*` endpoints as the Users tab.
+- **Invites** - mint a single-use invite (email optional, TTL, pre-approved
+  toggle); the one-time plaintext code + join URL are shown once for the
+  admin to copy. The list of active invites shows only the code hash,
+  status, and expiry - the plaintext code is never listed or retrievable
+  again.
+
+### Public access request (HA-7)
+
+`/request` is a public, **unauthenticated** route (`src/pages/RequestAccessPage.tsx`)
+rendered outside the signed-in app shell, alongside `/join`. It's a simple
+form - email, optional display name, plus a hidden honeypot field and an
+optional Cloudflare Turnstile widget (rendered only when
+`VITE_TURNSTILE_SITE_KEY` is set) - that POSTs to `/api/v1/signup`. The page
+always shows the same neutral "if eligible, you'll get an email"
+confirmation regardless of the outcome (the backend answers a uniform 202 to
+avoid revealing whether an address is eligible/already known); a genuine
+transport error is the only case that surfaces a retry affordance.
+
+**Deploy follow-up:** loading the actual Turnstile challenge script requires
+widening the SPA's CSP (`script-src`/`frame-src` to allow
+`https://challenges.cloudflare.com`) before the widget can render for real;
+until then, setting `VITE_TURNSTILE_SITE_KEY` only renders the placeholder.
+
 ## Building
 
 ```bash
@@ -123,8 +170,12 @@ here"). It is a dependency for AUTH/INFRA work and should allow, at minimum:
 ## API client
 
 `src/api/client.ts` exports `listProjects()`, `getProject(slug)`,
-`listEpics(slug)`, and `listTasks(slug, params)`, all going through a shared
-`request()` helper (`src/api/client.ts`) that:
+`listEpics(slug)`, `listTasks(slug, params)`, and (UI-9) the admin/invite/signup
+functions consumed by `/admin` and `/request`: `listAdminUsers(params)`,
+`approveUser(username, body?)`, `blockUser(username)`, `unblockUser(username)`,
+`promoteUser(username)`, `demoteUser(username)`, `deleteUser(username)`,
+`listInvites()`, `mintInvite(body)`, and `requestAccess(body)` (unauthenticated).
+All go through a shared `request()` helper (`src/api/client.ts`) that:
 
 - Resolves URLs against `import.meta.env.VITE_API_BASE`.
 - Attaches `Authorization: Bearer <token>` when `getToken()` returns a value

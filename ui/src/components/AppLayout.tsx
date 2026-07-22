@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import { isAdminUser } from "../auth/session";
 import "./AppLayout.css";
 
 interface AppLayoutProps {
@@ -10,6 +11,7 @@ interface AppLayoutProps {
 /** The app shell: a header with nav + auth status, and a content area for routed pages. */
 export function AppLayout({ children }: AppLayoutProps) {
   const { status, user, signOut } = useAuth();
+  const showAdmin = status === "signed-in" && isAdminUser(user);
 
   return (
     <div className="app-layout">
@@ -33,6 +35,16 @@ export function AppLayout({ children }: AppLayoutProps) {
           >
             Coordination
           </NavLink>
+          {showAdmin ? (
+            <NavLink
+              to="/admin"
+              className={({ isActive }) =>
+                isActive ? "app-layout__link app-layout__link--active" : "app-layout__link"
+              }
+            >
+              Admin
+            </NavLink>
+          ) : null}
           {status === "signed-in" ? (
             <NavLink
               to="/settings"

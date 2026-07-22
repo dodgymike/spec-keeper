@@ -19,6 +19,38 @@ import type { AuthenticationResult, Passkey } from "./cognito";
 export interface AuthUser {
   email?: string;
   sub?: string;
+  /**
+   * The signed-in user's Cognito group memberships, read from the DECODED
+   * (NOT signature-verified) ID token's `cognito:groups` claim. Used ONLY to
+   * decide which UI to show (e.g. the admin console); the server re-checks the
+   * group on every admin call, so this is a convenience, never the security
+   * boundary — never trust it as an authorization source.
+   */
+  groups: string[];
+}
+
+/**
+ * The Cognito group that gates the admin console. Overridable via
+ * `VITE_ADMIN_GROUP` to match a pool that renamed the group (backend knob
+ * `AUTH_GROUP_ADMIN`); defaults to the project standard `spec-admins`.
+ */
+export function adminGroup(): string {
+  const value = import.meta.env.VITE_ADMIN_GROUP;
+  return value && value.trim() !== "" ? value.trim() : "spec-admins";
+}
+
+/** True when `user` is in the admin group (UI gate only — server re-checks). */
+export function isAdminUser(user: AuthUser | null): boolean {
+  return Boolean(user && user.groups.includes(adminGroup()));
+}
+
+/** Extract the `cognito:groups` claim (array of strings) from decoded claims. */
+function readGroups(claims: Record<string, unknown>): string[] {
+  const raw = claims["cognito:groups"];
+  if (Array.isArray(raw)) {
+    return raw.filter((g): g is string => typeof g === "string");
+  }
+  return [];
 }
 
 export type AuthStatus = "disabled" | "signed-out" | "signed-in";
@@ -88,6 +120,7 @@ function applyTokens(result: AuthenticationResult, pendingPasskeyOffer: boolean)
     user: {
       email: typeof claims.email === "string" ? claims.email : undefined,
       sub: typeof claims.sub === "string" ? claims.sub : undefined,
+      groups: readGroups(claims),
     },
     pendingPasskeyOffer,
   });

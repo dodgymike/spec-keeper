@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { Route, Routes, useLocation } from "react-router-dom";
 import { AppLayout } from "./components/AppLayout";
 import { ActivityPage } from "./pages/ActivityPage";
+import { AdminPage } from "./pages/AdminPage";
 import { CoordinationPage } from "./pages/CoordinationPage";
 import { JoinPage } from "./pages/JoinPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ProgressPage } from "./pages/ProgressPage";
 import { ProjectDetailPage } from "./pages/ProjectDetailPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
+import { RequestAccessPage } from "./pages/RequestAccessPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { useAuth } from "./auth/AuthContext";
 import * as cognito from "./auth/cognito";
@@ -104,6 +106,13 @@ export default function App() {
     return <JoinPage />;
   }
 
+  // `/request` is the public HA-7 access-request page: like `/join` it renders
+  // regardless of auth status (a prospective user has no session), outside the
+  // signed-in app shell.
+  if (location.pathname.startsWith("/request")) {
+    return <RequestAccessPage />;
+  }
+
   return (
     <AppLayout>
       {status === "signed-out" ? (
@@ -117,6 +126,7 @@ export default function App() {
           <Route path="/projects/:slug/activity" element={<ActivityPage />} />
           <Route path="/projects/:slug/progress" element={<ProgressPage />} />
           <Route path="/coordination" element={<CoordinationPage />} />
+          <Route path="/admin" element={<AdminPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       )}

@@ -164,3 +164,71 @@ export interface ChainRun {
   finished_at: string | null;
   steps: ChainStep[];
 }
+
+// ---- Admin console (HA-5-UI / UI-9) ------------------------------------
+// Mirrors app/schemas.py: AdminUserOut, InviteOut, InviteMintOut, InviteIn,
+// AdminApproveIn. The admin endpoints live under /api/v1/admin and are gated
+// server-side on the spec-admins group; the UI mirrors that gate for nav.
+
+/** Derived lifecycle status: `pending` = in no spec-* group; `active` = in one. */
+export type AdminUserStatus = "pending" | "active";
+
+// app.schemas.AdminUserOut — a listed pool user (human OR agent). No secrets.
+export interface AdminUser {
+  username: string;
+  email: string | null;
+  enabled: boolean;
+  status: AdminUserStatus;
+  groups: string[];
+  created_at: string | null;
+}
+
+export interface AdminUsersQuery {
+  status?: AdminUserStatus;
+}
+
+/** Group granted on approval (admin promotion is a separate /promote action). */
+export type ApproveGroup = "spec-readers" | "spec-writers";
+
+// app.schemas.AdminApproveIn
+export interface AdminApproveIn {
+  group?: ApproveGroup;
+}
+
+// app.schemas.InviteIn — mint a single-use invite.
+export interface InviteIn {
+  email?: string | null;
+  ttl_days?: number | null;
+  approved?: boolean;
+}
+
+// app.schemas.InviteOut — a listed invite (hashes/status/expiry ONLY).
+export interface Invite {
+  code_hash: string;
+  status: string;
+  created_at: number | null;
+  expires_at: number | null;
+  email_bound: boolean;
+  approved: boolean;
+}
+
+// app.schemas.InviteMintOut — the ONLY place a plaintext code is emitted.
+export interface InviteMint {
+  code: string;
+  join_url: string;
+  code_hash: string;
+  expires_at: number;
+  email_bound: boolean;
+  approved: boolean;
+}
+
+// HA-7 public access-request intake. The body is deliberately minimal; the
+// server always answers with a uniform 202 (never reveals whether the address
+// is known/eligible).
+export interface SignupRequestIn {
+  email: string;
+  display_name?: string;
+  turnstile_token?: string;
+  /** Honeypot — must stay empty; a non-empty value is silently dropped as a bot. */
+  hp_website?: string;
+}
