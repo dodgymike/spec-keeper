@@ -81,10 +81,32 @@ locals {
 # ---------------------------------------------------------------------------
 # HTTP API
 # ---------------------------------------------------------------------------
+variable "cors_allow_origins" {
+  description = "Browser origins allowed to call the API (the SPA host). API Gateway answers the CORS preflight itself BEFORE the JWT authorizer (which would 401 the token-less OPTIONS) and injects the headers on responses. Empty disables gateway CORS."
+  type        = list(string)
+  default     = []
+}
+
 resource "aws_apigatewayv2_api" "http" {
   name          = "${local.name_prefix}-api"
   description   = "Spec Server HTTP API — Lambda proxy, Cognito JWT authorizer on the data-plane."
   protocol_type = "HTTP"
+
+  # Gateway-level CORS: HTTP API answers the OPTIONS preflight without invoking
+  # the authorizer/Lambda, so the browser's cross-origin check passes, and adds
+  # Access-Control-Allow-Origin to the actual (authorized) responses. Credentials
+  # are false because the SPA sends a Bearer token in a header, not a cookie.
+  dynamic "cors_configuration" {
+    for_each = length(var.cors_allow_origins) > 0 ? [1] : []
+    content {
+      allow_origins     = var.cors_allow_origins
+      allow_methods     = ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS", "HEAD"]
+      allow_headers     = ["authorization", "content-type", "if-match"]
+      expose_headers    = ["etag"]
+      allow_credentials = false
+      max_age           = 3600
+    }
+  }
 
   tags = local.tags
 }
@@ -130,9 +152,14 @@ resource "aws_apigatewayv2_route" "public" {
 }
 
 # AUTHENTICATED data-plane — the whole /api/v1 surface behind the JWT authorizer.
+# Explicit methods (NOT `ANY`) so OPTIONS is left UNrouted: with cors_configuration
+# on the API, API Gateway then answers the CORS preflight itself, unauthenticated
+# (an `ANY` route would capture OPTIONS and the JWT authorizer would 401 the
+# token-less preflight, breaking the browser's cross-origin call).
 resource "aws_apigatewayv2_route" "api" {
+  for_each           = toset(["GET", "POST", "PATCH", "PUT", "DELETE", "HEAD"])
   api_id             = aws_apigatewayv2_api.http.id
-  route_key          = "ANY /api/v1/{proxy+}"
+  route_key          = "${each.value} /api/v1/{proxy+}"
   target             = "integrations/${aws_apigatewayv2_integration.lambda.id}"
   authorization_type = "JWT"
   authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
