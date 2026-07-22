@@ -216,7 +216,7 @@ optimistic-lock/412 contract — passes identically on both backends.
 | `ENROLL_BASE_URL` | `https://spec.elasticninja.com` | Base URL the mint endpoint's `enrollment_url` is built from (the plaintext token rides in the fragment, `#token=...`). |
 | `ENROLL_API_BASE` | `https://api.spec.elasticninja.com` | API base URL the redeem endpoint hands back in its response/recipe, so a newly-enrolled agent knows where to call. |
 | `ENROLL_COGNITO_CLIENT_ID` | _(none)_ | Cognito app-client id (`USER_PASSWORD_AUTH`, no client secret) the redeem response/recipe tells the new agent to mint tokens against. Unset ⇒ omitted from the recipe. Wired from terraform. |
-| `ENROLL_AGENT_DOMAIN` | `agents.spec-server.internal` | Email-as-username domain for agent sign-in aliases: the redeem endpoint provisions `<agent_name>@<ENROLL_AGENT_DOMAIN>` (mirrors `scripts/enrol_agents.py`). |
+| `ENROLL_AGENT_DOMAIN` | `agents.spec-server.internal` | Email-as-username domain for agent sign-in aliases: the redeem endpoint provisions a project-namespaced `<sanitized-agent-name>.<sanitized-project-slug>.<16-hex-digest>@<ENROLL_AGENT_DOMAIN>` (ONBOARD-3a — the same `agent_name` in different projects gets a different Cognito user; the 19 platform agents provisioned by `scripts/enrol_agents.py` still use the plain `<name>@<domain>` scheme and are unaffected). |
 | `COGNITO_USER_POOL_ID` | _(none)_ | Cognito user pool backing the admin user-lifecycle endpoints (HA-5): `/api/v1/admin/users*` (list/approve/reject/block/unblock/promote/demote/delete). Unset ⇒ every `/admin/users*` endpoint returns 501 (local-dev graceful default), same contract as `INVITES_TABLE` above. Reuses `AWS_REGION`. Wired from terraform output `cognito_user_pool_id` (`infra/terraform/cognito.tf`). |
 | `SIGNUPS_TABLE` | _(none)_ | Dedicated DynamoDB table backing the public signup queue (HA-7): `GET /api/v1/validate` and the admin `/api/v1/admin/signups*` bridge. Unset ⇒ validate returns the neutral `invalid` outcome and the admin endpoints return 501 (same graceful-default contract as `INVITES_TABLE`). Wired from terraform output `signups_table_name` (`infra/terraform/signups.tf`). |
 | `SIGNUP_INTAKE_QUEUE_URL` | _(none)_ | SQS queue URL the public `POST /api/v1/signup` intake enqueues to. Unset ⇒ intake still returns its uniform 202 without enqueuing (local-dev graceful default). Wired from terraform output `signup_intake_queue_url`. |
@@ -286,19 +286,28 @@ token (`POST /api/v1/admin/agent-enrollments`, admin-gated on the target `projec
 it to a brand-new agent, which redeems it exactly once (`POST /api/v1/agent-enrollments/redeem`,
 **PUBLIC, no auth** — a not-yet-a-credential agent has no token to authenticate with).
 
+Mint refuses (**409**) to create a second token while an active, unexpired enrollment already
+exists for the same `(project_slug, agent_name)` — a best-effort guard against two concurrent live
+tokens for one target; a prior enrollment that is used/expired/revoked never blocks a fresh mint.
+
 Redeem atomically **burns** the token first (a conditional DynamoDB update, `active`→`used`,
 under `expires_at > now`; a missing/used/expired/raced token all fail identically — no
 enumeration oracle), then **provisions** the agent's Cognito user (`AdminCreateUser` →
 `AdminSetUserPassword` permanent → `AdminAddUserToGroup spec-writers`) and grants it membership on
 the enrolled project at the enrolled role, and returns the working username/password + a
 copy-paste setup recipe in the same response — the password is shown **once** and never stored or
-logged. If provisioning fails after the burn, the token stays spent (500) and the remedy is to
-mint a fresh one; burn-then-provision never un-burns. Both endpoints return **501** when
-`AGENT_ENROLLMENTS_TABLE` (mint/list/revoke/redeem) or `COGNITO_USER_POOL_ID` (redeem's
-provisioning step) is unset — the same graceful-default contract as the invites/user-lifecycle
-endpoints above. The redeem route reuses the HA-7 per-IP rate-limit and origin-guard. See
-`AGENTS_API.md` → "Agent self-enrollment" for the request/response shapes, and `infra/terraform/
-apigw.tf` (`local.public_routes`) for how the redeem route bypasses the JWT authorizer.
+logged. The provisioned username is **project-namespaced** (ONBOARD-3a):
+`<sanitized-agent-name>.<sanitized-project-slug>.<16-hex-digest>@<ENROLL_AGENT_DOMAIN>`, so the
+same `agent_name` redeemed into different projects always provisions a *different* Cognito user
+(cross-tenant isolation), while re-enrolling the same `(project_slug, agent_name)` rotates the
+password on the *same* user. If provisioning fails after the burn, the token stays spent (500) and
+the remedy is to mint a fresh one; burn-then-provision never un-burns. Both endpoints return
+**501** when `AGENT_ENROLLMENTS_TABLE` (mint/list/revoke/redeem) or `COGNITO_USER_POOL_ID`
+(redeem's provisioning step) is unset — the same graceful-default contract as the
+invites/user-lifecycle endpoints above. The redeem route reuses the HA-7 per-IP rate-limit and
+origin-guard. See `AGENTS_API.md` → "Agent self-enrollment" for the request/response shapes, and
+`infra/terraform/apigw.tf` (`local.public_routes`) for how the redeem route bypasses the JWT
+authorizer.
 
 ### Public signup queue (HA-7)
 

@@ -236,6 +236,30 @@ def _require_enrollments_table(cfg):
     return table
 
 
+def _active_enrollment_exists(table, project_slug: str, agent_name: str, now: int) -> bool:
+    """True when an ACTIVE, unexpired enrollment already exists for this exact
+    ``(project_slug, agent_name)`` (ONBOARD-3a).
+
+    Mirrors the list endpoint's read: a paginated ``scan`` filtered in-process (a
+    low-volume, TTL-swept table). The pair is compared in Python — no
+    caller-supplied value is ever formatted into a DynamoDB expression string — so
+    there is no expression-injection surface. Used/revoked/expired rows do NOT
+    count, so a fresh mint is allowed once a prior token is spent or lapses."""
+    items: list[dict] = []
+    resp = table.scan()
+    items.extend(resp.get("Items", []))
+    while resp.get("LastEvaluatedKey"):
+        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
+        items.extend(resp.get("Items", []))
+    return any(
+        it.get("project_slug") == project_slug
+        and it.get("agent_name") == agent_name
+        and it.get("status") == "active"
+        and int(it.get("expires_at", 0) or 0) > now
+        for it in items
+    )
+
+
 def _caller_actor() -> str:
     """The verified caller's identity (sub preferred, then username), for audit.
 
@@ -310,9 +334,24 @@ class AgentEnrollmentsCollection(MethodView):
         cfg = current_app.config
         table = _require_enrollments_table(cfg)
 
+        now = int(time.time())
+        # ONBOARD-3a: refuse a SECOND live token for the same (project, agent_name)
+        # with a generic 409 (the message states nothing beyond the pair the caller
+        # already sent — no enumeration oracle, and mint is already project-admin
+        # gated above). This is a BEST-EFFORT sequential guard, not a hard invariant:
+        # two concurrent mints could both pass this scan-then-put. That is safe
+        # because the isolation boundary is the DETERMINISTIC, project-namespaced
+        # username (enroll._provisioned_username) plus idempotent provisioning — two
+        # tokens for the same pair redeem to the SAME Cognito user (a rotation), so
+        # coexisting active tokens never cross tenants.
+        if _active_enrollment_exists(table, data["project_slug"], data["agent_name"], now):
+            abort(
+                409,
+                message="an active enrollment already exists for this agent in this project",
+            )
+
         token = secrets.token_urlsafe(_ENROLL_TOKEN_BYTES)
         token_hash = _hash(token)
-        now = int(time.time())
         ttl = data.get("ttl_seconds") or cfg.get("ENROLL_TTL_SECONDS", 3600)
         expires_at = now + int(ttl)
 

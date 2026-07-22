@@ -137,10 +137,67 @@ def test_mint_default_ttl_and_override(fake_table):
     app = _app(AGENT_ENROLLMENTS_TABLE="t", ENROLL_TTL_SECONDS=3600)
     c = app.test_client()
     now = int(time.time())
-    d = c.post("/api/v1/admin/agent-enrollments", json=_body()).get_json()
+    # Distinct agent_names so the ONBOARD-3a duplicate-active guard does not fire.
+    d = c.post("/api/v1/admin/agent-enrollments",
+               json=_body(agent_name="ttl-default")).get_json()
     assert 3590 <= d["expires_at"] - now <= 3610
-    o = c.post("/api/v1/admin/agent-enrollments", json=_body(ttl_seconds=120)).get_json()
+    o = c.post("/api/v1/admin/agent-enrollments",
+               json=_body(agent_name="ttl-override", ttl_seconds=120)).get_json()
     assert 110 <= o["expires_at"] - now <= 130
+
+
+# --------------------------------------------------------------------------- #
+# ONBOARD-3a — reject a second ACTIVE enrollment for the same (project, agent)
+# --------------------------------------------------------------------------- #
+def test_duplicate_active_enrollment_is_409(fake_table):
+    """A second live token for the same (project_slug, agent_name) is refused with
+    a generic 409 so two redeems can't race to provision/rotate one Cognito user."""
+    app = _app(AGENT_ENROLLMENTS_TABLE="t")
+    c = app.test_client()
+    r1 = c.post("/api/v1/admin/agent-enrollments", json=_body())
+    assert r1.status_code == 201, r1.get_json()
+    r2 = c.post("/api/v1/admin/agent-enrollments", json=_body())
+    assert r2.status_code == 409, r2.get_json()
+    # Only the first token was ever stored (the duplicate never minted).
+    assert len(fake_table.items) == 1
+
+
+def test_duplicate_check_is_per_project(fake_table):
+    """The SAME agent_name in a DIFFERENT project is allowed — the guard is scoped
+    to the (project, agent) pair, matching the per-project isolation intent."""
+    app = _app(AGENT_ENROLLMENTS_TABLE="t")
+    c = app.test_client()
+    assert c.post("/api/v1/admin/agent-enrollments",
+                  json=_body(project_slug="alpha")).status_code == 201
+    assert c.post("/api/v1/admin/agent-enrollments",
+                  json=_body(project_slug="beta")).status_code == 201
+
+
+def test_mint_allowed_after_prior_enrollment_used(fake_table):
+    """Once the prior token is redeemed (status 'used') a fresh mint is allowed."""
+    app = _app(AGENT_ENROLLMENTS_TABLE="t")
+    c = app.test_client()
+    assert c.post("/api/v1/admin/agent-enrollments", json=_body()).status_code == 201
+    fake_table.items[0]["status"] = "used"
+    assert c.post("/api/v1/admin/agent-enrollments", json=_body()).status_code == 201
+
+
+def test_mint_allowed_after_prior_enrollment_expired(fake_table):
+    """Once the prior token has expired a fresh mint is allowed."""
+    app = _app(AGENT_ENROLLMENTS_TABLE="t")
+    c = app.test_client()
+    assert c.post("/api/v1/admin/agent-enrollments", json=_body()).status_code == 201
+    fake_table.items[0]["expires_at"] = int(time.time()) - 10
+    assert c.post("/api/v1/admin/agent-enrollments", json=_body()).status_code == 201
+
+
+def test_mint_allowed_after_prior_enrollment_revoked(fake_table):
+    """Once the prior token is revoked a fresh mint is allowed."""
+    app = _app(AGENT_ENROLLMENTS_TABLE="t")
+    c = app.test_client()
+    assert c.post("/api/v1/admin/agent-enrollments", json=_body()).status_code == 201
+    fake_table.items[0]["status"] = "revoked"
+    assert c.post("/api/v1/admin/agent-enrollments", json=_body()).status_code == 201
 
 
 def test_list_never_leaks_token_material(fake_table):

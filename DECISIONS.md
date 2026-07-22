@@ -207,3 +207,34 @@ Decisions:
 - **Capability tier is `spec-writers` ONLY; project membership is the enrolled role on the ONE
   enrolled project.** Never spec-admins, never multiple projects — least privilege for a self-served
   agent.
+
+## ONBOARD-3a — close the cross-tenant agent-identity collision (P1)
+- **The provisioned Cognito username is PROJECT-NAMESPACED, not derived from `agent_name` alone.**
+  ONBOARD-3 keyed the redeem-flow Cognito user off `{agent_name}@{ENROLL_AGENT_DOMAIN}`, so the SAME
+  `agent_name` in two DIFFERENT projects mapped to ONE shared user: redeeming the second reset that
+  user's password and added it to the second project — a cross-tenant credential/membership
+  escalation. The username is now
+  `{sanitize(agent_name)}.{sanitize(project_slug)}.{h}@{ENROLL_AGENT_DOMAIN}` where `sanitize`
+  lowercases + restricts to `[a-z0-9._-]` (each piece bounded to 20 chars) and `h` is the first
+  16 hex (64 bits) of `SHA-256(agent_name "\0" project_slug)` — 20+20+16+2 = 58 ≤ the 64-char email
+  local-part cap. The SAME `(project, agent_name)` is deterministic — so a re-enroll is a legitimate
+  password ROTATION of the SAME user, matching ONBOARD-3's "member of exactly one project" intent —
+  while two DISTINCT pairs collide only if sanitization aliases their visible local-parts AND their
+  64-bit digests birthday-coincide: astronomically remote and never attacker-targetable (mint is
+  project-admin gated, slugs are unique). NUL joins the pair (it can appear in neither component) so
+  the boundary is unambiguous (chosen 64-bit over an initial 32-bit tag after security/reliability
+  review flagged 32 bits as birthday-thin for a credential-isolation boundary). The `email` attribute stays equal
+  to this username; the group (`spec-writers`) and the membership role are unchanged. The 19 platform
+  agents provisioned by `scripts/enrol_agents.py` (`{name}@agents.spec-server.internal`, not via
+  redeem) are untouched — only the redeem-flow derivation changed.
+- **Mint refuses a second ACTIVE enrollment for the same `(project_slug, agent_name)` (generic 409).**
+  Two concurrent live tokens for one target would let two redeems race to provision/rotate the same
+  user. `POST /admin/agent-enrollments` now scans the enrollments table and rejects with a generic
+  409 if an active, unexpired row for that pair exists (used/expired/revoked rows do not count, so a
+  fresh mint is allowed once the prior token is spent or lapses). The pair is compared in-process
+  (mirrors the list endpoint's read); no caller value is formatted into a DynamoDB expression. This
+  409 is a BEST-EFFORT sequential guard (a scan-then-put has a TOCTOU window under concurrent mints),
+  NOT the isolation invariant: the invariant is the deterministic project-namespaced username +
+  idempotent provisioning, so even two coexisting active tokens for one pair redeem to the SAME
+  Cognito user (a rotation) and never cross tenants. A future hardening could make it a hard
+  invariant via a conditional write on a deterministic per-pair guard key.

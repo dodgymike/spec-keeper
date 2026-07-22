@@ -44,6 +44,7 @@ provision into).
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import string
 
@@ -178,19 +179,64 @@ def _attr(attrs, name):
     return None
 
 
+# Per-component bound for the sanitized local-part pieces. Email local-parts cap
+# at 64 chars; two <= 20-char pieces + a 16-hex suffix + two dots = 58, under 64.
+_LOCALPART_MAX = 20
+# Hex width of the disambiguating digest. 16 hex = 64 bits: the tiebreaker only
+# matters when sanitization aliases two distinct raw pairs onto the same visible
+# local-part, and 64 bits keeps a birthday collision there astronomically remote
+# on a credential-isolation boundary (vs 32 bits, which is birthday-thin).
+_DIGEST_HEX = 16
+
+
+def _sanitize_localpart(value: str) -> str:
+    """Lowercase and restrict ``value`` to the safe local-part charset
+    ``[a-z0-9._-]``, collapsing disallowed runs to a single ``-``, trimming
+    leading/trailing separators, and bounding the length. Never empty (an input
+    that sanitizes away entirely falls back to ``"x"``)."""
+    v = (value or "").strip().lower()
+    v = re.sub(r"[^a-z0-9._-]+", "-", v)
+    v = v.strip("._-")[:_LOCALPART_MAX].strip("._-")
+    return v or "x"
+
+
+def _provisioned_username(cfg, *, agent_name: str, project_slug: str) -> str:
+    """Derive the project-namespaced, unique Cognito username (== email alias) for
+    an enrolled agent (ONBOARD-3a).
+
+    A given ``agent_name`` in DIFFERENT projects maps to DIFFERENT Cognito users
+    (isolation intent: a redeemed agent is a member of exactly one project), while
+    the SAME ``(project_slug, agent_name)`` always maps to the SAME user — so a
+    re-enroll is a legitimate password rotation, never a cross-tenant takeover.
+    Sanitization (lowercasing / charset-folding / length-bounding) could alias two
+    DISTINCT raw inputs onto the same visible local-part, so a deterministic hash
+    of the RAW ``(agent_name, project_slug)`` pair is appended: identical pairs are
+    always identical (rotation), while distinct pairs collide only on a 64-bit
+    birthday coincidence — astronomically remote, and never attacker-targetable
+    (mint is project-admin-gated and slugs are unique). The pair is joined with a
+    NUL, which cannot appear in either component, so the boundary is unambiguous
+    (``("a.b","c")`` and ``("a","b.c")`` hash apart)."""
+    domain = cfg.get("ENROLL_AGENT_DOMAIN", "agents.spec-server.internal")
+    san_agent = _sanitize_localpart(agent_name)
+    san_project = _sanitize_localpart(project_slug)
+    digest = admin_bp._hash(f"{agent_name}\x00{project_slug}")[:_DIGEST_HEX]
+    return f"{san_agent}.{san_project}.{digest}@{domain}"
+
+
 def _provision(cfg, client, pool_id, *, agent_name: str, project_slug: str, role: str):
     """Idempotently provision the agent's Cognito user and grant membership.
 
     Mirrors scripts/enrol_agents.py: AdminCreateUser (SUPPRESS + temp pw) ->
     AdminSetUserPassword(permanent) -> AdminAddUserToGroup(spec-writers). The
-    pool uses email-as-username, so the sign-in alias is
-    ``<agent_name>@<ENROLL_AGENT_DOMAIN>`` and the immutable ``sub`` comes off the
-    AdminCreateUser response (or AdminGetUser on an existing user). Returns
-    ``(username_alias, password, sub)``. NEVER logs the password."""
+    pool uses email-as-username, and the sign-in alias is the PROJECT-NAMESPACED,
+    collision-resistant ``_provisioned_username`` (ONBOARD-3a) so the same
+    ``agent_name`` in two projects can never map to one shared Cognito user; the
+    immutable ``sub`` comes off the AdminCreateUser response (or AdminGetUser on an
+    existing user). Returns ``(username_alias, password, sub)``. NEVER logs the
+    password."""
     from botocore.exceptions import ClientError
 
-    domain = cfg.get("ENROLL_AGENT_DOMAIN", "agents.spec-server.internal")
-    username = f"{agent_name}@{domain}"
+    username = _provisioned_username(cfg, agent_name=agent_name, project_slug=project_slug)
     write_group = cfg.get("AUTH_GROUP_WRITE", "spec-writers")
     password = _generate_password()
 

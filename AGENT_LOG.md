@@ -372,3 +372,25 @@ to the server's `/events` endpoint.
   project membership is inert + optional orphan-user sweep.
 - CODE ONLY per the task: NOT committed, backlog NOT mutated. The pre-existing dirty
   docker-compose.yml + untracked install-and-run.sh/restore_backup.py in the tree are NOT mine.
+
+## ONBOARD-3a — close cross-tenant agent-identity collision (P1) — 2026-07-22
+- **Change (code-only, no commit per task):** the redeem flow's Cognito username is now
+  project-namespaced + collision-resistant, and mint refuses a duplicate active enrollment.
+  - `app/blueprints/enroll.py`: new `_sanitize_localpart` + `_provisioned_username(cfg, agent_name,
+    project_slug)` = `{san_agent}.{san_project}.{16-hex SHA256(agent_name NUL project_slug)}@domain`
+    (was `{agent_name}@domain`); `_provision` uses it. Same agent_name in different projects → distinct
+    Cognito users (isolation); same (project, agent_name) → same user (legitimate password rotation).
+  - `app/blueprints/admin.py`: new `_active_enrollment_exists`; `POST /admin/agent-enrollments` returns
+    generic 409 if an active, unexpired enrollment already exists for the same (project_slug, agent_name).
+- **Tests:** extended `tests/test_enroll_redeem.py` (cross-project distinct users + no cross-membership +
+  no cross password-reset; same-pair rotation) and `tests/test_admin_enrollments.py` (409 duplicate;
+  per-project scoping; allowed-after-used/expired/revoked). `pytest -k "enroll or enrollment or redeem"`
+  → 37 passed; full suite → 200 passed.
+- **Chain:** spec-keeper(external, cloud) → implementer(self) → test-engineer(self) → reviewer → security
+  → reliability-reviewer → documentation. reviewer PASS on logic (its BLOCK was pre-existing out-of-scope
+  untracked files — ONBOARD-5 UI, docker-compose, install-and-run.sh, restore_backup.py — NOT this task;
+  left untouched, no commit made). security PASS (no P0). reliability-reviewer PASS (LOW only).
+- **Review follow-up applied:** widened the disambiguation digest 32-bit → 64-bit and reduced
+  `_LOCALPART_MAX` 24→20 (stays ≤64-char local-part), softened the "never collide" docstring, and marked
+  the mint-409 a best-effort guard (real invariant = deterministic username + idempotent provisioning).
+- **DECISIONS.md:** ONBOARD-3a entry recorded (username scheme + rationale; 409 semantics).

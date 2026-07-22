@@ -40,6 +40,15 @@ def _sha(v: str) -> str:
     return hashlib.sha256(v.encode("utf-8")).hexdigest()
 
 
+def _uname(app, agent_name: str, project_slug: str) -> str:
+    """The project-namespaced provisioned username the endpoint will derive
+    (ONBOARD-3a) — computed via the production helper so the tests track the
+    scheme rather than hard-coding it."""
+    return enroll_bp._provisioned_username(
+        app.config, agent_name=agent_name, project_slug=project_slug
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Fakes                                                                         #
 # --------------------------------------------------------------------------- #
@@ -160,8 +169,12 @@ def test_valid_token_burns_once_and_provisions(fakes):
     assert r.status_code == 201, r.get_json()
     body = r.get_json()
 
-    # Working creds returned ONCE.
-    assert body["username"] == "alice-bot@agents.spec-server.internal"
+    # Working creds returned ONCE. The username is PROJECT-NAMESPACED (ONBOARD-3a):
+    # the sanitized agent name, then the sanitized project slug, then a short hash.
+    expected_user = _uname(app, "alice-bot", slug)
+    assert body["username"] == expected_user
+    assert body["username"].startswith("alice-bot.")
+    assert body["username"].endswith("@agents.spec-server.internal")
     assert body["password"] and len(body["password"]) >= 16
     assert body["api_base"] == "https://api.example.com"
     assert body["region"] == "eu-west-1"
@@ -177,12 +190,12 @@ def test_valid_token_burns_once_and_provisions(fakes):
     # Cognito user created once, in spec-writers ONLY (capability tier).
     assert cog.create_calls == 1
     assert cog.setpw_calls == 1
-    assert cog.group_calls == [("alice-bot@agents.spec-server.internal", "spec-writers")]
+    assert cog.group_calls == [(expected_user, "spec-writers")]
     # Password on the created user matches the one returned (permanent set).
-    assert cog.users["alice-bot@agents.spec-server.internal"]["password"] == body["password"]
+    assert cog.users[expected_user]["password"] == body["password"]
 
     # Membership granted at the enrolled role, keyed on the resolved sub.
-    sub = cog.users["alice-bot@agents.spec-server.internal"]["sub"]
+    sub = cog.users[expected_user]["sub"]
     with app.app_context():
         m = app.storage.get_membership(slug, sub)
     assert m is not None and m.role == "writer"
@@ -199,9 +212,10 @@ def test_role_is_carried_from_the_burned_token(fakes):
     r = c.post("/api/v1/agent-enrollments/redeem", json={"token": token})
     assert r.status_code == 201, r.get_json()
     assert r.get_json()["role"] == "admin"
+    expected_user = _uname(app, "rolebot", slug)
     # Capability tier is STILL spec-writers only — never spec-admins.
-    assert cog.group_calls == [("rolebot@agents.spec-server.internal", "spec-writers")]
-    sub = cog.users["rolebot@agents.spec-server.internal"]["sub"]
+    assert cog.group_calls == [(expected_user, "spec-writers")]
+    sub = cog.users[expected_user]["sub"]
     with app.app_context():
         assert app.storage.get_membership(slug, sub).role == "admin"
 
@@ -321,10 +335,78 @@ def test_reminted_token_same_agent_is_idempotent(fakes):
 
     # Two create attempts, but only ONE Cognito user (2nd hit UsernameExists ->
     # password reset). Password set both times so the caller always gets creds.
+    expected_user = _uname(app, "samebot", slug)
     assert cog.create_calls == 2
     assert len(cog.users) == 1
     assert cog.setpw_calls == 2
-    assert r2.get_json()["password"] == cog.users["samebot@agents.spec-server.internal"]["password"]
+    # Both redeems targeted the SAME username (legitimate rotation of one user).
+    assert r1.get_json()["username"] == expected_user == r2.get_json()["username"]
+    assert r2.get_json()["password"] == cog.users[expected_user]["password"]
+
+
+# --------------------------------------------------------------------------- #
+# ONBOARD-3a — cross-tenant identity isolation                                  #
+# --------------------------------------------------------------------------- #
+def test_same_agent_name_different_projects_are_distinct_users(fakes):
+    """The heart of ONBOARD-3a: two enrollments with the SAME agent_name for
+    DIFFERENT projects provision TWO DISTINCT Cognito users. Neither redeem resets
+    the other's password, and each sub is a member of ONLY its own project (no
+    cross-tenant membership escalation)."""
+    table, cog = fakes
+    app = _app()
+    c = app.test_client()
+    slug_a = f"proj-{uuid.uuid4().hex[:8]}"
+    slug_b = f"proj-{uuid.uuid4().hex[:8]}"
+    _mk_project(c, slug_a)
+    _mk_project(c, slug_b)
+    tok_a = "tok-" + uuid.uuid4().hex
+    tok_b = "tok-" + uuid.uuid4().hex
+    table.seed(tok_a, project_slug=slug_a, role="writer", agent_name="dup")
+    table.seed(tok_b, project_slug=slug_b, role="writer", agent_name="dup")
+
+    ra = c.post("/api/v1/agent-enrollments/redeem", json={"token": tok_a})
+    rb = c.post("/api/v1/agent-enrollments/redeem", json={"token": tok_b})
+    assert ra.status_code == 201, ra.get_json()
+    assert rb.status_code == 201, rb.get_json()
+    ua, ub = ra.get_json()["username"], rb.get_json()["username"]
+
+    # DISTINCT usernames despite identical agent_name -> two separate users, each
+    # created once, each password set once (NEITHER reset via the other).
+    assert ua != ub
+    assert cog.create_calls == 2
+    assert len(cog.users) == 2
+    assert cog.setpw_calls == 2
+    assert cog.users[ua]["password"] == ra.get_json()["password"]
+    assert cog.users[ub]["password"] == rb.get_json()["password"]
+
+    # Each sub is a member of ONLY its own project — no cross-membership.
+    sub_a, sub_b = cog.users[ua]["sub"], cog.users[ub]["sub"]
+    with app.app_context():
+        assert app.storage.get_membership(slug_a, sub_a) is not None
+        assert app.storage.get_membership(slug_b, sub_a) is None
+        assert app.storage.get_membership(slug_b, sub_b) is not None
+        assert app.storage.get_membership(slug_a, sub_b) is None
+
+
+def test_reredeem_same_project_agent_targets_same_username(fakes):
+    """Re-redeeming the SAME (project, agent_name) targets the SAME Cognito user —
+    a legitimate password rotation, not a new identity."""
+    table, cog = fakes
+    app = _app()
+    c = app.test_client()
+    slug = f"proj-{uuid.uuid4().hex[:8]}"
+    _mk_project(c, slug)
+    tok1 = "tok-" + uuid.uuid4().hex
+    tok2 = "tok-" + uuid.uuid4().hex
+    table.seed(tok1, project_slug=slug, agent_name="rot")
+    table.seed(tok2, project_slug=slug, agent_name="rot")
+
+    r1 = c.post("/api/v1/agent-enrollments/redeem", json={"token": tok1})
+    r2 = c.post("/api/v1/agent-enrollments/redeem", json={"token": tok2})
+    assert r1.status_code == 201, r1.get_json()
+    assert r2.status_code == 201, r2.get_json()
+    assert r1.get_json()["username"] == r2.get_json()["username"]  # SAME user
+    assert len(cog.users) == 1
 
 
 # --------------------------------------------------------------------------- #
