@@ -6,7 +6,7 @@ from flask import current_app
 from flask.views import MethodView
 from flask_smorest import Blueprint
 
-from ..helpers import require_api_key
+from ..helpers import require_project_perm
 from ..schemas import (
     DecisionIn,
     DecisionOut,
@@ -29,14 +29,14 @@ class EventsCollection(MethodView):
     @blp.response(200, EventOut(many=True))
     def get(self, args, slug):
         """Read the event stream (newest first). Filter by type/agent/task."""
-        require_api_key()
+        require_project_perm(slug, "read")
         return current_app.storage.list_events(slug, args)
 
     @blp.arguments(EventIn)
     @blp.response(201, EventOut)
     def post(self, data, slug):
         """Append an event (e.g. a free-form note or a chain-step record)."""
-        require_api_key()
+        require_project_perm(slug, "write")
         return current_app.storage.create_event(slug, data)
 
 
@@ -50,7 +50,7 @@ class ProjectNotes(MethodView):
         ``scope`` selects ``task``, ``epic``, or ``all`` (default). Filter with
         ``author``, ``task`` (key/public_id), ``epic`` (key), ``since`` (ISO
         time); paginate with ``limit``/``offset``."""
-        require_api_key()
+        require_project_perm(slug, "read")
         return current_app.storage.list_project_notes(slug, args)
 
 
@@ -59,12 +59,12 @@ class DecisionsCollection(MethodView):
     @blp.response(200, DecisionOut(many=True))
     def get(self, slug):
         """List decision records (newest first)."""
-        require_api_key()
+        require_project_perm(slug, "read")
         return current_app.storage.list_decisions(slug)
 
     @blp.arguments(DecisionIn)
     @blp.response(201, DecisionOut)
     def post(self, data, slug):
         """Record an ADR-style decision."""
-        require_api_key()
+        require_project_perm(slug, "write")
         return current_app.storage.create_decision(slug, data)

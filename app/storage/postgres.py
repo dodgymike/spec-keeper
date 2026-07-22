@@ -237,7 +237,8 @@ class PostgresBackend:
     def get_project(self, slug: str) -> ProjectDTO:
         return _project_dto(self._project(slug))
 
-    def create_project(self, data: dict) -> ProjectDTO:
+    def create_project(self, data: dict, *, creator_sub: str | None = None,
+                       creator_name: str | None = None) -> ProjectDTO:
         existing = db.session.execute(
             sa.select(Project).where(Project.slug == data["slug"])
         ).scalar_one_or_none()
@@ -246,6 +247,15 @@ class PostgresBackend:
         project = Project(**data)
         db.session.add(project)
         db.session.flush()
+        # Creator-auto-admin (ISO-4): stamp the verified creator as an ``admin``
+        # member in the SAME transaction as the project row — a project must never
+        # exist without an admin member (that is a lockout). Skipped when there is
+        # no authenticated identity (local/auth-off, ``creator_sub`` is None).
+        if creator_sub:
+            db.session.add(ProjectMember(
+                project_id=project.id, principal_sub=creator_sub,
+                principal_name=creator_name, role="admin",
+            ))
         dto = _project_dto(project)
         db.session.commit()
         return dto

@@ -7,7 +7,7 @@ from flask import current_app
 from flask.views import MethodView
 from flask_smorest import Blueprint, abort
 
-from ..helpers import require_api_key
+from ..helpers import require_project_perm
 from ..schemas import (
     ChainRunIn,
     ChainRunOut,
@@ -29,7 +29,7 @@ class ChainRunsCollection(MethodView):
     @blp.response(200, ChainRunOut(many=True))
     def get(self, args, slug, ident):
         """List a task's chain runs (with their steps), newest first."""
-        require_api_key()
+        require_project_perm(slug, "read")
         return current_app.storage.list_chain_runs(
             slug, ident, limit=args["limit"], offset=args["offset"])
 
@@ -37,7 +37,7 @@ class ChainRunsCollection(MethodView):
     @blp.response(201, ChainRunOut)
     def post(self, data, slug, ident):
         """Start a new chain run for a task."""
-        require_api_key()
+        require_project_perm(slug, "write")
         return current_app.storage.create_chain_run(slug, ident, data.get("started_by"))
 
 
@@ -47,7 +47,7 @@ class ProjectChainRuns(MethodView):
     @blp.response(200, ChainRunOut(many=True))
     def get(self, args, slug):
         """List every chain run in the project (with steps), newest first."""
-        require_api_key()
+        require_project_perm(slug, "read")
         return current_app.storage.list_chain_runs(
             slug, limit=args["limit"], offset=args["offset"])
 
@@ -57,14 +57,14 @@ class ChainRunItem(MethodView):
     @blp.response(200, ChainRunOut)
     def get(self, slug, run_pubid):
         """Get a chain run (and its steps) by public_id."""
-        require_api_key()
+        require_project_perm(slug, "read")
         return current_app.storage.get_chain_run(slug, run_pubid)
 
     @blp.arguments(ChainRunPatch)
     @blp.response(200, ChainRunOut)
     def patch(self, data, slug, run_pubid):
         """Update a run's status; terminal statuses stamp finished_at."""
-        require_api_key()
+        require_project_perm(slug, "write")
         return current_app.storage.update_chain_run(slug, run_pubid, data.get("status"))
 
 
@@ -74,7 +74,7 @@ class ChainRunStep(MethodView):
     @blp.response(200, ChainStepOut)
     def put(self, data, slug, run_pubid, step_name):
         """Create or update a step within a chain run (upsert by step_name)."""
-        require_api_key()
+        require_project_perm(slug, "write")
         if data["status"] == "skipped" and not data.get("skip_justification"):
             abort(422, message="A skipped step requires skip_justification.")
         return current_app.storage.upsert_chain_step(slug, run_pubid, step_name, data)

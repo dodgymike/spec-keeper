@@ -45,7 +45,8 @@ class StorageBackend(Protocol):
     # --- projects -------------------------------------------------------
     def list_projects(self) -> list[ProjectDTO]: ...
     def get_project(self, slug: str) -> ProjectDTO: ...                       # NotFound
-    def create_project(self, data: dict) -> ProjectDTO: ...                   # Conflict
+    def create_project(self, data: dict, *, creator_sub: str | None = None,
+                       creator_name: str | None = None) -> ProjectDTO: ...     # Conflict; creator->admin member (atomic)
     def update_project(self, slug: str, patch: dict) -> ProjectDTO: ...       # NotFound
     def delete_project(self, slug: str) -> None: ...                          # NotFound; cascade
 

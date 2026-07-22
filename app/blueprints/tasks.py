@@ -14,7 +14,7 @@ from flask_smorest import Blueprint, abort
 from ..helpers import (
     etag_headers,
     expected_version_from_request,
-    require_api_key,
+    require_project_perm,
 )
 from ..idempotency import idempotency_key_from_request
 from ..schemas import (
@@ -45,14 +45,14 @@ class TasksCollection(MethodView):
     @blp.response(200, TaskOut(many=True))
     def get(self, args, slug):
         """List/filter tasks. Filter by ``owner`` to see one agent's specs."""
-        require_api_key()
+        require_project_perm(slug, "read")
         return current_app.storage.list_tasks(slug, args)
 
     @blp.arguments(TaskIn)
     @blp.response(201, TaskOut)
     def post(self, data, slug):
         """Create a task."""
-        require_api_key()
+        require_project_perm(slug, "write")
         return current_app.storage.create_task(slug, data)
 
 
@@ -66,7 +66,7 @@ class ClaimNext(MethodView):
 
         Two agents calling at the same time never receive the same task.
         Returns 204 when nothing is claimable."""
-        require_api_key()
+        require_project_perm(slug, "write")
         result = current_app.storage.claim_next(
             slug,
             agent=data["agent"],
@@ -90,7 +90,7 @@ class TaskItem(MethodView):
     @blp.response(200, TaskOut)
     def get(self, slug, ident):
         """Get a task by key or public_id. Returns an ETag for optimistic locking."""
-        require_api_key()
+        require_project_perm(slug, "read")
         task = current_app.storage.get_task(slug, ident)
         return task, 200, etag_headers(task)
 
@@ -98,7 +98,7 @@ class TaskItem(MethodView):
     @blp.response(200, TaskOut)
     def patch(self, data, slug, ident):
         """Update task fields. Honours ``If-Match`` (412 on version conflict)."""
-        require_api_key()
+        require_project_perm(slug, "write")
         task = current_app.storage.update_task(
             slug, ident, data, expected_version_from_request()
         )
@@ -107,7 +107,7 @@ class TaskItem(MethodView):
     @blp.response(204)
     def delete(self, slug, ident):
         """Delete a task."""
-        require_api_key()
+        require_project_perm(slug, "write")
         current_app.storage.delete_task(slug, ident)
         return ""
 
@@ -120,7 +120,7 @@ class TaskComplete(MethodView):
         """Complete a task: flip to done, close its lease, record commit/proof.
 
         This is the spec-keeper 'flip the checkbox to [x]' operation."""
-        require_api_key()
+        require_project_perm(slug, "write")
         task = current_app.storage.complete_task(
             slug, ident, data, expected_version_from_request()
         )
@@ -133,7 +133,7 @@ class TaskRelease(MethodView):
     @blp.response(200, TaskOut)
     def post(self, data, slug, ident):
         """Release a claimed task without completing it (back to todo)."""
-        require_api_key()
+        require_project_perm(slug, "write")
         task = current_app.storage.release_task(slug, ident, data["reset_to"])
         return task, 200, etag_headers(task)
 
@@ -144,7 +144,7 @@ class TaskStatusUpdate(MethodView):
     @blp.response(200, TaskOut)
     def post(self, data, slug, ident):
         """Set an explicit status (blocked/deferred/superseded/...) with a note."""
-        require_api_key()
+        require_project_perm(slug, "write")
         task = current_app.storage.set_status(
             slug, ident, data["status"], data.get("note"), "note" in data,
             expected_version_from_request(),
@@ -158,7 +158,7 @@ class TaskCommits(MethodView):
     @blp.response(201, TaskOut)
     def post(self, data, slug, ident):
         """Attach a commit reference (and optional test summary) to a task."""
-        require_api_key()
+        require_project_perm(slug, "write")
         return current_app.storage.add_commit(slug, ident, data)
 
 
@@ -167,14 +167,14 @@ class TaskNotes(MethodView):
     @blp.response(200, NoteOut(many=True))
     def get(self, slug, ident):
         """List a task's notes, oldest first."""
-        require_api_key()
+        require_project_perm(slug, "read")
         return current_app.storage.list_task_notes(slug, ident)
 
     @blp.arguments(NoteIn)
     @blp.response(201, NoteOut)
     def post(self, data, slug, ident):
         """Add a timestamped note (comment) to a task."""
-        require_api_key()
+        require_project_perm(slug, "write")
         return current_app.storage.append_task_note(slug, ident, data)
 
 
@@ -184,7 +184,7 @@ class TaskRelations(MethodView):
     @blp.response(201, MessageOut)
     def post(self, data, slug, ident):
         """Add a blocks/supersedes/relates/follow_up edge to another task."""
-        require_api_key()
+        require_project_perm(slug, "write")
         # Resolve both ends (404 if absent) and reject self-relations (422)
         # before mutating — mirrors the original blueprint's ordering.
         src = current_app.storage.get_task(slug, ident)

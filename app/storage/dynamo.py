@@ -264,7 +264,8 @@ class DynamoBackend:
     def get_project(self, slug: str) -> ProjectDTO:
         return self._project_dto(self._project_item(slug))
 
-    def create_project(self, data: dict) -> ProjectDTO:
+    def create_project(self, data: dict, *, creator_sub: str | None = None,
+                       creator_name: str | None = None) -> ProjectDTO:
         slug = data["slug"]
         now = _now_iso()
         item = {
@@ -275,12 +276,36 @@ class DynamoBackend:
             "created_at": now, "updated_at": now,
             "GSI5PK": K.gsi5_pk(), "GSI5SK": K.gsi5_sk(slug),
         }
+        if not creator_sub:
+            # No authenticated identity (local/auth-off): unchanged single-put
+            # path — byte-for-byte identical to pre-ISO-4 behaviour.
+            try:
+                self._put(item, condition=Attr("PK").not_exists())
+            except ClientError as exc:
+                if _is_conditional(exc):
+                    raise Conflict(f"Project '{slug}' already exists.") from exc
+                raise BackendUnavailable(str(exc)) from exc  # pragma: no cover
+            return self._project_dto(item)
+
+        # Creator-auto-admin (ISO-4): write the project row AND the creator's
+        # ``admin`` membership atomically (TransactWriteItems) — a project must
+        # never exist without an admin member (that is a lockout). The project
+        # put keeps the attribute_not_exists(PK) guard, so a duplicate slug fails
+        # the whole transaction -> Conflict, exactly like the single-put path.
+        member = {
+            "PK": K.pk(slug), "SK": K.member_sk(creator_sub),
+            "type": "member", "project_slug": slug,
+            "principal_sub": creator_sub, "principal_name": creator_name,
+            "role": "admin", "created_at": now,
+            "GSI6PK": K.gsi6_member_pk(creator_sub), "GSI6SK": K.gsi6_sk(slug),
+        }
         try:
-            self._put(item, condition=Attr("PK").not_exists())
-        except ClientError as exc:
-            if _is_conditional(exc):
-                raise Conflict(f"Project '{slug}' already exists.") from exc
-            raise BackendUnavailable(str(exc)) from exc  # pragma: no cover
+            self._transact([
+                (item, "attribute_not_exists(PK)", None, None),
+                (member, None, None, None),
+            ])
+        except Conflict as exc:
+            raise Conflict(f"Project '{slug}' already exists.") from exc
         return self._project_dto(item)
 
     def update_project(self, slug: str, patch: dict) -> ProjectDTO:

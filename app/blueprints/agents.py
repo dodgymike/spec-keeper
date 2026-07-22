@@ -5,7 +5,7 @@ from flask import current_app
 from flask.views import MethodView
 from flask_smorest import Blueprint
 
-from ..helpers import require_api_key
+from ..helpers import require_project_perm
 from ..schemas import AgentIn, AgentOut
 
 blp = Blueprint(
@@ -19,12 +19,12 @@ class AgentsCollection(MethodView):
     @blp.response(200, AgentOut(many=True))
     def get(self, slug):
         """List a project's registered agents."""
-        require_api_key()
+        require_project_perm(slug, "read")
         return current_app.storage.list_agents(slug)
 
     @blp.arguments(AgentIn)
     @blp.response(201, AgentOut)
     def post(self, data, slug):
         """Register an agent in this project (idempotent upsert by slug)."""
-        require_api_key()
+        require_project_perm(slug, "admin")
         return current_app.storage.upsert_agent(slug, data)

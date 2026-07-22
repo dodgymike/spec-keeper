@@ -10,7 +10,7 @@ from flask import Response, current_app, request
 from flask.views import MethodView
 from flask_smorest import Blueprint
 
-from ..helpers import require_api_key
+from ..helpers import require_project_perm
 from ..schemas import MessageOut
 from ..specmd import normalize, parse_spec
 
@@ -26,7 +26,7 @@ class ImportSpec(MethodView):
     def post(self, slug):
         """Import a SPEC.md (raw ``text/markdown`` body) into the project.
         Idempotent: re-importing the same file makes no duplicate tasks."""
-        require_api_key()
+        require_project_perm(slug, "write")
         parsed = parse_spec(request.get_data(as_text=True))
         counts = current_app.storage.import_spec(slug, parsed)
         return {"message": (
@@ -41,7 +41,7 @@ class ImportSpec(MethodView):
 class ExportSpec(MethodView):
     def get(self, slug):
         """Render the project's backlog back to a SPEC.md (``text/markdown``)."""
-        require_api_key()
+        require_project_perm(slug, "read")
         return Response(current_app.storage.render_spec_text(slug),
                         mimetype="text/markdown")
 
@@ -52,7 +52,7 @@ class ExportDiff(MethodView):
     def post(self, slug):
         """Dry-run: compare a posted SPEC.md against what export would produce.
         Reports tasks that differ, so adoption is safe."""
-        require_api_key()
+        require_project_perm(slug, "write")
         posted = normalize(parse_spec(request.get_data(as_text=True)))
         current = normalize(parse_spec(current_app.storage.render_spec_text(slug)))
 

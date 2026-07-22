@@ -39,6 +39,7 @@ from flask_smorest import abort
 
 from .extensions import db
 from .models import Epic, Project, Task
+from .storage.errors import NotFound as _StorageNotFound
 
 #: Blueprints whose *mutations* are administrative (project/agent management).
 _ADMIN_BLUEPRINTS = frozenset({"projects", "agents"})
@@ -47,6 +48,14 @@ _ADMIN_BLUEPRINTS = frozenset({"projects", "agents"})
 _PERM_READ = "read"
 _PERM_WRITE = "write"
 _PERM_ADMIN = "admin"
+
+#: Membership role -> granted permission set (ISO-4). Mirrors the global group
+#: model so a project role grants the same permission tokens require_api_key uses.
+_ROLE_PERMISSIONS = {
+    "reader": frozenset({_PERM_READ}),
+    "writer": frozenset({_PERM_READ, _PERM_WRITE}),
+    "admin": frozenset({_PERM_READ, _PERM_WRITE, _PERM_ADMIN}),
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -309,6 +318,73 @@ def current_identity() -> dict | None:
     if not claims:
         return None
     return {"sub": claims.get("sub"), "username": claims.get("username")}
+
+
+def caller_is_global_admin() -> bool:
+    """True when the VERIFIED caller carries the global admin (spec-admins) group.
+
+    Reads ONLY the verified access token (``g.cognito_claims``) — never a request
+    body/header. False when Cognito auth is off (no verified claims) or the caller
+    is not a platform super-admin. Used by the ISO-4 per-project enforcement to
+    let a platform admin bypass project membership."""
+    claims = getattr(g, "cognito_claims", None)
+    if not claims:
+        return False
+    admin_group = current_app.config.get("AUTH_GROUP_ADMIN", "spec-admins")
+    return admin_group in _token_groups(claims, current_app.config)
+
+
+def require_project_perm(slug: str, perm: str) -> None:
+    """Global capability gate + per-project authorization (ISO-4).
+
+    ALWAYS applies the existing global group gate first — this call SUBSUMES
+    ``require_api_key(required=perm)``, so the platform-wide Cognito-group check
+    (spec-readers/writers/admins) still applies exactly as today (401 on a
+    missing/invalid token, 403 when the token's groups do not grant ``perm``).
+
+    THEN, only when ``PROJECT_ISOLATION_ENFORCED`` is on, additionally require the
+    VERIFIED caller to be a member of ``slug`` whose role grants ``perm``
+    (reader=>read, writer=>read+write, admin=>read+write+admin). A platform
+    super-admin (global ``spec-admins``) bypasses membership. A denial hides
+    project existence from non-members: a read (``perm="read"``) 404s — routed
+    through the SAME storage ``NotFound`` path so it is byte-identical to a
+    genuinely-missing project — and a write/admin denial 403s.
+
+    Fails CLOSED: when enforcement is on and the caller's identity is
+    absent/unverifiable (no verified ``sub``), access is denied (404/403 per
+    ``perm``), never allowed — mirroring the self-guard in
+    ``app/blueprints/admin.py``. When enforcement is OFF the membership branch is
+    skipped entirely, so behaviour == ``require_api_key(required=perm)`` == today.
+
+    The caller identity is read ONLY from the verified token, NEVER from a request
+    body/header/param."""
+    require_api_key(required=perm)
+
+    if not current_app.config.get("PROJECT_ISOLATION_ENFORCED"):
+        return  # dormant: identical to require_api_key(required=perm)
+
+    # Platform super-admin bypasses per-project membership entirely.
+    if caller_is_global_admin():
+        return
+
+    sub = (current_identity() or {}).get("sub")
+    if not sub:
+        _deny_project_access(slug, perm)  # fail closed: no verified identity
+
+    membership = current_app.storage.get_membership(slug, sub)
+    if membership is None or perm not in _ROLE_PERMISSIONS.get(membership.role, frozenset()):
+        _deny_project_access(slug, perm)
+
+
+def _deny_project_access(slug: str, perm: str) -> None:
+    """Deny a per-project access decision (ISO-4), hiding existence from non-members.
+
+    Reads -> 404 raised via the storage ``NotFound`` path so the response is
+    byte-identical to a genuinely-missing project (existence is not leaked);
+    writes/admin -> 403."""
+    if perm == _PERM_READ:
+        raise _StorageNotFound(f"Project '{slug}' not found.")
+    abort(403, message="You are not a member of this project.")
 
 
 def get_project_or_404(slug: str) -> Project:

@@ -5,7 +5,7 @@ from flask import current_app, jsonify, request
 from flask.views import MethodView
 from flask_smorest import Blueprint
 
-from ..helpers import require_api_key
+from ..helpers import require_project_perm
 from ..idempotency import idempotency_key_from_request
 from ..schemas import CounterOut, ReservationIn, ReservationOut
 
@@ -20,7 +20,7 @@ class ReservationsCollection(MethodView):
     @blp.response(200, ReservationOut(many=True))
     def get(self, slug):
         """List reservations (audit trail), optionally by ``?namespace=``."""
-        require_api_key()
+        require_project_perm(slug, "read")
         return current_app.storage.list_reservations(slug, request.args.get("namespace"))
 
     @blp.arguments(ReservationIn)
@@ -30,7 +30,7 @@ class ReservationsCollection(MethodView):
 
         Concurrent callers on the same namespace get distinct, increasing
         values — no two agents can ever be handed the same number."""
-        require_api_key()
+        require_project_perm(slug, "write")
         result = current_app.storage.reserve_number(
             slug,
             data["namespace"],
@@ -50,5 +50,5 @@ class CountersCollection(MethodView):
     @blp.response(200, CounterOut(many=True))
     def get(self, slug):
         """Current counter values per namespace."""
-        require_api_key()
+        require_project_perm(slug, "read")
         return current_app.storage.list_counters(slug)

@@ -32,6 +32,17 @@ class Config:
     # Default lease TTL (seconds) for a claimed task.
     LEASE_DEFAULT_TTL = int(os.environ.get("LEASE_DEFAULT_TTL", "1800"))
 
+    # --- Per-project isolation (ISO-4) ---------------------------------
+    # When True, project-scoped routes additionally require the VERIFIED caller
+    # to be a member of the project whose role grants the route's permission
+    # (reader=>read, writer=>read+write, admin=>read+write+admin); a global
+    # spec-admin bypasses. A non-member read 404s (existence hidden), a non-member
+    # write/admin 403s. Default False => DORMANT: behaviour is byte-for-byte
+    # identical to the global-group-only model. Flip ON only after every project
+    # has its creator-admin + intended members backfilled (creator-auto-admin at
+    # create_project runs regardless of this flag, so it is safe to flip later).
+    PROJECT_ISOLATION_ENFORCED = _bool("PROJECT_ISOLATION_ENFORCED", False)
+
     # --- Invites (HA-2) -------------------------------------------------
     # Dedicated DynamoDB invites table backing invite-only human signup (NOT the
     # app single-table store). The admin endpoints (POST/GET /api/v1/admin/invites)
@@ -194,6 +205,9 @@ class TestConfig(Config):
     # Auth OFF in tests unless a test opts in via its own config subclass —
     # pinned here so a stray COGNITO_*/CORS_* env var can't flip the baseline.
     API_KEYS = []
+    # Per-project isolation OFF by default so a stray PROJECT_ISOLATION_ENFORCED
+    # env var can't flip the baseline; the ISO-4 tests set it on a subclass.
+    PROJECT_ISOLATION_ENFORCED = False
     COGNITO_ISSUER = None
     COGNITO_JWKS_URI = None
     COGNITO_AUDIENCE = []
