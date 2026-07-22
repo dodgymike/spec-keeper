@@ -71,10 +71,17 @@ export function JoinPage() {
       try {
         await cognito.signUp(trimmedEmail, code);
       } catch (err) {
-        // Resuming an interrupted join: the user already exists, proceed to the OTP chain.
-        if (!(err instanceof cognito.CognitoError && err.cognitoType === "UsernameExistsException")) {
-          throw err;
-        }
+        // Resuming an interrupted join: if the user already exists, OR the invite
+        // was already burned by an earlier attempt for this same signup (e.g. a
+        // double-submit or a retry after the OTP/passkey step), fall through to
+        // the email-OTP chain instead of dead-ending on "invite invalid".
+        // startCustomAuth below surfaces a real error if the account genuinely
+        // does not exist, so a truly bad invite is not silently accepted.
+        const resumable =
+          err instanceof cognito.CognitoError &&
+          (err.cognitoType === "UsernameExistsException" ||
+            /invite/i.test(err.message ?? ""));
+        if (!resumable) throw err;
       }
       const result = await cognito.startCustomAuth(trimmedEmail, { invite_code: code });
       if (result.done && result.authResult) {
