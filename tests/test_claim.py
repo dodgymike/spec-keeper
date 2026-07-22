@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
 from app.extensions import db
 from app.models import Project, Task, TaskStatus
 from app.services import claim_next_task
@@ -33,8 +35,12 @@ def test_priority_ordering(client, project):
     assert resp.get_json()["key"] == "HI"
 
 
+@pytest.mark.postgres_only
 def test_concurrent_claims_never_collide(app, client, project):
-    """N threads claim from N tasks → N distinct tasks, zero double-claims."""
+    """N threads claim from N tasks → N distinct tasks, zero double-claims.
+
+    Postgres-specific: drives ``claim_next_task``/``db.session`` directly. The
+    cross-backend equivalent (via the HTTP API) is in ``test_parity.py``."""
     n = 8
     for i in range(n):
         client.post(BASE, json={"title": f"t{i}", "key": f"C-{i}", "position": i})

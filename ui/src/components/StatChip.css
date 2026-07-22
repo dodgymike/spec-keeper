@@ -1,0 +1,85 @@
+.stat-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+}
+
+.stat-chip__value {
+  font-size: var(--font-size-md);
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.stat-chip__label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+/*
+ * Status-coloured variant, mirrors Badge's [data-status] palette: the text
+ * colour is only guaranteed to hit the 4.5:1 contrast floor against its own
+ * paired tinted background (see Badge.css), not against the generic
+ * --color-bg-sunken chip background. Note stat-chip__value is 16px/700 -
+ * bold weight does not exempt it from the 4.5:1 normal-text floor (it would
+ * only relax to 3:1 at >=18.66px/700 or >=24px regular), so keep these
+ * text/background pairs in lockstep with Badge's tokens.
+ */
+.stat-chip--status[data-status="todo"] .stat-chip__value {
+  color: var(--color-status-todo);
+}
+
+.stat-chip--status[data-status="in_progress"] .stat-chip__value {
+  color: var(--color-status-in_progress);
+}
+
+.stat-chip--status[data-status="blocked"] .stat-chip__value {
+  color: var(--color-status-blocked);
+}
+
+.stat-chip--status[data-status="deferred"] .stat-chip__value {
+  color: var(--color-status-deferred);
+}
+
+.stat-chip--status[data-status="done"] .stat-chip__value {
+  color: var(--color-status-done);
+}
+
+.stat-chip--status[data-status="superseded"] .stat-chip__value {
+  color: var(--color-status-superseded);
+}
+
+.stat-chip--status[data-status="cancelled"] .stat-chip__value {
+  color: var(--color-status-cancelled);
+}
+
+.stat-chip--status[data-status="todo"] {
+  background: var(--color-status-todo-bg);
+}
+
+.stat-chip--status[data-status="in_progress"] {
+  background: var(--color-status-in_progress-bg);
+}
+
+.stat-chip--status[data-status="blocked"] {
+  background: var(--color-status-blocked-bg);
+}
+
+.stat-chip--status[data-status="deferred"] {
+  background: var(--color-status-deferred-bg);
+}
+
+.stat-chip--status[data-status="done"] {
+  background: var(--color-status-done-bg);
+}
+
+.stat-chip--status[data-status="superseded"] {
+  background: var(--color-status-superseded-bg);
+}
+
+.stat-chip--status[data-status="cancelled"] {
+  background: var(--color-status-cancelled-bg);
+}

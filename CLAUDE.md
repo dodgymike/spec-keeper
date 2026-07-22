@@ -21,15 +21,53 @@ Agent roster (`.claude/agents/`):
 - **feature-runner** — runs ONE task end-to-end through the mandated chain, code-only and
   parallel-safe. Use this INSTEAD OF a generic agent for any change touching app code.
 
+Extended roster (adapted from the sibling bird-viz project for the AWS-deploy + UI + serverless
+work — see the `AGENTS`, `SLS`, `AUTH`, `INFRA`, `UI` epics):
+- **architecture-reviewer** — reviews component boundaries, the DynamoDB/Postgres data model, and the
+  concurrency invariants. Read-only.
+- **data-reviewer** — reviews the pluggable storage layer (Postgres + DynamoDB adapters), schema/
+  migration discipline, key design, and adapter parity. Read-only.
+- **performance-reviewer** — reviews latency hot paths, cold starts, query efficiency, and per-request
+  cost. Read-only.
+- **reliability-reviewer** — reviews failure modes, idempotency, multi-item atomicity, and the
+  invariants under failure. Read-only.
+- **ui-reviewer** — reviews the React/Vite dashboard's UI/UX, a11y, CSP-cleanliness, and copy.
+  Read-only.
+- **aws-infra** — the ONLY role that mutates AWS infra (Terraform durable, CLI transient); serverless
+  stack (Lambda, DynamoDB, API Gateway, Cognito, CloudFront). Cost- and teardown-aware.
+- **aws-cost-optimizer** — advisory: hunts AWS cost (Lambda/DynamoDB/logs/orphans). Read-only.
+- **aws-teardown-enforcer** — owns the preview-env reaper; guarantees transient infra is torn down.
+- **deploy-coordinator** — the ONLY role that deploys; runs the single coordinated deploy wave +
+  mandatory unauthenticated-route smoke check.
+- **deep-diver** — investigates a hard "why is X broken / how to build Y" question → a `_DEEPDIVE.md`.
+- **report-writer** — maintains the self-contained HTML report (`report/report.html`), one tab per
+  completed task, assembled from the task's Spec Server note journal.
+
+Skill (`.claude/skills/`): **presentation-slides** — 16:9 matplotlib slides explaining the system.
+
 For ANY code change the chain **spec-keeper → implementer → reviewer → security** is
 MANDATORY; skipping a step requires an explicit one-line justification in `AGENT_LOG.md`.
+For **UI** changes add **ui-reviewer**; for **AWS infra** changes route through **aws-infra** (mutate)
+and **deploy-coordinator** (deploy) — never `terraform apply` from a generic agent.
 
 ## Source of truth
 
-- **Pre-migration (now):** `SPEC.md` at the repo root is the single source of truth.
-- **Post-migration (the `DOGFOOD` epic):** the running Spec Server is the source of truth.
-  The backlog lives in the database under project slug `spec-server`; `SPEC.md` is regenerated
-  from the server as a readable mirror. spec-keeper talks to the API instead of editing the file.
+**The source of truth is now the DEPLOYED cloud Spec Server** (this project dogfoods its own
+production deployment):
+
+- **API (source of truth):** `https://api.spec.elasticninja.com` — Cloudflare-fronted API Gateway →
+  Cognito-JWT-validated Lambda → DynamoDB (`eu-west-1`, account `985722751424`). Backlog under
+  project slug `spec-server`.
+- **Dashboard:** `https://spec.elasticninja.com` (React SPA; humans sign in with Cognito passkeys /
+  email-OTP via invite).
+- **Auth (REQUIRED against the cloud):** every write needs a Cognito bearer token — agents mint one
+  via `scripts/agent_token.py` (Cognito `USER_PASSWORD_AUTH`, creds in the `spec-server-dev/
+  agent-credentials` Secrets Manager secret) and send `Authorization: Bearer <jwt>`; authorization is
+  by `cognito:groups` (`spec-admins`/`spec-writers`/`spec-readers`). Locally (the `docker compose`
+  dogfood on `:8080`, now SECONDARY) auth is off.
+- Older phases: `SPEC.md` was the original flat-file source; then the local `docker compose` Spec
+  Server (Postgres). Both are now mirrors/dev-only — the cloud DynamoDB instance is authoritative.
+  `SPEC.md` is regenerated from the server as a readable mirror; spec-keeper talks to the API.
 
 The whole point of this server is to replace fragile flat-file task management. The two
 hard problems it solves — and which every agent must rely on rather than work around:
@@ -116,20 +154,72 @@ Layout:
 
 ## Concurrency invariants (do not regress these)
 
-- **Optimistic locking on tasks.** `tasks.version` is the ETag. Mutating a task can send
-  `If-Match: "v<n>"`; a mismatch returns **412**. Every task mutation increments `version`.
-- **Atomic claim.** `claim-next` uses `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`. Do not replace
-  it with a read-then-update — that reintroduces the double-claim race.
-- **Atomic reservation.** `reserve_number` uses `INSERT ... ON CONFLICT (project_id, namespace)
-  DO UPDATE SET current_value = current_value + 1 RETURNING`. A `UNIQUE(project_id, namespace,
-  value)` on `reservations` is the backstop. Do not replace with read-max-plus-one.
+Three guarantees hold on **both** backends (`STORAGE_BACKEND=postgres|dynamodb`) with identical
+observable behaviour. Each is realised by a backend-specific primitive — the Postgres reference and
+its DynamoDB equivalent are listed side by side. Never downgrade either to a read-then-write.
+See `STORAGE_ABSTRACTION_DEEPDIVE.md` §4 for the full mapping and the "Backend parity (hard rule)"
+section below for why divergence is a bug, not a "backend difference".
+
+- **Optimistic locking on tasks.** `tasks.version` is the ETag; `If-Match: "v<n>"` on a mutation
+  returns **412** on mismatch, and every task mutation increments `version`.
+  - *Postgres:* the `version` column compared in the `UPDATE ... WHERE version = :expected`.
+  - *DynamoDB:* a `ConditionExpression version = :expected` on the guarded `PutItem`/`UpdateItem`;
+    a `ConditionalCheckFailedException` → `VersionConflict` → 412.
+- **Atomic claim (exactly one winner).** `claim-next` hands each of N racing callers a distinct task.
+  - *Postgres:* `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`, then update.
+  - *DynamoDB:* a GSI1 candidate `Query` (status+priority) + a conditional `UpdateItem`
+    (`attribute_not_exists(owner) AND status = todo`), retrying the next candidate on
+    `ConditionalCheckFailed`. Two racers never both win.
+- **Atomic reservation (collision-proof numbering).** `reserve_number` returns a unique,
+  monotonically increasing value per `(project, namespace)`.
+  - *Postgres:* `INSERT ... ON CONFLICT (project_id, namespace) DO UPDATE SET current_value =
+    current_value + 1 RETURNING`, backstopped by `UNIQUE(project_id, namespace, value)`.
+  - *DynamoDB:* a per-item atomic `ADD current_value :1` on the counter item, backstopped by a
+    conditional `PutItem` on a `UNIQUE(namespace, value)` guard item.
+  - Do not replace either with read-max-plus-one.
+
+**Multi-item atomicity:** where Postgres relies on a single transaction to write several rows at
+once — `complete` (task + commit + lease + event), `supersedes` (relation + destination-task flip) —
+the DynamoDB adapter uses `TransactWriteItems` to keep the write all-or-nothing. Reservation's
+audit-row + counter + event likewise commit in one `TransactWriteItems`.
+
+## Backend parity (hard rule)
+
+The storage backend is **switchable** (`STORAGE_BACKEND=postgres|dynamodb`), and the two backends
+MUST always have **feature parity and identical observable behaviour**. This is non-negotiable:
+
+- Every access pattern and every guarantee above (atomic claim, collision-proof reservation,
+  optimistic locking / 412, lease semantics, idempotency, notes/relations/commits, import/export)
+  must behave the **same** on both backends — same inputs → same outputs, same status codes, same
+  error semantics. A behaviour that holds on one backend but not the other is a **bug**, not a
+  backend "difference".
+- **No feature lands on one backend only.** If you add or change anything in the storage layer,
+  implement it in BOTH adapters (Postgres reference + DynamoDB) in the same task, or the task is
+  not done.
+- The **adapter-parity test suite** (SLS-8) is the enforcement mechanism: the concurrency and
+  behaviour tests run against BOTH backends (Postgres + DynamoDB Local) and must pass on both.
+  A change that can't pass on both backends is not mergeable — fix the adapter, don't skip the test.
+- `data-reviewer` and `reliability-reviewer` explicitly check adapter parity; any divergence is at
+  least a P1 finding.
 
 ## Secrets & safety (hard rules)
 
 - Never commit real secrets. `.env` is gitignored; `.env.example` documents the knobs.
 - The optional `API_KEYS` bearer auth is for shared deployments; the default (empty) is local-only.
+- Agents authenticate as Cognito **users** (via `USER_PASSWORD_AUTH`, no client secret) — the old
+  M2M client_credentials clients were retired. Their usernames/passwords live in the
+  `agent-credentials` AWS Secrets Manager secret (`{"pool_id", "client_id", "region", "users":
+  {"<name>": {"password", "groups"}}}`), **never** in the repo, `*.tfvars`, terraform outputs, or
+  git.
+- **The server holds no secret at rest for JWT auth** — it validates tokens against Cognito's public
+  JWKS (`COGNITO_JWKS_URI`) and checks the token's `cognito:groups` claim against `AUTH_GROUP_ADMIN`/
+  `WRITE`/`READ`. Only agents hold credentials, to authenticate and mint tokens via
+  `scripts/agent_token.py` (which never prints/logs the password or token). See README → "Secrets &
+  tokens" and `AGENTS_API.md` → "Authenticating to the deployed server".
 - SQL must stay parameterized (SQLAlchemy core / bound params) — never string-format user input
-  into SQL. The security agent flags any raw f-string SQL with user data.
+  into SQL. The security agent flags any raw f-string SQL with user data. (The DynamoDB adapter
+  applies the same rule: values bind via `ExpressionAttributeValues`, never formatted into an
+  expression string.)
 
 ## Parallel-agent coordination
 

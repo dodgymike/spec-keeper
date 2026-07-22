@@ -22,3 +22,19 @@ backups/
 /scratch/
 *.tmp
 .DS_Store
+
+# Lambda build artifacts (INFRA-4). The zip + vendored deps are produced by
+# scripts/build_lambda.sh at deploy time and consumed by terraform
+# (var.lambda_zip_path) / `aws lambda update-function-code` — never committed.
+build/
+lambda.zip
+
+# Terraform (infra/) — never commit local state, provider plugins, or filled-in
+# configs. The *.example templates ARE committed.
+infra/terraform/.terraform/
+*.tfstate
+*.tfstate.*
+infra/terraform/backend.hcl
+infra/terraform/terraform.tfvars
+*.tfplan
+tfplan

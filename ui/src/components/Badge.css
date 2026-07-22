@@ -1,0 +1,48 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-3);
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  line-height: var(--line-height-tight);
+  background: var(--color-bg-sunken);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.badge--status[data-status="todo"] {
+  color: var(--color-status-todo);
+  background: var(--color-status-todo-bg);
+}
+
+.badge--status[data-status="in_progress"] {
+  color: var(--color-status-in_progress);
+  background: var(--color-status-in_progress-bg);
+}
+
+.badge--status[data-status="blocked"] {
+  color: var(--color-status-blocked);
+  background: var(--color-status-blocked-bg);
+}
+
+.badge--status[data-status="deferred"] {
+  color: var(--color-status-deferred);
+  background: var(--color-status-deferred-bg);
+}
+
+.badge--status[data-status="done"] {
+  color: var(--color-status-done);
+  background: var(--color-status-done-bg);
+}
+
+.badge--status[data-status="superseded"] {
+  color: var(--color-status-superseded);
+  background: var(--color-status-superseded-bg);
+}
+
+.badge--status[data-status="cancelled"] {
+  color: var(--color-status-cancelled);
+  background: var(--color-status-cancelled-bg);
+}

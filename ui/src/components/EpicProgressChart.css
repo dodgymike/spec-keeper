@@ -1,0 +1,47 @@
+.epic-progress-chart {
+  margin: 0;
+}
+
+.epic-progress-chart--empty {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.epic-progress-chart__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.epic-progress-chart__row-label,
+.epic-progress-chart__row-pct {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  fill: var(--color-text);
+}
+
+.epic-progress-chart__track {
+  fill: var(--color-bg-sunken);
+}
+
+.epic-progress-chart__segment--done {
+  fill: var(--color-status-done);
+}
+
+.epic-progress-chart__segment--in_progress {
+  fill: var(--color-status-in_progress);
+}
+
+.epic-progress-chart__segment--todo {
+  fill: var(--color-status-todo);
+}
+
+.epic-progress-chart__segment--other {
+  fill: var(--color-status-superseded);
+}
+
+.epic-progress-chart__caption {
+  margin-top: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}

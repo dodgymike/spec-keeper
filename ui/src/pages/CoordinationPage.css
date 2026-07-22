@@ -1,0 +1,191 @@
+.coordination-page__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+.coordination-page__title {
+  font-size: var(--font-size-2xl);
+  font-weight: 700;
+  margin-bottom: var(--space-1);
+}
+
+.coordination-page__subtitle {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.coordination-page__header-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-shrink: 0;
+}
+
+.coordination-page__updated {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.coordination-page__refresh-button,
+.coordination-page__retry-button {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-raised);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.coordination-page__refresh-button:hover,
+.coordination-page__retry-button:hover {
+  border-color: var(--color-accent);
+}
+
+.coordination-page__retry-button {
+  margin-top: var(--space-2);
+}
+
+.coordination-page__error {
+  color: var(--color-status-blocked);
+  border-color: var(--color-status-blocked);
+}
+
+.coordination-page__error-detail {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-family-mono);
+  margin-top: var(--space-2);
+}
+
+.coordination-page__section-title {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  margin-bottom: var(--space-3);
+}
+
+/* --- Lease board --- */
+
+.lease-board {
+  margin-bottom: var(--space-6);
+}
+
+.lease-board__group {
+  margin-bottom: var(--space-5);
+}
+
+.lease-board__group-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  font-family: var(--font-family-mono);
+  margin-bottom: var(--space-2);
+}
+
+.lease-board__group-count {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  color: var(--color-text-muted);
+  background: var(--color-bg-sunken);
+  border-radius: var(--radius-pill);
+  padding: 0 var(--space-2);
+}
+
+.lease-board__scroll,
+.counter-table__scroll {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-raised);
+}
+
+.lease-board__table,
+.counter-table__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
+.lease-board__table th,
+.lease-board__table td,
+.counter-table__table th,
+.counter-table__table td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.lease-board__table thead th,
+.counter-table__table thead th {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-weight: 600;
+}
+
+.lease-board__table tbody tr:last-child td,
+.counter-table__table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.lease-board__cell-key,
+.counter-table__cell-namespace {
+  font-family: var(--font-family-mono);
+  color: var(--color-text-muted);
+}
+
+.lease-board__cell-title {
+  white-space: normal;
+  min-width: 220px;
+}
+
+/* --- Counter table --- */
+
+.counter-table {
+  margin-bottom: var(--space-6);
+}
+
+/* --- Loading skeleton (mirrors ProjectDetailPage's skeleton pattern) --- */
+
+.coordination-page__skeleton .skeleton-line {
+  height: var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-sunken);
+  margin-bottom: var(--space-2);
+  animation: coordination-skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+.coordination-page__skeleton .skeleton-line--title {
+  width: 40%;
+  height: var(--space-5);
+}
+
+.coordination-page__skeleton .skeleton-line--body {
+  width: 80%;
+  margin-bottom: 0;
+}
+
+@keyframes coordination-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .coordination-page__skeleton .skeleton-line {
+    animation: none;
+    opacity: 0.8;
+  }
+}

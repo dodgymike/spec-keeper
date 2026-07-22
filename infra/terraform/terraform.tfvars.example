@@ -1,0 +1,22 @@
+# terraform.tfvars.example
+# Copy to terraform.tfvars (gitignored) and adjust. No secrets belong here —
+# Cognito app-client secrets live in Secrets Manager, referenced by ARN.
+
+# Region for all regional resources. Keep us-east-1: required for CloudFront
+# ACM certs and for Cost Explorer / Cost Anomaly Detection data.
+aws_region = "us-east-1"
+
+# MANDATORY. Human/team accountable for the stack -> `owner` tag.
+owner = "dodgymike"
+
+# Project slug -> `project` tag + name prefix. Default is fine.
+# project = "spec-server"
+
+# Deployment environment: dev | prod. Part of resource names.
+environment = "dev"
+
+# Keep it cheap. Alerts fire at 80% and 100% of monthly FORECAST.
+budget_monthly_usd = 20
+
+# MANDATORY. Confirm the SNS subscription email after the first apply.
+alert_email = "you@example.com"

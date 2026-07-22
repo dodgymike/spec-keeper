@@ -1,0 +1,125 @@
+.progress-page__back {
+  margin-bottom: var(--space-4);
+  font-size: var(--font-size-sm);
+}
+
+.progress-page__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+.progress-page__title {
+  font-size: var(--font-size-xl);
+  font-weight: 700;
+  margin-bottom: var(--space-1);
+}
+
+.progress-page__subtitle {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.progress-page__header-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-shrink: 0;
+}
+
+.progress-page__updated {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.progress-page__refresh-button,
+.progress-page__retry-button,
+.progress-page__activity-link {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-raised);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.progress-page__activity-link {
+  text-decoration: none;
+  display: inline-block;
+}
+
+.progress-page__refresh-button:hover,
+.progress-page__retry-button:hover,
+.progress-page__activity-link:hover {
+  border-color: var(--color-accent);
+}
+
+.progress-page__retry-button {
+  margin-top: var(--space-2);
+}
+
+.progress-page__error {
+  color: var(--color-status-blocked);
+  border-color: var(--color-status-blocked);
+}
+
+.progress-page__error-detail {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-family-mono);
+  margin-top: var(--space-2);
+}
+
+.progress-page__section {
+  margin-bottom: var(--space-6);
+}
+
+.progress-page__section-title {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  margin-bottom: var(--space-3);
+}
+
+/* --- Loading skeleton (mirrors ProjectDetailPage's pattern) --- */
+
+.progress-page__skeleton .skeleton-line {
+  height: var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-sunken);
+  margin-bottom: var(--space-2);
+  animation: progress-page-skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+.progress-page__skeleton .skeleton-line--title {
+  width: 40%;
+  height: var(--space-5);
+}
+
+.progress-page__skeleton .skeleton-line--body {
+  width: 80%;
+}
+
+.progress-page__skeleton .skeleton-line--body:last-child {
+  margin-bottom: 0;
+}
+
+@keyframes progress-page-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-page__skeleton .skeleton-line {
+    animation: none;
+    opacity: 0.8;
+  }
+}

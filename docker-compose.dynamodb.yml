@@ -1,0 +1,45 @@
+# docker-compose.dynamodb.yml — SLS-7 local emulation overlay.
+#
+# A SEPARATE overlay (the main docker-compose.yml has an unrelated local change,
+# so it is left untouched). Bring up DynamoDB Local alongside the normal stack:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dynamodb.yml up -d --build
+#
+# Then run the cross-backend suite against it (see README / conftest):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dynamodb.yml exec -T \
+#     -e TEST_DATABASE_URL=postgresql+psycopg://spec:spec@db:5432/specserver_test \
+#     -e TEST_BACKENDS=postgres,dynamodb \
+#     -e DYNAMODB_ENDPOINT_URL=http://dynamodb-local:8000 \
+#     -e AWS_ACCESS_KEY_ID=local -e AWS_SECRET_ACCESS_KEY=local -e AWS_REGION=us-east-1 \
+#     app python -m pytest -q
+#
+# DynamoDB Local runs entirely in-memory (-inMemory): no data survives a restart,
+# which is exactly what a throwaway test store wants (mirrors the throwaway
+# Postgres test DB). The conftest creates the single table + 5 GSIs (mirroring
+# infra/terraform/dynamodb.tf) and tears them down.
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:2.5.2
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    ports:
+      - "8000:8000"
+
+  app:
+    environment:
+      # Present so the app container can reach DynamoDB Local; the default
+      # STORAGE_BACKEND stays "postgres" unless a test/request overrides it.
+      DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
+      DYNAMODB_TABLE: spec-server-test
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    # Live-mount the source so the cross-backend test suite runs against the
+    # working tree without a rebuild (the base image still bakes a copy for the
+    # server process). Test-overlay convenience only.
+    volumes:
+      - ./app:/app/app
+      - ./tests:/app/tests
+    depends_on:
+      dynamodb-local:
+        condition: service_started

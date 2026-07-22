@@ -57,3 +57,341 @@ to the server's `/events` endpoint.
   the API. Backlog now **23 done / 0 todo** on the server.
 - SPEC.md is now a readable mirror; regenerate with `GET /projects/spec-server/export`.
 - Every epic from the original plan is shipped: MVP, PORT, LOG, HARDEN, chain tracking, DOGFOOD.
+
+## 2026-07-21 — AGENTS epic: integrate & adapt the bird-viz agent roster
+
+- New user goals opened 3 fronts: deploy the Spec Server as an authenticated AWS service
+  (decided: **Cognito OAuth2 client-credentials → JWT**), build a **React/Vite** project-viz UI,
+  and integrate the richer agent roster from the sibling `bird-song-visualisation` project.
+- Recreated the dogfood `spec-server` project in the running server and added **5 epics /
+  40 tasks** (AGENTS, SLS, AUTH, INFRA, UI) via spec-keeper.
+- AGENTS epic (this commit): adapted 11 agents + 1 skill from bird-viz into `.claude/`, retargeted
+  from bird/GPU to this serverless Flask→(Lambda + switchable Postgres/DynamoDB) service — notes
+  point at project `spec-server`, AWS profile `spec-server-infra`, all GPU/spot content removed,
+  concurrency framing moved to DynamoDB conditional-write / atomic-`ADD` primitives:
+  aws-infra, aws-cost-optimizer, aws-teardown-enforcer, deploy-coordinator, ui-reviewer,
+  architecture-reviewer, performance-reviewer, reliability-reviewer, data-reviewer, deep-diver,
+  report-writer, + the presentation-slides skill. Registered them in CLAUDE.md's roster.
+- Justification for streamlined chain: these are `.claude/` config/docs (no app code), so the
+  implementer/reviewer/security code-chain was authored directly by the orchestrator; task state
+  still flows through spec-keeper.
+- User mid-course correction: the DynamoDB move must be **switchable**, not a one-way port — SLS
+  epic reframed to a pluggable storage layer (Postgres reference impl + DynamoDB adapter, config-
+  selected) with an adapter-parity test suite.
+
+## 2026-07-21 — SLS-2 (+ SLS-2.1): storage abstraction extracted (code-only, uncommitted)
+
+- **Task:** SLS-2 (`spec-server`) — extract a backend-neutral `StorageBackend`
+  and make the current Postgres/SQLAlchemy logic the reference adapter behind it,
+  with ZERO behaviour change. Folded in SLS-2.1 (DTOs + backend-neutral errors).
+- **Chain:** implementer + test-engineer (run by feature-runner) → reviewer →
+  security → documentation. reviewer and security BOTH ran (no skips).
+- **Created:** `app/storage/{__init__,base,errors,dto,postgres}.py`.
+- **Modified:** `app/__init__.py` (wire `app.storage` + error handlers),
+  `app/config.py` (`STORAGE_BACKEND`), `app/helpers.py`
+  (`expected_version_from_request`, DTO-friendly `etag_headers`), `app/schemas.py`
+  (TaskOut.epic_key/tags + AgentOut.project → plain fields dumping DTOs), and all
+  eight `app/blueprints/*.py` (now call `current_app.storage.<method>()`).
+- **Deliberately UNCHANGED:** `app/services.py` (verbatim `FOR UPDATE SKIP LOCKED`
+  claim + `INSERT ... ON CONFLICT` reserve), `app/models.py`, `app/idempotency.py`,
+  `migrations/`. Concurrency invariants preserved verbatim.
+- **Idempotency:** claim-next/reserve fold lookup+store into the storage method
+  in one transaction (serialize callback from the blueprint) — single-commit
+  semantics preserved.
+- **Verify:** full suite green against dockerized Postgres `specserver_test` —
+  `42 passed` (ran via source-mounted one-off container). App imports cleanly.
+- **Review:** reviewer APPROVED after fixing P1 (error handlers now emit the
+  flask-smorest `{code,status,message}` envelope, restoring byte-identical error
+  bodies). security PASS (no P0/P1; SQL stays parameterized, auth preserved).
+- **Accepted deviation (P2, cosmetic):** the 412 body's `message` now interpolates
+  the stripped If-Match token (e.g. `'99'`) instead of the raw header (`'"v99"'`);
+  no test covers it and matching would leak the raw HTTP header into the storage
+  layer. Status code and envelope are identical.
+- **Not committed** (code-only run). FILES FOR COORDINATED COMMIT handed to the
+  orchestrator. Reserved: nothing.
+
+## AUTH-2 + AUTH-7 — Cognito JWT validation + dashboard CORS (feature-runner)
+- **Chain:** implementer + test-engineer (feature-runner inline) -> reviewer (PASS on code)
+  -> security (PASS, no P0/P1) -> documentation. Both reviews independently flagged a
+  JWKS unknown-kid refetch-per-request DoS; fixed with a 30s refetch cooldown + regression test.
+- **AUTH-2:** app-level Cognito RS256 JWT validation in `require_api_key()`
+  (`app/helpers.py`). Precedence ladder: `COGNITO_ISSUER` set -> require & validate JWT +
+  enforce scope; elif `API_KEYS` -> legacy static bearer (unchanged); else -> open (local
+  default, unchanged). JWKS fetched from `COGNITO_JWKS_URI` and cached (TTL + unknown-kid
+  refetch, cooldown-bounded). RS256 pinned (alg=none / HS256-with-RSA-key rejected); checks
+  iss, exp/nbf/iat, token_use (default "access"), audience (aud OR client_id in
+  `COGNITO_AUDIENCE`). Scope map (method + blueprint, since blueprints call
+  `require_api_key()` with no args): GET/HEAD -> tasks.read; projects/agents mutations ->
+  projects.admin; other mutations -> tasks.write. 401 missing/invalid/expired, 403
+  valid-but-insufficient-scope, flask-smorest `{code,status,message}` envelope.
+- **AUTH-7:** config-driven CORS (`_register_cors` in `app/__init__.py`). `CORS_ORIGINS` is an
+  exact-match allow-list; empty => disabled. Echoes only an allow-listed Origin (never `*`),
+  `Allow-Credentials: true`, `Vary: Origin`, OPTIONS preflight headers.
+- **Config knobs (`app/config.py`):** COGNITO_ISSUER, COGNITO_JWKS_URI, COGNITO_AUDIENCE,
+  COGNITO_TOKEN_USE, JWKS_CACHE_TTL, JWKS_MIN_REFRESH_INTERVAL, AUTH_LEEWAY,
+  AUTH_SCOPE_READ/WRITE/ADMIN, CORS_ORIGINS, CORS_MAX_AGE, CORS_ALLOW_HEADERS,
+  CORS_ALLOW_METHODS. TestConfig pins auth OFF (baseline unaffected).
+- **Deps:** PyJWT>=2.8,<3.0 + cryptography>=42.0 added to `requirements.txt`.
+- **Tests:** `tests/test_auth.py` = 21 passed (RSA keypair minted in-process, JWKS fetch
+  monkeypatched); full suite = 63 passed (42 baseline auth-off + 21 new). Run in-container via
+  `docker cp` of the working tree (baked image predates SLS-2; repo not volume-mounted);
+  PyJWT/cryptography pip-installed into the running container ephemerally.
+- **Not committed** (code-only run). FILES FOR COORDINATED COMMIT handed to the orchestrator.
+  Reserved: nothing. Chain-batched AUTH-2+AUTH-7 per explicit instruction ("do them together").
+
+## 2026-07-21 — INFRA-4 (feature-runner, CODE-ONLY): Lambda build pipeline + real handler
+
+- **Task:** INFRA-4 "Build pipeline for Lambda artifact" (project `spec-server`). Deliver the
+  REAL Lambda artifact + build pipeline replacing the INFRA-3 503 placeholder that lambda.tf
+  wired up (`handler = "wsgi_lambda.handler"`, arm64/python3.12, `var.lambda_zip_path`).
+- **Adapter:** Mangum (ASGI↔Lambda, API Gateway HTTP API payload v2.0) wrapping
+  `a2wsgi.WSGIMiddleware(create_app())` — Flask is WSGI, Mangum is ASGI, so a2wsgi bridges.
+  `create_app()` + adapter built at MODULE scope for cold-start reuse; boto3 DynamoDB clients
+  are lazy so there is no network I/O at import.
+- **Files:** NEW `wsgi_lambda.py` (handler at zip root); NEW `scripts/build_lambda.sh`
+  (`pip --platform manylinux2014_aarch64 --only-binary=:all: --python-version 3.12` → aarch64
+  wheels + app source at archive root + dev-dep prune + best-effort deterministic zip →
+  `build/lambda.zip`); NEW `scripts/README-lambda.md`; EDIT `requirements.txt`
+  (+`mangum>=0.17,<1.0`, +`a2wsgi>=1.10,<2.0`); EDIT `.gitignore` (+`build/`, +`lambda.zip`).
+- **Verified (offline, no AWS):** `import wsgi_lambda; callable(handler)` OK; synthetic API
+  Gateway HTTP API v2.0 `GET /healthz` → 200 under BOTH postgres and dynamodb backends; build
+  ran here → 31M zip with genuine aarch64 ELF wheels (`file`-confirmed) + `wsgi_lambda.py` at
+  root + pytest/gunicorn pruned; full suite = 68 passed. `bash -n scripts/build_lambda.sh` OK.
+- **Chain:** implementer(feature-runner) → test-engineer(manual offline invoke + pytest) →
+  reviewer(APPROVE) → security(PASS). Documentation step scoped to `scripts/README-lambda.md`
+  + inline comments only — README.md/AGENTS_API.md/CLAUDE.md/.env.example are owned by a
+  parallel docs agent (per task constraint), so no separate documentation subagent was invoked.
+- **Not committed** (code-only run); FILES FOR COORDINATED COMMIT handed to the orchestrator.
+  Reserved: nothing. NOT edited: `infra/terraform/*.tf` (var.lambda_zip_path default left empty;
+  note for coordinator: terraform reads it relative to `infra/terraform/`, pass an ABSOLUTE path).
+  Deploy step (coordinator): `bash scripts/build_lambda.sh` then
+  `aws lambda update-function-code --zip-file fileb://build/lambda.zip` OR
+  `terraform apply -var lambda_zip_path=$PWD/build/lambda.zip`. Migrations/`init-db` are a
+  deploy step, never in the handler.
+
+## 2026-07-21 — SLS-12 + SLS-13 (feature-runner, code-only, uncommitted)
+- SLS-12: `list_chain_runs` on the StorageBackend Protocol + both adapters; `GET /tasks/{ident}/chain-runs` and `GET /chain-runs` (ChainRunOut, newest-first, `?limit`/`?offset`); auto-emit `chain_run`/`chain_step` events (identical shape on Postgres + DynamoDB).
+- SLS-13: DynamoDB ConsistentRead on post-write reloads + mutator pre-reads; reserve numeric-gap safe-window documented; idempotency store confirmed atomic; `EventDTO.task_id` divergence documented; `Query` `Limit` pushed into unfiltered pre-sorted GSI4 feed paths; `config.py` STORAGE_BACKEND comment de-staled.
+- Verify: Postgres-only 70 passed; cross-backend (postgres,dynamodb) 114 passed / 3 skipped. Chain: implementer → test-engineer → reviewer(PASS) → security(PASS) → documentation. NOT committed — files listed for coordinated commit.
+
+## 2026-07-21 — AUTH-10 (feature-runner, code-only, uncommitted)
+- Switched app authz from Cognito resource-server SCOPES to GROUP membership, and rewrote the
+  agent token helper from M2M `client_credentials` to Cognito USER auth (the M2M clients were
+  retired to save ~$6/mo each).
+- `app/helpers.py`: replaced `_required_scope`/`_token_scopes`/`_scope_satisfied` with
+  `_required_permission`/`_group_permissions`/`_token_groups`/`_effective_permissions`. Reads
+  `cognito:groups` from the **verified** claims only, unions per-group perms (spec-admins=
+  read+write+admin, spec-writers=read+write, spec-readers=read), enforces method->perm
+  (GET/HEAD=read; projects/agents mutations=admin; other mutations=write). 401 missing/invalid,
+  403 valid-but-insufficient/no-groups. JWT verification (RS256 pinned, JWKS cache, iss/exp/
+  token_use/aud-or-client_id) and the precedence ladder left unchanged.
+- `app/config.py`: dropped `AUTH_SCOPE_READ/WRITE/ADMIN`; added `AUTH_GROUPS_CLAIM` +
+  `AUTH_GROUP_ADMIN/WRITE/READ`; `COGNITO_AUDIENCE` now = agents + UI client ids.
+- `scripts/agent_token.py`: rewritten to `InitiateAuth USER_PASSWORD_AUTH` (unsigned boto3
+  cognito-idp client) -> AccessToken+RefreshToken+ExpiresIn; `REFRESH_TOKEN_AUTH` ~60s before
+  expiry, re-auth on 401; creds from the `agent-credentials` Secrets Manager secret
+  ({pool_id,client_id,region,users:{name:{password,groups}}}) or env (AGENT_USERNAME/
+  AGENT_PASSWORD/COGNITO_CLIENT_ID/COGNITO_REGION). Never logs password/tokens.
+  `authorized_request()`/`get_token()` kept drop-in.
+- `tests/test_auth.py`: adapted the JWT harness to mint `cognito:groups` tokens; added the
+  group->permission matrix (writer->admin route 403; writer create-task+read ok; reader GET ok/
+  mutate 403; multi-group union; no-groups/unknown-group 403); kept the 401 matrix, precedence,
+  JWKS-cache, and CORS tests. Unique uuid slugs keep the tests idempotent (`_make_app` never
+  drops the shared test DB).
+- Docs: AGENTS_API.md/README.md/.env.example/CLAUDE.md updated (scope->group model, USER_PASSWORD_
+  AUTH+refresh flow, agent-credentials secret).
+- Verify: full suite **71 passed**; auth suite **22 passed**
+  (`TEST_DATABASE_URL=...specserver_test`).
+- Chain: implementer(feature-runner) -> test-engineer(feature-runner) -> reviewer(APPROVE) ->
+  security(PASS, all 6 required confirmations) -> documentation. NOT committed — FILES FOR
+  COORDINATED COMMIT: app/helpers.py, app/config.py, scripts/agent_token.py, tests/test_auth.py,
+  AGENTS_API.md, README.md, .env.example, CLAUDE.md, AGENT_LOG.md, DECISIONS.md.
+- NOT touched: infra/ (cognito.tf/apigw.tf/lambda.tf — parallel agent) and app/storage/.
+
+## SLS-14 — Backend-aware /readyz health check (2026-07-21)
+- Problem: `/readyz` ran `SELECT 1` against Postgres directly, so the deployed Lambda with
+  `STORAGE_BACKEND=dynamodb` (no Postgres) returned 503 on the readiness probe.
+- Fix: added `ping()` to the `StorageBackend` Protocol (`app/storage/base.py`) and both adapters —
+  `PostgresBackend.ping` runs `SELECT 1` (rolls back a poisoned session, raises
+  `BackendUnavailable` on failure); `DynamoBackend.ping` runs a cheap `DescribeTable` on the app
+  table. Rewired `/readyz` to `current_app.storage.ping()` with NO direct db/sqlalchemy reference;
+  `/healthz` stays a static 200. Response shapes unchanged (200 `{status:ready}` /
+  503 `{status:unready,error:...}`).
+- Verify: Postgres full **74 passed**; cross-backend **121 passed, 3 skipped** (pre-existing
+  `postgres_only`). New `tests/test_health.py` — `/readyz` 200 on BOTH `[postgres]` and
+  `[dynamodb]`, plus a 503-on-ping-failure path.
+- Chain: implementer -> test-engineer -> reviewer(PASS on code) -> security(PASS, P2 non-blocking
+  error-string disclosure = unchanged pre-existing behaviour) -> documentation
+  (STORAGE_ABSTRACTION_DEEPDIVE.md Protocol list). NOT committed — FILES FOR COORDINATED COMMIT:
+  app/storage/base.py, app/storage/postgres.py, app/storage/dynamo.py, app/blueprints/health.py,
+  tests/test_health.py, STORAGE_ABSTRACTION_DEEPDIVE.md, AGENT_LOG.md.
+- NOT part of SLS-14 (leave out of the commit): the stray `ui/.gitignore` edit and pre-existing
+  `docker-compose.yml` (M), `install-and-run.sh`/`restore_backup.py` (??).
+
+## HA-2 — Invite-only human signup: invites table + PreSignUp burn + admin endpoint (feature-runner)
+- Task: build invite-only human signup mirroring the bird project's invite + PreSignUp burn.
+  Restated: a dedicated invites DynamoDB table, a Cognito PreSignUp Lambda that atomically burns
+  single-use invite codes, and an admin-gated app endpoint to mint/list invites. CODE-ONLY.
+- New files: `infra/terraform/invites.tf` (invites table + PreSignUp Lambda + least-priv roles +
+  cognito invoke permission + app-invites access policy + outputs),
+  `infra/terraform/presignup_lambda/handler.py` (the PreSignUp trigger),
+  `app/blueprints/admin.py` (POST/GET /api/v1/admin/invites), `tests/test_presignup.py`,
+  `tests/test_admin_invites.py`.
+- Edited: `app/helpers.py` (require_api_key gained an OPTIONAL `required` permission override —
+  backward-compatible, default None => existing derivation; admin endpoints call
+  `require_api_key(required="admin")`), `app/config.py` (INVITES_TABLE / INVITE_TTL_DAYS /
+  INVITE_JOIN_BASE_URL / DYNAMODB_ENDPOINT_URL / AWS_REGION knobs; TestConfig pins
+  INVITES_TABLE=None), `app/schemas.py` (InviteIn/InviteMintOut/InviteOut), `app/__init__.py`
+  (register the admin blueprint).
+- Burn/email-binding: only the SHA-256 `code_hash` is stored (plaintext code returned ONCE by
+  mint, never persisted/logged). The burn is a SINGLE conditional `UpdateItem`
+  (`status='active' AND expires_at>now AND (attribute_not_exists(email_binding) OR
+  email_binding=:eb)` -> `status='used'`) so two concurrent signups can never double-spend and the
+  optional email-binding is enforced atomically in the same write. All rejections (missing/used/
+  expired/mismatch) surface as ONE generic PreSignUp raise (no enumeration oracle). PreSignUp adds
+  the user to NO spec-* group (approved by GROUP per the shared HA-3 contract) => pending until an
+  admin adds them to spec-readers; auto-confirms + auto-verifies email.
+- Did NOT edit cognito.tf: invites.tf takes the pool ARN via `var.cognito_user_pool_arn` and only
+  OUTPUTs `presignup_lambda_arn` for the HA-3 pool cutover to wire the pre_sign_up trigger.
+- Verify: full suite **89 passed**; new invite tests **15 passed** (PreSignUp valid burn /
+  already-used->raise / expired->raise / email-mismatch->raise / bound-match / missing / unknown;
+  admin mint stores hash active / email-bound stores hash not plaintext / list never leaks
+  plaintext / 501-when-unconfigured / authz non-admin 403 / reader 403 / missing 401 / admin 201).
+  `terraform fmt` clean, `terraform init -backend=false` + `terraform validate` => "Success! The
+  configuration is valid." (the presignup archive_file source dir builds).
+- Chain: implementer -> test-engineer -> reviewer(APPROVE, scope clean, cognito.tf untouched) ->
+  security(PASS on all 7 mandated requirements; only Low/informational notes: unbounded admin list
+  scan, body-validation-before-auth ordering (existing convention), legacy API_KEYS branch ignores
+  the admin gate by design) -> documentation (AGENTS_API.md, README.md, .env.example).
+- NOT committed — FILES FOR COORDINATED COMMIT (HA-2 only): infra/terraform/invites.tf,
+  infra/terraform/presignup_lambda/handler.py, app/blueprints/admin.py, app/helpers.py,
+  app/config.py, app/schemas.py, app/__init__.py, tests/test_presignup.py,
+  tests/test_admin_invites.py, AGENTS_API.md, README.md, .env.example, AGENT_LOG.md, DECISIONS.md.
+- NOT part of HA-2 (exclude): the parallel HA-3 agent's staged files (create_auth_lambda/,
+  customauth.tf, define_auth_lambda/, verify_auth_lambda/) and pre-existing docker-compose.yml (M),
+  install-and-run.sh / restore_backup.py (??).
+- Follow-up (Low, non-blocking): cap GET /admin/invites scan with a Limit/page bound for parity
+  with the other list schemas' Range(max=1000).
+
+## HA-5 — 2026-07-21 — Admin user-lifecycle API (backend-only) — feature-runner
+- Restated: build spec-admins-gated Cognito user-lifecycle endpoints (list/approve/reject/block/
+  unblock/promote/demote/delete) under /api/v1/admin/users; NO ui/ screen (separate HA-4 wave).
+- Files (coordinated commit, NOT committed by this agent):
+  app/blueprints/admin.py (extended with the HA-5 section), app/helpers.py (current_identity() +
+  stash g.cognito_claims from the verified JWT), app/schemas.py (AdminUsersQuery/AdminUserOut/
+  AdminApproveIn), app/config.py (COGNITO_USER_POOL_ID knob + TestConfig pin),
+  infra/terraform/iam.tf (CognitoUserAdmin statement scoped to the pool ARN),
+  infra/terraform/lambda.tf (COGNITO_USER_POOL_ID env var), .env.example (knob),
+  tests/test_admin_users.py (new), AGENTS_API.md + README.md (docs), AGENT_LOG.md, DECISIONS.md.
+- Approval is by GROUP: pending = in NO spec-* group; approve adds spec-readers/spec-writers;
+  promote adds spec-admins; reject/block = AdminDisableUser + strip spec-* groups; unblock enables;
+  delete = AdminDeleteUser. Guardrails: refuse self block/delete/demote (409), refuse last-admin
+  demote (409), 404 unknown user, 501 when COGNITO_USER_POOL_ID unset, and fail-closed 501 for the
+  self-protected mutations under static API_KEYS (no verifiable caller identity).
+- IAM (iam.tf CognitoUserAdmin): ListUsers, ListUsersInGroup, AdminGetUser, AdminListGroupsForUser,
+  AdminAddUserToGroup, AdminRemoveUserFromGroup, AdminDisableUser, AdminEnableUser, AdminDeleteUser
+  — scoped to aws_cognito_user_pool.this.arn (NOT "*"). Edited lambda.tf to add COGNITO_USER_POOL_ID
+  (no parallel agent owns lambda.tf this wave).
+- Verify: new tests tests/test_admin_users.py **18 passed**; full suite **107 passed**
+  (TEST_DATABASE_URL=...specserver_test). `terraform fmt` clean; `terraform init -backend=false` +
+  `terraform validate` => "Success! The configuration is valid."
+- Chain: implementer -> test-engineer -> reviewer(APPROVE, one task, scope clean, guards correct) ->
+  security(PASS, no P0/P1: admin-gated, self-lockout via VERIFIED token identity only, least-priv
+  IAM scoped to the pool ARN, no token/secret logging; P2 fail-closed-under-API_KEYS applied) ->
+  documentation (AGENTS_API.md, README.md).
+- Did NOT touch ui/ (HA-4 owns it) or cognito.tf. NOT committed — files listed above are for the
+  coordinated commit. Orchestrator note: COGNITO_USER_POOL_ID was added to lambda.tf, so no manual
+  env wiring is needed at cutover.
+
+## 2026-07-22 — HA-7 Public request→approve signup queue (bird Path A, BACKEND+INFRA)
+- Un-deferred HA-7 and built bird "Path A" code-only (no deploy): the public self-service
+  request→approve signup queue. Owner feature-runner; SPEC via running Spec Server.
+- Scope (backend + infra ONLY; the public request PAGE is a separate UI task — did NOT touch ui/,
+  did NOT touch cognito.tf):
+  * `POST /api/v1/signup` (PUBLIC, no auth) — uniform-202 anti-enumeration intake. ZERO existence
+    work: origin-guard → honeypot → per-IP DynamoDB fixed-window rate-limit (fail-open) → optional
+    Cloudflare Turnstile (server-side, gated on TURNSTILE_SECRET; skipped when unset) → normalize →
+    SQS SendMessage → ALWAYS the identical 202. No DynamoDB/Cognito/email/latency branch.
+  * `GET /api/v1/validate?token=` (PUBLIC) — magic-link redeem: constant-time hmac.compare_digest,
+    single-use conditional flip, requested→email-validated; every failure folds to neutral "invalid".
+    Per-IP floor (independent `val#ip#` budget).
+  * SQS intake queue + DLQ + worker Lambda (signups.tf + signup_worker_lambda/): Cognito ListUsers
+    by email; new → write `requested` row + SES magic link (stores only the token HASH, 24h TTL);
+    existing → capped "you already have an account" notice; ReportBatchItemFailures.
+  * Admin bridge (admin.py, spec-admins-gated): GET /api/v1/admin/signups[?status=&limit=],
+    POST .../{email_hash}/approve (email-validated ONLY → provision SYNCHRONOUSLY: mint an HA-2
+    invite approved+email-bound + SES join link → mark_provisioned exactly-once), POST .../reject.
+  * Reused the HA-6 SES send policy + config set (attached to the worker + app roles); least-priv
+    IAM scoped to exact table/queue/pool ARNs (no dynamodb:*, no Resource="*").
+- DEFERRED (documented, NOT built): S3 WORM audit bucket + peppered ip/ua fingerprints + their
+  Secrets-Manager pepper. email_hash uses an OPTIONAL pepper (SIGNUP_PEPPER, terraform var; plain
+  SHA-256 fallback when unset). The enumeration-privacy crux (uniform-202 + async existence branch +
+  hashed-identity logs) is kept.
+- Verify: new tests/test_signup.py **19 passed**; full suite **126 passed**
+  (TEST_DATABASE_URL=…specserver_test). `terraform fmt` clean; `terraform validate` => "Success!".
+  Worker vendored signup.py is byte-identical to app/signup.py.
+- Chain: spec-keeper (claim + no numeric reservation needed — all resources name-prefixed) →
+  implementer → test-engineer → reviewer (APPROVE; P1 was commit-hygiene: don't let the unrelated
+  ui/ tree ride along — only my 15 files staged, not committing) → security (PASS, no P0; P1
+  mail-bomb amplification on the existing-user notice FIXED via signup.bump_notify capped counter;
+  P2s display_name Length + validate rate-limit + admin-list limit all applied) → documentation.
+- NOT committed — files listed below are for the coordinated commit. The dirty ui/ + docker-compose
+  + install-and-run.sh/restore_backup.py in the tree are NOT mine (pre-existing / Path-B UI) — must
+  NOT be included in the HA-7 commit.
+2026-07-22T08:10:16Z agent_token.py: resolve Cognito USERNAME from the secret record's 'username' field (pool alias), not the roster key. Light-touch (tooling/helper script, not app code); verified by an end-to-end InitiateAuth against the deployed pool. Unblocks ISO-5 backfill + ONBOARD redeem recipe.
+2026-07-22T09:15:05Z agent_token.py: authorized_request now sends User-Agent: spec-agent/1.0 (Cloudflare bot-blocks the default Python-urllib UA with 403/error-1010). Verified live: GET /projects -> 200. Critical for onboarded external agents that use this helper.
+
+2026-07-21T00:00:00Z ONBOARD-3 — public agent-enrollment REDEEM endpoint (POST /api/v1/agent-enrollments/redeem).
+- New blueprint app/blueprints/enroll.py (registered in app/__init__.py): PUBLIC (no-JWT) single-use
+  redeem. Atomic burn (conditional UpdateItem status active->used AND expires_at>now, mirrors the
+  PreSignUp _burn) BEFORE provision; then AdminCreateUser(SUPPRESS)->AdminSetUserPassword(permanent)->
+  AdminAddUserToGroup(spec-writers) tolerating UsernameExistsException (re-mint idempotent), then
+  add_member(project_slug, sub, agent_name, role). Returns {username,password,api_base,region,
+  client_id,project_slug,role,recipe} ONCE. Rate-limited + origin-locked (reuse HA-7 guards, key
+  enr#ip#). Token/password never logged. 501 when table/pool unset; 400 generic (no oracle) on
+  missing/used/expired; 503 on transient backend fault (token un-burned, retryable); 500 if spent-
+  then-provision-failed (remedy: re-mint).
+- Schemas EnrollRedeemIn/EnrollRedeemOut (app/schemas.py); config ENROLL_API_BASE/
+  ENROLL_COGNITO_CLIENT_ID/ENROLL_AGENT_DOMAIN (app/config.py); redeem added to local.public_routes
+  (infra/terraform/apigw.tf) so it bypasses the JWT authorizer. DECISIONS.md records burn-before-
+  provision + never-un-burn + idempotent re-mint recovery.
+- Verify: tests/test_enroll_redeem.py 14 passed; full suite 189 passed (TEST_DATABASE_URL=
+  ...specserver_test); terraform fmt clean + validate "Success!"; OpenAPI includes the redeem path.
+- Chain: implementer -> test-engineer -> reviewer (APPROVE; P1 was commit-hygiene: keep the
+  pre-existing dirty docker-compose.yml/install-and-run.sh/restore_backup.py OUT of this change) ->
+  security (PASS, no P0/P1; two P2s: latent cross-tenant password-reset via agent_name collision is a
+  MINT-side authz gap gated behind the dormant PROJECT_ISOLATION_ENFORCED -> follow-up ONBOARD-3a;
+  origin-lock unfit for non-browser callers -> doc caveat) -> reliability-reviewer (SIGN-OFF on burn-
+  before-provision ordering; CHANGES-REQUESTED items: finding-3 split burn errors ConditionalCheckFailed
+  ->400 / other->503 APPLIED this task; finding-2 concurrent same-agent_name clobber -> mint-side
+  follow-up ONBOARD-3a; alarm on "provisioning FAILED after burn" -> ONBOARD-3c) -> documentation
+  (AGENTS_API.md, README.md, .env.example).
+- Follow-ups discovered (NOT in scope here): ONBOARD-3a (P1) mint-time one-active-enrollment-per-
+  (project,agent_name) constraint; ONBOARD-3c (P2) CloudWatch metric-filter alarm on the post-burn
+  provision-failure log line + redeem 5xx; ONBOARD-3d (P3) test that a spec-writers user with no
+  project membership is inert + optional orphan-user sweep.
+- CODE ONLY per the task: NOT committed, backlog NOT mutated. The pre-existing dirty
+  docker-compose.yml + untracked install-and-run.sh/restore_backup.py in the tree are NOT mine.
+
+## ONBOARD-3a — close cross-tenant agent-identity collision (P1) — 2026-07-22
+- **Change (code-only, no commit per task):** the redeem flow's Cognito username is now
+  project-namespaced + collision-resistant, and mint refuses a duplicate active enrollment.
+  - `app/blueprints/enroll.py`: new `_sanitize_localpart` + `_provisioned_username(cfg, agent_name,
+    project_slug)` = `{san_agent}.{san_project}.{16-hex SHA256(agent_name NUL project_slug)}@domain`
+    (was `{agent_name}@domain`); `_provision` uses it. Same agent_name in different projects → distinct
+    Cognito users (isolation); same (project, agent_name) → same user (legitimate password rotation).
+  - `app/blueprints/admin.py`: new `_active_enrollment_exists`; `POST /admin/agent-enrollments` returns
+    generic 409 if an active, unexpired enrollment already exists for the same (project_slug, agent_name).
+- **Tests:** extended `tests/test_enroll_redeem.py` (cross-project distinct users + no cross-membership +
+  no cross password-reset; same-pair rotation) and `tests/test_admin_enrollments.py` (409 duplicate;
+  per-project scoping; allowed-after-used/expired/revoked). `pytest -k "enroll or enrollment or redeem"`
+  → 37 passed; full suite → 200 passed.
+- **Chain:** spec-keeper(external, cloud) → implementer(self) → test-engineer(self) → reviewer → security
+  → reliability-reviewer → documentation. reviewer PASS on logic (its BLOCK was pre-existing out-of-scope
+  untracked files — ONBOARD-5 UI, docker-compose, install-and-run.sh, restore_backup.py — NOT this task;
+  left untouched, no commit made). security PASS (no P0). reliability-reviewer PASS (LOW only).
+- **Review follow-up applied:** widened the disambiguation digest 32-bit → 64-bit and reduced
+  `_LOCALPART_MAX` 24→20 (stays ≤64-char local-part), softened the "never collide" docstring, and marked
+  the mint-409 a best-effort guard (real invariant = deterministic username + idempotent provisioning).
+- **DECISIONS.md:** ONBOARD-3a entry recorded (username scheme + rationale; 409 semantics).
+2026-07-22T13:30:03Z ISO-9: annotate _deny_project_access -> NoReturn (helpers.py). Light-touch (pure type hint, lazy under 'from __future__ import annotations', zero runtime/behaviour change); py_compile verified; reviewer/security chain skipped as disproportionate for a no-op annotation.

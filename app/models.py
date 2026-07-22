@@ -128,6 +128,36 @@ class Agent(Base):
     project: Mapped["Project"] = relationship()
 
 
+class ProjectMember(Base):
+    """A membership of a principal (immutable Cognito ``sub``) in a project
+    (ISO-1). DORMANT: this table only records who *would* have what role; no
+    request path reads it and nothing enforces authorization from it yet.
+
+    ``principal_sub`` is the server-verified identity key (uniqueness is per
+    ``(project, principal_sub)``); ``principal_name`` is an informational display
+    label only. ``role`` is validated at the schema layer against
+    ``schemas.ROLE_VALUES`` (reader/writer/admin)."""
+
+    __tablename__ = "project_members"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "principal_sub", name="uq_member_project_principal"
+        ),
+        Index("ix_member_principal", "principal_sub"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    principal_sub: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    principal_name: Mapped[str | None] = mapped_column(sa.Text)
+    role: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
+
+    project: Mapped["Project"] = relationship()
+
+
 class Epic(Base):
     __tablename__ = "epics"
     __table_args__ = (
