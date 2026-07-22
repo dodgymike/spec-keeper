@@ -340,3 +340,35 @@ to the server's `/events` endpoint.
   NOT be included in the HA-7 commit.
 2026-07-22T08:10:16Z agent_token.py: resolve Cognito USERNAME from the secret record's 'username' field (pool alias), not the roster key. Light-touch (tooling/helper script, not app code); verified by an end-to-end InitiateAuth against the deployed pool. Unblocks ISO-5 backfill + ONBOARD redeem recipe.
 2026-07-22T09:15:05Z agent_token.py: authorized_request now sends User-Agent: spec-agent/1.0 (Cloudflare bot-blocks the default Python-urllib UA with 403/error-1010). Verified live: GET /projects -> 200. Critical for onboarded external agents that use this helper.
+
+2026-07-21T00:00:00Z ONBOARD-3 — public agent-enrollment REDEEM endpoint (POST /api/v1/agent-enrollments/redeem).
+- New blueprint app/blueprints/enroll.py (registered in app/__init__.py): PUBLIC (no-JWT) single-use
+  redeem. Atomic burn (conditional UpdateItem status active->used AND expires_at>now, mirrors the
+  PreSignUp _burn) BEFORE provision; then AdminCreateUser(SUPPRESS)->AdminSetUserPassword(permanent)->
+  AdminAddUserToGroup(spec-writers) tolerating UsernameExistsException (re-mint idempotent), then
+  add_member(project_slug, sub, agent_name, role). Returns {username,password,api_base,region,
+  client_id,project_slug,role,recipe} ONCE. Rate-limited + origin-locked (reuse HA-7 guards, key
+  enr#ip#). Token/password never logged. 501 when table/pool unset; 400 generic (no oracle) on
+  missing/used/expired; 503 on transient backend fault (token un-burned, retryable); 500 if spent-
+  then-provision-failed (remedy: re-mint).
+- Schemas EnrollRedeemIn/EnrollRedeemOut (app/schemas.py); config ENROLL_API_BASE/
+  ENROLL_COGNITO_CLIENT_ID/ENROLL_AGENT_DOMAIN (app/config.py); redeem added to local.public_routes
+  (infra/terraform/apigw.tf) so it bypasses the JWT authorizer. DECISIONS.md records burn-before-
+  provision + never-un-burn + idempotent re-mint recovery.
+- Verify: tests/test_enroll_redeem.py 14 passed; full suite 189 passed (TEST_DATABASE_URL=
+  ...specserver_test); terraform fmt clean + validate "Success!"; OpenAPI includes the redeem path.
+- Chain: implementer -> test-engineer -> reviewer (APPROVE; P1 was commit-hygiene: keep the
+  pre-existing dirty docker-compose.yml/install-and-run.sh/restore_backup.py OUT of this change) ->
+  security (PASS, no P0/P1; two P2s: latent cross-tenant password-reset via agent_name collision is a
+  MINT-side authz gap gated behind the dormant PROJECT_ISOLATION_ENFORCED -> follow-up ONBOARD-3a;
+  origin-lock unfit for non-browser callers -> doc caveat) -> reliability-reviewer (SIGN-OFF on burn-
+  before-provision ordering; CHANGES-REQUESTED items: finding-3 split burn errors ConditionalCheckFailed
+  ->400 / other->503 APPLIED this task; finding-2 concurrent same-agent_name clobber -> mint-side
+  follow-up ONBOARD-3a; alarm on "provisioning FAILED after burn" -> ONBOARD-3c) -> documentation
+  (AGENTS_API.md, README.md, .env.example).
+- Follow-ups discovered (NOT in scope here): ONBOARD-3a (P1) mint-time one-active-enrollment-per-
+  (project,agent_name) constraint; ONBOARD-3c (P2) CloudWatch metric-filter alarm on the post-burn
+  provision-failure log line + redeem 5xx; ONBOARD-3d (P3) test that a spec-writers user with no
+  project membership is inert + optional orphan-user sweep.
+- CODE ONLY per the task: NOT committed, backlog NOT mutated. The pre-existing dirty
+  docker-compose.yml + untracked install-and-run.sh/restore_backup.py in the tree are NOT mine.

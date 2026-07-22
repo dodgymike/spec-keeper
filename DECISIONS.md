@@ -187,3 +187,23 @@ Decisions:
 - **Worker Lambda vendors a byte-identical copy of app/signup.py** (mirrors the bird "common/ copied
   into each lambda zip" packaging) so `terraform validate`/the archive-file zip need no build tooling;
   a re-vendor step + a diff assertion keep the two copies in lockstep.
+
+## ONBOARD-3 — public agent-enrollment redeem (burn/provision ordering)
+- **Burn FIRST (atomic, one winner), THEN provision.** Strict single-use is the top
+  priority for this public, unauthenticated, credential-minting route. The redeem endpoint
+  consumes the token with ONE conditional `UpdateItem` (`status active->used AND expires_at > now`)
+  BEFORE any Cognito call — so two callers racing the same token can never both provision (the
+  loser gets the same generic 400 as a missing/expired/used token; no enumeration oracle). Mirrors
+  the PreSignUp trigger's `_burn`.
+- **Provision failure after a successful burn → 500; the token stays spent (we NEVER un-burn).**
+  Un-burning to "recover" would reopen the double-spend window this route exists to close. The
+  documented remedy is to mint a FRESH enrollment token (tokens are cheap, single-use, TTL-bounded).
+  The 500 body is generic; the token/password are never logged.
+- **Provisioning is idempotent so a re-mint for the same `agent_name` still yields working creds.**
+  AdminCreateUser tolerates `UsernameExistsException` (resolve the existing `sub` via AdminGetUser),
+  and AdminSetUserPassword(permanent) + AdminAddUserToGroup run on both the fresh and existing user.
+  add_member is an idempotent upsert. So the "token spent, provision failed → re-mint" recovery
+  always converges on a usable credential without ever weakening single-use.
+- **Capability tier is `spec-writers` ONLY; project membership is the enrolled role on the ONE
+  enrolled project.** Never spec-admins, never multiple projects — least privilege for a self-served
+  agent.

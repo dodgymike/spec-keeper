@@ -6,10 +6,13 @@ SPEC-driven workflow to concrete calls.
 
 Base URL: `http://localhost:8080/api/v1`. Every request needs `Authorization: Bearer <token>`
 under whichever auth mode is configured — see "Authentication" below for which kind of token
-and which group permission a given call needs. **Two routes are the exception and are always
+and which group permission a given call needs. **Three routes are the exception and are always
 public, in every auth mode:** `POST /signup` and `GET /validate` (the human signup queue, HA-7 —
-see "Public signup queue" below) — a not-yet-a-user has no token to present, so they protect
-themselves instead with an origin-guard, a honeypot, a per-IP rate-limit, and optional Turnstile.
+see "Public signup queue" below), plus `POST /agent-enrollments/redeem` (the agent
+self-enrollment redeem, ONBOARD-3 — see "Agent self-enrollment" below) — a not-yet-a-user/agent
+has no token to present, so each protects itself instead: the human routes with an origin-guard,
+a honeypot, a per-IP rate-limit, and optional Turnstile; the agent redeem route with a per-IP
+rate-limit and an origin-guard (reusing the same HA-7 guards) plus its own single-use-token burn.
 
 **Storage backend is transparent.** `STORAGE_BACKEND` selects Postgres (default) or DynamoDB; the
 HTTP API — every route, status code, and concurrency guarantee (atomic claim, collision-proof
@@ -55,7 +58,8 @@ which takes priority over no auth.
 | `GET` / `POST /admin/invites` | admin (both methods — invite listing/minting is admin-only, overriding the default `read` a `GET` would otherwise get) |
 | `/admin/users` and `/admin/users/{username}/*` (list/approve/reject/block/unblock/promote/demote/delete) | admin (all methods, overriding the default `read` a `GET` would otherwise get) |
 | `/admin/signups` and `/admin/signups/{email_hash}/*` (list/approve/reject) | admin (all methods) |
-| `POST /signup`, `GET /validate` | **none — always public**, in every auth mode (see above) |
+| `GET`/`POST /admin/agent-enrollments`, `DELETE /admin/agent-enrollments/{token_hash}` | admin (all methods — mint/list/revoke of agent-enrollment tokens is admin-only) |
+| `POST /signup`, `GET /validate`, `POST /agent-enrollments/redeem` | **none — always public**, in every auth mode (see above) |
 
 A request succeeds if ANY of the caller's groups grant the required permission — e.g. a
 `spec-writers` member has read+write but not admin; a `spec-admins` member has all three.
@@ -367,6 +371,67 @@ curl -s -X POST $B/projects/corsearch/tasks/claim-next \
   -d '{"agent":"alice"}'
 # Re-sending the identical request with the same key returns the SAME task.
 ```
+
+## Agent self-enrollment (ONBOARD-2/3)
+
+The self-service path for bootstrapping a brand-new **agent** Cognito credential — the agent
+counterpart to the human invite/signup flows below. An operator mints a single-use token
+(ONBOARD-2, admin-gated); the agent posts it back once (ONBOARD-3, PUBLIC) and gets working
+credentials in the same response.
+
+**Mint an enrollment token** — admin-gated (project-admin on `project_slug`, or a global
+`spec-admins` member); returns the plaintext token **once**, only its SHA-256 hash is stored:
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
+  -X POST $B/admin/agent-enrollments \
+  -d '{"project_slug":"corsearch","agent_name":"alice","role":"writer","ttl_seconds":3600}'
+# -> {"enrollment_url":"https://spec.elasticninja.com/enroll#token=kX9f...",
+#     "token":"kX9f...", "project_slug":"corsearch", "role":"writer",
+#     "agent_name":"alice", "expires_at":1753603600}
+```
+- `role` is one of `reader`/`writer`/`admin` — the project role granted on redemption.
+- `ttl_seconds` is optional (60-604800, default `ENROLL_TTL_SECONDS`).
+- Returns **501** when `AGENT_ENROLLMENTS_TABLE` is unset (local-dev graceful default).
+
+**List / revoke** (same admin gate; metadata only — never the token or its hash's plaintext):
+
+```bash
+curl -s -H 'Authorization: Bearer <admin-token>' "$B/admin/agent-enrollments?project_slug=corsearch"
+curl -s -H 'Authorization: Bearer <admin-token>' -X DELETE $B/admin/agent-enrollments/<token_hash>
+# -> 204 (idempotent — revoking an already-used/revoked/unknown token is still a 204)
+```
+
+**Redeem the token** — `POST /api/v1/agent-enrollments/redeem`, **PUBLIC, no auth** (a brand-new
+agent holds only the token, nothing else). Atomically burns it (single-use — a missing, already-
+used, expired, or raced redeem of the same token all fail identically), then provisions the
+agent's Cognito user (`spec-writers` group + membership at the enrolled role on the enrolled
+project), and returns working credentials **exactly once**:
+
+```bash
+curl -s -H 'Content-Type: application/json' \
+  -X POST $B/agent-enrollments/redeem -d '{"token":"kX9f..."}'
+# -> 201 {"username":"alice@agents.spec-server.internal", "password":"Ag1!...",
+#         "api_base":"https://api.spec.elasticninja.com", "region":"eu-west-1",
+#         "client_id":"1agentsclient23id", "project_slug":"corsearch", "role":"writer",
+#         "recipe": {"1_mint_token": "...", "2_first_call": "...", "3_migrate_local_backlog": "..."}}
+```
+- `password` and the full `recipe` — a copy-paste setup guide: mint an access token (via
+  `scripts/agent_token.py` or a raw `InitiateAuth` curl), make the first authenticated call (note
+  Cloudflare 1010-blocks the default `python-urllib` User-Agent, so send a real one and the
+  `Authorization: Bearer` header), then migrate any local backlog into the enrolled cloud project
+  — are shown **once** and never stored or logged.
+- Failure modes: **400** (generic — missing/used/expired/raced token; no enumeration oracle),
+  **429** (rate-limited), **501** (`AGENT_ENROLLMENTS_TABLE` or `COGNITO_USER_POOL_ID` unset),
+  **503** (a transient backend fault *before* the burn — the token is still unspent, safe to
+  retry), **500** (the token was already spent but provisioning failed afterward — the remedy is
+  to mint a fresh enrollment token; tokens are cheap, never un-burn).
+
+Configuration: `AGENT_ENROLLMENTS_TABLE` / `ENROLL_TTL_SECONDS` / `ENROLL_BASE_URL` (mint side,
+ONBOARD-2); `ENROLL_API_BASE` / `ENROLL_COGNITO_CLIENT_ID` / `ENROLL_AGENT_DOMAIN` (redeem side,
+ONBOARD-3 — describe the deployed API/pool so the returned recipe is copy-paste ready). See
+`.env.example`. Infra: `POST /api/v1/agent-enrollments/redeem` is listed in
+`local.public_routes` (`infra/terraform/apigw.tf`) so it bypasses the JWT authorizer.
 
 ## Admin: invite-only human signup
 

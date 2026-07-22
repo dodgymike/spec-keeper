@@ -34,6 +34,7 @@ def create_app(config_object: type = Config) -> Flask:
     from .blueprints.admin import blp as admin_blp  # HA-2
     from .blueprints.agents import blp as agents_blp
     from .blueprints.chains import blp as chains_blp  # LOG-3
+    from .blueprints.enroll import blp as enroll_blp  # ONBOARD-3 public redeem
     from .blueprints.epics import blp as epics_blp
     from .blueprints.log import blp as log_blp
     from .blueprints.members import blp as members_blp  # ISO-3
@@ -54,6 +55,7 @@ def create_app(config_object: type = Config) -> Flask:
     api.register_blueprint(chains_blp)
     api.register_blueprint(admin_blp)
     api.register_blueprint(signup_blp)  # HA-7 public signup queue
+    api.register_blueprint(enroll_blp)  # ONBOARD-3 public agent-enrollment redeem
 
     _register_cli(app)
     return app

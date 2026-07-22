@@ -507,6 +507,34 @@ class EnrollmentsQuery(Schema):
 
 
 # --------------------------------------------------------------------------- #
+# Agent-enrollment REDEEM (ONBOARD-3) — the PUBLIC single-use redeem endpoint.
+# A new agent posts the plaintext token it was handed; the server atomically
+# burns it (single-use) and provisions a real Cognito credential, returning the
+# working credentials + a copy-paste setup recipe EXACTLY ONCE.
+# --------------------------------------------------------------------------- #
+class EnrollRedeemIn(Schema):
+    token = fields.Str(
+        required=True,
+        validate=validate.Length(min=1, max=512),
+        metadata={"description": "The single-use enrollment token handed to the agent. Never stored or logged."},
+    )
+
+
+class EnrollRedeemOut(Schema):
+    """The redeem response — emits the generated password EXACTLY ONCE. The
+    password is never stored or logged; a lost password means minting a fresh
+    enrollment token (tokens are cheap)."""
+    username = fields.Str(dump_only=True, metadata={"description": "The Cognito sign-in alias (email-as-username) for the new agent."})
+    password = fields.Str(dump_only=True, metadata={"description": "The generated permanent password. Shown ONCE; never stored or logged."})
+    api_base = fields.Str(dump_only=True, metadata={"description": "Base URL of the Spec Server API the agent should call."})
+    region = fields.Str(dump_only=True, allow_none=True, metadata={"description": "AWS region of the Cognito pool (for InitiateAuth)."})
+    client_id = fields.Str(dump_only=True, allow_none=True, metadata={"description": "Cognito app-client id used to mint tokens (USER_PASSWORD_AUTH)."})
+    project_slug = fields.Str(dump_only=True, metadata={"description": "Project the agent was granted membership on."})
+    role = fields.Str(dump_only=True, metadata={"description": "Role granted on the project (reader/writer/admin)."})
+    recipe = fields.Dict(dump_only=True, metadata={"description": "A short copy-paste setup guide: mint a token, make the first authenticated call, and migrate a local backlog into the cloud project."})
+
+
+# --------------------------------------------------------------------------- #
 # Admin user lifecycle (HA-5) — approve/reject/block/delete/promote the Cognito
 # users (humans AND agents) backing the pool. Approval is by GROUP membership:
 # a pending human is in NO spec-* group; approve adds spec-readers/spec-writers,

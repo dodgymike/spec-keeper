@@ -74,6 +74,18 @@ class Config:
     # Base URL the enrollment link is built from (the UI origin). The plaintext
     # token rides in the fragment: f"{ENROLL_BASE_URL}/enroll#token=<token>".
     ENROLL_BASE_URL = os.environ.get("ENROLL_BASE_URL", "https://spec.elasticninja.com")
+    # --- Agent enrollment REDEEM (ONBOARD-3) response knobs -------------------
+    # The public redeem endpoint (POST /api/v1/agent-enrollments/redeem) hands a
+    # newly-provisioned agent everything it needs to talk to the cloud API. These
+    # describe the DEPLOYED API/pool so the returned recipe is copy-paste ready.
+    # API base URL the onboarded agent should call (the deployed API origin).
+    ENROLL_API_BASE = os.environ.get("ENROLL_API_BASE", "https://api.spec.elasticninja.com")
+    # Cognito app-client id the agent mints tokens against (USER_PASSWORD_AUTH,
+    # no client secret). UNSET => omitted from the recipe. Wired from terraform.
+    ENROLL_COGNITO_CLIENT_ID = os.environ.get("ENROLL_COGNITO_CLIENT_ID") or None
+    # Email-as-username domain for agent sign-in aliases (mirrors
+    # scripts/enrol_agents.py): the alias is f"{agent_name}@{ENROLL_AGENT_DOMAIN}".
+    ENROLL_AGENT_DOMAIN = os.environ.get("ENROLL_AGENT_DOMAIN", "agents.spec-server.internal")
 
     # --- Public request->approve signup queue (HA-7, bird Path A) ----------
     # The heavy public self-service path: POST /api/v1/signup (uniform-202

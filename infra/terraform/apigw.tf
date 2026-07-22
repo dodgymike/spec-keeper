@@ -75,6 +75,12 @@ locals {
   # PUBLIC BY DESIGN — the public request page is unauthenticated. They are
   # listed here explicitly so the JWT-authorized `ANY /api/v1/{proxy+}` route
   # below does NOT capture them; the app itself does no auth on these two.
+  #
+  # POST /api/v1/agent-enrollments/redeem (ONBOARD-3) is ALSO public by design: a
+  # brand-new agent holds only a single-use enrollment token and no JWT, so it
+  # must reach the redeem route without the authorizer. The app burns the token
+  # atomically (single-use), rate-limits + origin-locks the path, and provisions
+  # the agent's Cognito user itself — the endpoint does its own request-shaping.
   public_routes = [
     "GET /readyz",
     "GET /healthz",
@@ -82,6 +88,7 @@ locals {
     "GET /docs",
     "POST /api/v1/signup",
     "GET /api/v1/validate",
+    "POST /api/v1/agent-enrollments/redeem",
   ]
 }
 
