@@ -172,6 +172,18 @@ def _burn(code: str, email: str) -> None:
 
 
 def handler(event, context=None):
+    # Admin-created users (Terraform / the AdminCreateUser API — the agent users,
+    # or an admin-provisioned human) are TRUSTED and carry NO invite code. The
+    # invite-only gate applies ONLY to self-signup (PreSignUp_SignUp). Without
+    # this bypass the trigger blocks every AdminCreateUser with "Signup is
+    # invite-only", which breaks agent enrolment.
+    if event.get("triggerSource") == "PreSignUp_AdminCreateUser":
+        resp = event.setdefault("response", {})
+        resp["autoConfirmUser"] = True
+        resp["autoVerifyEmail"] = True
+        resp["autoVerifyPhone"] = False
+        return event
+
     code = _invite_code(event)
     email = _registering_email(event)
 

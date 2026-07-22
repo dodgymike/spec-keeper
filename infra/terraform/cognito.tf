@@ -587,6 +587,16 @@ resource "aws_secretsmanager_secret_version" "agent_credentials" {
       }
     }
   })
+
+  # The full agent roster is provisioned by scripts/enrol_agents.py (the
+  # aws_cognito_user provider resource cannot create permanent-password users on
+  # this pool — see the script header). That script owns the live secret's
+  # `users` map (all enrolled agents, not just var.agent_clients), so Terraform
+  # must NOT revert it on the next apply. Terraform still creates the secret and
+  # seeds the initial bootstrap agents; the script merges the rest in place.
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
 }
 
 # ---------------------------------------------------------------------------
