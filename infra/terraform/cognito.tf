@@ -564,9 +564,98 @@ resource "aws_cognito_user_in_group" "agent" {
 #     "users": { "<slug>": { "username", "password", "groups": [...] } } }
 # Only the secret ARN is exported — values never leave AWS / never hit git.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# SEC-SECRET-1 — customer-managed KMS CMK encrypting the agent-credentials
+# secret (was the AWS-managed aws/secretsmanager key). ~$1/mo for the CMK.
+#
+# The key policy is the load-bearing part: it must let every principal that can
+# READ the secret reach kms:Decrypt, or agent auth breaks. It grants exactly two
+# things, and NOTHING wider:
+#
+#   1. EnableIAMRootPermissions — the account root gets kms:* on the key. This is
+#      the standard AWS "delegate key access control to IAM" statement: it lets
+#      IAM policies in THIS account govern the key and guarantees the account can
+#      never lock itself out of its own CMK. Admin/CLI readers (agent_token.py
+#      runs with an IAM user's creds — e.g. the deployer) reach kms:Decrypt via
+#      their IAM permissions by virtue of this delegation.
+#
+#   2. AllowSecretsManagerUse — ANY principal in THIS account may use the key,
+#      but ONLY indirectly through Secrets Manager (kms:ViaService =
+#      secretsmanager.<region>.amazonaws.com) and only from this account
+#      (kms:CallerAccount). This exactly replicates the behaviour of the
+#      aws/secretsmanager managed key, so every current GetSecretValue caller
+#      (agent runners minting tokens, the admin/CLI) keeps decrypting with NO IAM
+#      change: "if you can GetSecretValue, you can decrypt". This is the grant
+#      that prevents an agent lockout; narrowing it would break agent auth.
+#
+# The app Lambda deliberately reads NO secret (it validates JWTs against the
+# public JWKS — see iam.tf: Secrets Manager is intentionally not granted), so no
+# Lambda role needs a kms:Decrypt grant here. Verified: no secretsmanager
+# GetSecretValue is granted to any Lambda role in this stack.
+# ---------------------------------------------------------------------------
+data "aws_iam_policy_document" "agent_credentials_kms" {
+  statement {
+    sid       = "EnableIAMRootPermissions"
+    effect    = "Allow"
+    actions   = ["kms:*"]
+    resources = ["*"]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
+
+  statement {
+    sid    = "AllowSecretsManagerUse"
+    effect = "Allow"
+    actions = [
+      "kms:Decrypt",
+      "kms:Encrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:CreateGrant",
+      "kms:DescribeKey",
+    ]
+    resources = ["*"]
+    principals {
+      type        = "AWS"
+      identifiers = ["*"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["secretsmanager.${var.aws_region}.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "kms:CallerAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+}
+
+resource "aws_kms_key" "agent_credentials" {
+  description             = "CMK encrypting the Spec Server agent-credentials Secrets Manager secret (SEC-SECRET-1). Policy replicates aws/secretsmanager: any in-account GetSecretValue reader decrypts via kms:ViaService; account root delegates to IAM."
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+  policy                  = data.aws_iam_policy_document.agent_credentials_kms.json
+
+  tags = local.tags
+}
+
+resource "aws_kms_alias" "agent_credentials" {
+  name          = "alias/${local.name_prefix}-agent-credentials"
+  target_key_id = aws_kms_key.agent_credentials.key_id
+}
+
 resource "aws_secretsmanager_secret" "agent_credentials" {
   name        = "${local.name_prefix}/agent-credentials"
   description = "All Spec Server AI-agent Cognito user credentials (username/password + groups) + pool/client/region. Consumed by scripts/agent_token.py to mint JWTs via USER_PASSWORD_AUTH."
+
+  # SEC-SECRET-1 — encrypt with the customer-managed CMK above (was the AWS-
+  # managed aws/secretsmanager key). In-place update (UpdateSecret KmsKeyId), NOT
+  # a replacement; existing versions stay readable and future writes use the CMK.
+  kms_key_id = aws_kms_key.agent_credentials.key_id
 
   # Fast recovery in dev; values are re-derivable by re-applying (new passwords).
   recovery_window_in_days = 7

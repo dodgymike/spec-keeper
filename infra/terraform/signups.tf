@@ -152,7 +152,18 @@ resource "aws_dynamodb_table" "signups" {
     enabled = true
   }
 
+  # SEC-DATA-1 — this table holds the PII signup store (plaintext email as an
+  # SSE-KMS attribute value). Belt-and-suspenders against accidental deletion:
+  # DynamoDB-side deletion protection (blocks a raw DeleteTable API call outside
+  # Terraform) + the Terraform lifecycle guard (blocks `terraform destroy`).
+  # Mirrors the app + agent-enrollments tables' posture.
+  deletion_protection_enabled = true
+
   tags = local.tags
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ---------------------------------------------------------------------------

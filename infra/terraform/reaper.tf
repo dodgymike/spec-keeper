@@ -268,16 +268,23 @@ data "aws_iam_policy_document" "reaper_permissions" {
     ]
   }
 
-  # --- DELETE objects under preview S3 PREFIXES only. Bucket-level actions are
-  # NOT granted, and the durable buckets are in the explicit Deny below, so the
-  # reaper can never touch the state bucket or the UI bucket.
+  # --- DELETE objects under preview S3 PREFIXES only. SEC-IAM-1: scoped to the
+  # preview-bucket naming convention `${name_prefix}-preview-*` (e.g.
+  # spec-server-dev-preview-<branch/pr>) rather than the previous account-wide
+  # `arn:aws:s3:::*/*`. Preview stacks are provisioned via CLI/boto3 with this
+  # name prefix (mirrors the ${name_prefix}-app / -ui / -reaper durable naming),
+  # so the reaper can only ever delete objects in a bucket it is meant to clean —
+  # never an arbitrary bucket in the account. Bucket-level actions are NOT
+  # granted, and the durable buckets remain in the explicit Deny below, so the
+  # reaper still cannot touch the state bucket or the UI bucket even if one were
+  # ever (mis)named to match this pattern.
   statement {
     sid    = "ReapS3PreviewObjects"
     effect = "Allow"
     actions = [
       "s3:DeleteObject",
     ]
-    resources = ["arn:aws:s3:::*/*"]
+    resources = ["arn:aws:s3:::${local.name_prefix}-preview-*/*"]
   }
 
   # --- Notify + log (own resources only).

@@ -85,7 +85,18 @@ resource "aws_dynamodb_table" "invites" {
     enabled = true
   }
 
+  # SEC-DATA-1 — the invite store is an auth artifact whose loss would break the
+  # invite-only signup flow. Belt-and-suspenders against accidental deletion:
+  # DynamoDB-side deletion protection (blocks a raw DeleteTable API call outside
+  # Terraform) + the Terraform lifecycle guard (blocks `terraform destroy`).
+  # Mirrors the app + agent-enrollments tables' posture.
+  deletion_protection_enabled = true
+
   tags = local.tags
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ---------------------------------------------------------------------------
