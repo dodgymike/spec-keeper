@@ -165,12 +165,26 @@ resource "aws_lambda_function" "app" {
       SIGNUP_RATELIMIT_MAX      = tostring(var.signup_ratelimit_max)
       SIGNUP_RATELIMIT_WINDOW_S = tostring(var.signup_ratelimit_window_seconds)
       TURNSTILE_SECRET          = var.turnstile_secret
-      SIGNUP_PEPPER             = var.signup_pepper
-      SIGNUP_VALIDATE_BASE_URL  = var.signup_validate_base_url
-      SIGNUP_ENFORCE_ORIGIN     = tostring(var.signup_enforce_origin)
-      SIGNUP_ALLOWED_ORIGINS    = var.signup_allowed_origins
-      SES_FROM_ADDRESS          = var.ses_from_address
-      SES_CONFIG_SET            = aws_sesv2_configuration_set.auth.configuration_set_name
+      # SEC-PII-1 — SIGNUP_PEPPER must NEVER be empty (unsalted email hashes are
+      # offline dictionary-reversible). A provided var wins (Secrets Manager/prod
+      # override); otherwise fall back to the strong in-state pepper generated in
+      # security_secrets.tf. NOTE: this MUST equal the signup worker's pepper —
+      # apply the same fallback in signups.tf if/when the worker is re-keyed.
+      SIGNUP_PEPPER            = var.signup_pepper != "" ? var.signup_pepper : random_password.signup_pepper.result
+      SIGNUP_VALIDATE_BASE_URL = var.signup_validate_base_url
+      SIGNUP_ENFORCE_ORIGIN    = tostring(var.signup_enforce_origin)
+      SIGNUP_ALLOWED_ORIGINS   = var.signup_allowed_origins
+      SES_FROM_ADDRESS         = var.ses_from_address
+      SES_CONFIG_SET           = aws_sesv2_configuration_set.auth.configuration_set_name
+
+      # SEC-EDGE-1 — origin lock. The app compares the ORIGIN_LOCK_HEADER value on
+      # incoming requests to ORIGIN_LOCK_SECRET (a Cloudflare Transform Rule
+      # injects it) to reject requests that bypass the CDN. ORIGIN_LOCK_MODE stages
+      # the rollout (off => no-op; warn => log; enforce => reject). Secret is
+      # generated in security_secrets.tf (in-state, never tfvars/printed).
+      ORIGIN_LOCK_SECRET = random_password.origin_lock.result
+      ORIGIN_LOCK_MODE   = var.origin_lock_mode
+      ORIGIN_LOCK_HEADER = "X-Origin-Lock"
     }
   }
 
