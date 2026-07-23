@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spec}
       POSTGRES_DB: ${POSTGRES_DB:-specserver}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ./pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-spec} -d ${POSTGRES_DB:-specserver}"]
       interval: 5s
@@ -31,6 +31,3 @@ services:
       retries: 6
     ports:
       - "8080:8080"
-
-volumes:
-  pgdata: {}
