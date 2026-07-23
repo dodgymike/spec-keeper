@@ -25,6 +25,7 @@ def create_app(config_object: type = Config) -> Flask:
 
     # Storage abstraction (SLS-2 / DEC-4): blueprints call current_app.storage.
     app.storage = make_storage(app.config)
+    _register_origin_lock(app)
     _register_error_handlers(app)
     _register_cors(app)
 
@@ -80,6 +81,66 @@ def _validate_config(app: Flask) -> None:
             "project-scoped route fails closed (403/404), bricking the API. Set "
             "COGNITO_ISSUER, or turn PROJECT_ISOLATION_ENFORCED off."
         )
+
+
+def _register_origin_lock(app: Flask) -> None:
+    """Origin-lock gate (SEC-EDGE-1): staged off/warn/enforce switch.
+
+    The raw API Gateway ``execute-api`` hostname bypasses Cloudflare's WAF/rate
+    limits. Cloudflare injects a shared-secret request header (``ORIGIN_LOCK_HEADER``)
+    on every path it proxies; when enforcing we reject any request lacking it, so
+    the only reachable path is through Cloudflare. Staged so we never break live
+    agents before confirming Cloudflare actually injects the header:
+
+    * ``off`` (or an empty ``ORIGIN_LOCK_SECRET``) -> no-op (safe default).
+    * ``warn``    -> log a WARNING on a missing/invalid header; do NOT block.
+    * ``enforce`` -> 403 (generic ``Forbidden.``) on a missing/invalid header.
+
+    Registered in ``create_app`` before the blueprints so it runs FIRST — ahead of
+    the per-handler auth check. The provided header is compared to the secret in
+    constant time (``hmac.compare_digest``); neither the secret nor the provided
+    value is ever logged or echoed. CORS preflight ``OPTIONS`` is answered by API
+    Gateway before the Lambda, so it never reaches this hook.
+    """
+    import hmac
+
+    from flask import request
+    from flask_smorest import abort
+
+    mode = (app.config.get("ORIGIN_LOCK_MODE") or "off").strip().lower()
+    secret = app.config.get("ORIGIN_LOCK_SECRET") or ""
+    header = app.config.get("ORIGIN_LOCK_HEADER") or "X-Origin-Lock"
+
+    # Misconfig heads-up (do not crash): enforcing with no secret degrades to off,
+    # which silently disables the gate — warn once at startup so it's visible.
+    if mode == "enforce" and not secret:
+        app.logger.warning(
+            "origin-lock: ORIGIN_LOCK_MODE=enforce but ORIGIN_LOCK_SECRET is empty; "
+            "the origin gate is DISABLED (fail-open)."
+        )
+
+    # Safe default: no gate wiring at all when off or unconfigured.
+    if mode == "off" or not secret:
+        return
+
+    secret_bytes = secret.encode("utf-8")
+
+    @app.before_request
+    def _origin_lock():
+        # Compare on bytes: header values are latin-1 in Werkzeug, and
+        # hmac.compare_digest on str raises TypeError for non-ASCII — comparing
+        # bytes keeps a hostile non-ASCII header a clean mismatch, never a 500.
+        provided = (request.headers.get(header) or "").encode("utf-8", "ignore")
+        if hmac.compare_digest(provided, secret_bytes):
+            return None
+        if mode == "warn":
+            app.logger.warning(
+                "origin-lock: request without valid origin header (path=%s)",
+                request.path,
+            )
+            return None
+        # enforce: generic 403 with no hint that an origin header is expected.
+        abort(403, message="Forbidden.")
 
 
 def _register_error_handlers(app: Flask) -> None:

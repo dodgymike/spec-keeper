@@ -142,6 +142,22 @@ class Config:
         k.strip() for k in os.environ.get("API_KEYS", "").split(",") if k.strip()
     ]
 
+    # --- Origin lock (SEC-EDGE-1) --------------------------------------------
+    # The raw API Gateway execute-api hostname bypasses Cloudflare's WAF/rate
+    # limits. Cloudflare injects a shared-secret request header on traffic it
+    # proxies; when enforcing, the app rejects any request lacking it, so the
+    # only reachable path is through Cloudflare. Staged rollout so we never break
+    # live agents before confirming Cloudflare actually injects the header:
+    #   off     (default) => hook is a no-op (current behaviour; safe default).
+    #   warn              => log a WARNING on a missing/invalid header, do NOT block.
+    #   enforce           => 403 on a missing/invalid header (fail-closed).
+    # ORIGIN_LOCK_SECRET empty also degrades to off (never fail-closed with no
+    # secret to compare against). The secret is compared constant-time and is
+    # NEVER logged/echoed. Terraform wires these exact names.
+    ORIGIN_LOCK_SECRET = os.environ.get("ORIGIN_LOCK_SECRET", "")
+    ORIGIN_LOCK_MODE = os.environ.get("ORIGIN_LOCK_MODE", "off")
+    ORIGIN_LOCK_HEADER = os.environ.get("ORIGIN_LOCK_HEADER", "X-Origin-Lock")
+
     # --- Cognito JWT auth (AUTH-2, group model per AUTH-10) -------------
     # Precedence ladder (see app/helpers.require_api_key):
     #   1. COGNITO_ISSUER set  -> require & validate a Cognito RS256 JWT and
@@ -260,3 +276,8 @@ class TestConfig(Config):
     SIGNUP_PEPPER = None
     SES_FROM_ADDRESS = None
     SES_CONFIG_SET = None
+    # Origin lock (SEC-EDGE-1) OFF by default so a stray ORIGIN_LOCK_* env var
+    # can't flip the baseline; the origin-lock tests set these on a subclass.
+    ORIGIN_LOCK_SECRET = ""
+    ORIGIN_LOCK_MODE = "off"
+    ORIGIN_LOCK_HEADER = "X-Origin-Lock"
