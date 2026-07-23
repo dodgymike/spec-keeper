@@ -69,6 +69,14 @@
 
 .request-access__turnstile {
   margin-bottom: var(--space-4);
+  /* Reserve the "normal" Turnstile height so the async-rendered widget doesn't
+     shift the submit button when it pops in (CLS). No min-width: the block div
+     already fills the card width, and overflow-x lets the fixed ~300px iframe
+     scroll inside its own box on narrow viewports instead of pushing the page
+     into horizontal scroll. */
+  min-height: 65px;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 /* Honeypot: kept in the DOM (bots fill it) but removed from view + layout and

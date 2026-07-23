@@ -23,6 +23,13 @@ interface ImportMetaEnv {
   readonly VITE_COGNITO_USER_POOL_ID?: string;
   /** Public native (non-Hosted-UI) app client ID used directly against the Cognito-IDP JSON API. */
   readonly VITE_COGNITO_CLIENT_ID?: string;
+  /**
+   * Public Cloudflare Turnstile site key for the `/request` access page. When
+   * set, the Turnstile script is loaded and a challenge widget is rendered; its
+   * token is forwarded to `/api/v1/signup` as `turnstile_token`. Unset (dev)
+   * disables the widget and leaves the intake flow unchanged.
+   */
+  readonly VITE_TURNSTILE_SITE_KEY?: string;
 }
 
 interface ImportMeta {

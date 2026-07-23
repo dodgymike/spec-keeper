@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { requestAccess } from "../api/client";
+import { loadTurnstile } from "../lib/turnstile";
 import "./RequestAccessPage.css";
 
 /**
- * Cloudflare Turnstile site key. When set, a widget placeholder is rendered and
- * its token (the injected `cf-turnstile-response` field) is forwarded to the
- * intake. DEPLOY FOLLOW-UP: the Turnstile challenge script itself
- * (https://challenges.cloudflare.com/turnstile/v0/api.js) is NOT loaded here -
- * the SPA's CSP must be widened to allow that origin (script-src + frame-src)
- * before the widget actually renders. Left unset here so the build stays
- * CSP-clean with no third-party script.
+ * Cloudflare Turnstile site key. When set, the Turnstile challenge script
+ * (https://challenges.cloudflare.com/turnstile/v0/api.js — an origin the SPA's
+ * CSP allows in script-src + frame-src) is loaded, a widget is rendered, and
+ * its response token is forwarded to the intake as `turnstile_token`. Left
+ * unset for local/dev keeps the flow CSP-clean with no third-party script and
+ * no bot-gate.
  */
 function turnstileSiteKey(): string | undefined {
   const value = import.meta.env.VITE_TURNSTILE_SITE_KEY;
@@ -33,14 +33,58 @@ export function RequestAccessPage() {
   const [busy, setBusy] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState("");
+  // Turnstile response token, populated by the widget's success callback.
+  const [turnstileToken, setTurnstileToken] = useState("");
+  // True when the Turnstile script could not load (blocked/offline), so submit
+  // can offer a distinct "reload" recovery instead of an impossible "complete
+  // the challenge" prompt against an empty container.
+  const [turnstileLoadFailed, setTurnstileLoadFailed] = useState(false);
 
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const formRef = useRef<HTMLFormElement>(null);
+  const turnstileRef = useRef<HTMLDivElement>(null);
+  const widgetIdRef = useRef<string | null>(null);
   const siteKey = turnstileSiteKey();
 
   useEffect(() => {
     headingRef.current?.focus();
   }, [submitted]);
+
+  // Load the Turnstile script once and render the widget on this page only.
+  // No-op when the site key is unset (dev) or after a successful submit (the
+  // form — and its container — is gone).
+  useEffect(() => {
+    if (!siteKey || submitted) return;
+    let cancelled = false;
+    // Match the widget theme to the app's forced theme (not the OS default).
+    const appTheme = document.documentElement.getAttribute("data-theme");
+    const theme = appTheme === "dark" || appTheme === "light" ? appTheme : "auto";
+    loadTurnstile()
+      .then((turnstile) => {
+        const container = turnstileRef.current;
+        if (cancelled || !container || widgetIdRef.current !== null) return;
+        widgetIdRef.current = turnstile.render(container, {
+          sitekey: siteKey,
+          theme,
+          callback: (token) => setTurnstileToken(token),
+          "expired-callback": () => setTurnstileToken(""),
+          "error-callback": () => setTurnstileToken(""),
+        });
+      })
+      .catch(() => {
+        // Script blocked or failed to load: no challenge can be completed, so
+        // flag it and let submit surface a reload affordance (fail-closed — we
+        // still never post without a token).
+        if (!cancelled) setTurnstileLoadFailed(true);
+      });
+    return () => {
+      cancelled = true;
+      // Tear the widget down so a remount renders a fresh one (symmetry with render).
+      if (widgetIdRef.current !== null) {
+        window.turnstile?.remove(widgetIdRef.current);
+        widgetIdRef.current = null;
+      }
+    };
+  }, [siteKey, submitted]);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -51,25 +95,36 @@ export function RequestAccessPage() {
       setError("An email address is required.");
       return;
     }
-    // The Turnstile script (when loaded) injects a hidden `cf-turnstile-response`
-    // field into the form; read it if present, otherwise send nothing.
-    const tokenField = formRef.current?.querySelector<HTMLInputElement>('[name="cf-turnstile-response"]');
-    const turnstileToken = tokenField?.value || undefined;
+    // When the bot-gate is active, require a completed challenge before posting.
+    if (siteKey && turnstileLoadFailed) {
+      setError("The verification widget failed to load. Please reload the page and try again.");
+      return;
+    }
+    if (siteKey && !turnstileToken) {
+      setError("Please complete the verification challenge.");
+      if (widgetIdRef.current !== null) window.turnstile?.reset(widgetIdRef.current);
+      return;
+    }
 
     setBusy(true);
     try {
       await requestAccess({
         email: trimmedEmail,
         display_name: displayName.trim() || undefined,
-        turnstile_token: turnstileToken,
+        turnstile_token: turnstileToken || undefined,
         hp_website: honeypot,
       });
       // Uniform outcome: never branch on the response body.
       setSubmitted(true);
     } catch {
       // A genuine transport error (the intake always answers 202 otherwise) -
-      // keep the message generic so nothing is revealed.
+      // keep the message generic so nothing is revealed. A Turnstile token is
+      // single-use, so reset the widget for a fresh challenge before retrying.
       setError("Could not submit your request. Please try again.");
+      if (siteKey && widgetIdRef.current !== null) {
+        window.turnstile?.reset(widgetIdRef.current);
+        setTurnstileToken("");
+      }
     } finally {
       setBusy(false);
     }
@@ -105,7 +160,7 @@ export function RequestAccessPage() {
                 {error}
               </p>
             ) : null}
-            <form ref={formRef} onSubmit={(event) => void handleSubmit(event)}>
+            <form onSubmit={(event) => void handleSubmit(event)}>
               <label htmlFor="request-email" className="request-access__label">
                 Email
               </label>
@@ -147,7 +202,7 @@ export function RequestAccessPage() {
               </div>
 
               {siteKey ? (
-                <div className="cf-turnstile request-access__turnstile" data-sitekey={siteKey} />
+                <div ref={turnstileRef} className="request-access__turnstile" />
               ) : null}
 
               <button type="submit" className="request-access__button" aria-busy={busy}>

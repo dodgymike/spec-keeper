@@ -87,11 +87,15 @@ locals {
 
   ui_csp = join(" ", [
     "default-src 'self';",
-    "script-src 'self';",
+    # SEC-DOS-1 — Cloudflare Turnstile: the widget loads
+    # challenges.cloudflare.com/turnstile/v0/api.js (script-src) and renders in a
+    # challenges.cloudflare.com iframe (frame-src).
+    "script-src 'self' https://challenges.cloudflare.com;",
     "style-src 'self';",
     "img-src 'self' data:;",
     "font-src 'self';",
     "connect-src ${local.ui_connect_src};",
+    "frame-src https://challenges.cloudflare.com;",
     "object-src 'none';",
     "base-uri 'self';",
     "form-action 'self';",
