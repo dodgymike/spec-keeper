@@ -30,8 +30,28 @@ from __future__ import annotations
 import logging
 
 import otp
+import ratelimit
 
 _log = logging.getLogger(__name__)
+
+
+def _record_failed_attempt(req) -> None:
+    """Increment the per-email cross-session failed-attempt (brute-force) counter
+    (SEC-AUTH-2). Called ONLY on a wrong code.
+
+    FAIL-SAFE: this is pure accounting — it runs only on the wrong path and its
+    result NEVER changes ``answerCorrect`` (a correct code is verified before this
+    is ever reached, so a counter/DynamoDB error can never falsely reject a valid
+    code). Any error is swallowed; the counter keys on a SHA-256 hash so no
+    plaintext email is stored or logged.
+    """
+    try:
+        attrs = (req.get("userAttributes") or {})
+        email = attrs.get("email", "")
+        if email:
+            ratelimit.incr_fail(email)
+    except Exception:  # noqa: BLE001 - accounting must never affect the verdict
+        _log.warning("verify_auth: failed-attempt counter unavailable (ignored)")
 
 
 def handler(event, context=None):
@@ -56,7 +76,13 @@ def handler(event, context=None):
             return event
 
         expected = private.get("answer", "")
-        resp["answerCorrect"] = otp.otp_matches(expected, submitted)
+        correct = otp.otp_matches(expected, submitted)
+        resp["answerCorrect"] = correct
+        if not correct:
+            # Count the WRONG guess toward the cross-session brute-force cap. A
+            # correct code is already accepted above and NEVER touches the counter
+            # (fail-safe: a counter error cannot falsely reject a valid code).
+            _record_failed_attempt(req)
         return event
     except Exception:  # noqa: BLE001 - never throw from the verifier; fail closed
         _log.exception("verify_auth: verification error (failing closed)")

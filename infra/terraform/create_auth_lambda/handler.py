@@ -49,11 +49,32 @@ import os
 import boto3
 
 import otp
+import ratelimit
 
 _log = logging.getLogger(__name__)
 
 CUSTOM = "CUSTOM_CHALLENGE"
 _ses = None
+
+
+def _over_send_cap(email: str) -> bool:
+    """True iff this email is OVER the per-window code-issuance cap (email-bomb
+    guard, SEC-AUTH-2). Atomically increments the per-email ``otp-send`` counter
+    and compares the new value against ``OTP_SEND_CAP``.
+
+    FAILS OPEN: on a missing/unconfigured counter table or ANY DynamoDB error we
+    return False (send the code). Never blocking a legitimate first code beats
+    strict email-bomb limiting — the cap is a best-effort floor, and the counter
+    keys on a SHA-256 hash so no plaintext email is stored or logged.
+    """
+    if not email:
+        return False
+    try:
+        count = ratelimit.incr_send(email)
+    except Exception:  # noqa: BLE001 - FAIL OPEN on any counter/infra error
+        _log.warning("create_auth: issuance counter unavailable; failing open")
+        return False
+    return count > ratelimit.send_cap()
 
 
 def _ses_client():
@@ -116,7 +137,15 @@ def handler(event, context=None):
     code = otp.new_email_otp()
     expires_at = otp.expiry_epoch()
 
-    _send_email_otp(attrs.get("email", ""), code)
+    email = attrs.get("email", "")
+    # Cross-session email-bomb cap (SEC-AUTH-2). Over the per-email issuance cap
+    # -> do NOT send another email, but still set a valid private answer below so
+    # the Cognito flow does not crash: the challenge simply fails when the user
+    # cannot supply a code they never received (generic, no enumeration oracle).
+    if _over_send_cap(email):
+        _log.warning("create_auth: per-email issuance cap reached; not emailing")
+    else:
+        _send_email_otp(email, code)
 
     # PUBLIC — client-visible. Never the code or the expiry answer.
     resp["publicChallengeParameters"] = {

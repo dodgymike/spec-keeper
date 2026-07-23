@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import os
 
+import ratelimit
 from otp import STEP_EMAIL_OTP
 
 _log = logging.getLogger(__name__)
@@ -55,6 +56,30 @@ def _max_attempts() -> int:
         return _DEFAULT_MAX_ATTEMPTS
     # Never allow an unbounded / non-positive attempt budget.
     return n if n >= 1 else _DEFAULT_MAX_ATTEMPTS
+
+
+def _over_fail_cap(req) -> bool:
+    """True iff this email is OVER the per-window cross-session failed-attempt cap
+    (brute-force guard, SEC-AUTH-2). Reads (does NOT increment) the per-email
+    ``otp-fail`` counter that verify_auth stamps on each wrong code, and compares
+    it to ``OTP_FAIL_CAP``. This is what makes the per-session 3-attempt cap a
+    cross-session cap.
+
+    FAILS OPEN: on a missing/unconfigured counter table or ANY DynamoDB error we
+    return False (issue the challenge as today), so an infra blip never locks out
+    a legitimate user — the per-session cap still bounds abuse. The counter keys
+    on a SHA-256 hash so no plaintext email is read/logged.
+    """
+    try:
+        attrs = (req.get("userAttributes") or {})
+        email = attrs.get("email", "")
+        if not email:
+            return False
+        count = ratelimit.read_fail(email)
+    except Exception:  # noqa: BLE001 - FAIL OPEN on any counter/infra error
+        _log.warning("define_auth: brute-force counter unavailable; failing open")
+        return False
+    return count > ratelimit.fail_cap()
 
 
 def handler(event, context=None):
@@ -83,6 +108,18 @@ def handler(event, context=None):
                 "define_auth: %d failed attempt(s) >= max %d -> failAuthentication",
                 failed,
                 _max_attempts(),
+            )
+            resp["failAuthentication"] = True
+            return event
+
+        # Cross-session brute-force gate (SEC-AUTH-2): before issuing ANOTHER
+        # email-OTP challenge (which would mint + email a fresh code), refuse if
+        # this email has exceeded the per-window cross-session failed-attempt cap.
+        # Enforced at issuance-time here so it stops BOTH issuing new codes and,
+        # since the session ends, accepting further guesses. FAILS OPEN.
+        if _over_fail_cap(req):
+            _log.info(
+                "define_auth: per-email failed-attempt cap reached -> failAuthentication"
             )
             resp["failAuthentication"] = True
             return event

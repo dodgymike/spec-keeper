@@ -70,6 +70,45 @@ variable "customauth_log_retention_days" {
   default     = 30
 }
 
+# --- SEC-AUTH-2: cross-session per-email OTP caps (brute-force + email-bomb) ---
+# The three triggers share the EXISTING per-IP signup rate-limit table
+# (signups.tf `aws_dynamodb_table.signup_ratelimit`, key = `pk` + `ttl`) under a
+# distinct key namespace (`otp-send:` / `otp-fail:`), so no new table/infra: just
+# a counter env var + Get/UpdateItem IAM on that table (added below). All three
+# caps + the window are env-var knobs so they are tunable without a code change.
+variable "customauth_otp_ratelimit_window_seconds" {
+  description = "Fixed window (seconds) for the cross-session per-email OTP caps. Default 1h."
+  type        = number
+  default     = 3600
+
+  validation {
+    condition     = var.customauth_otp_ratelimit_window_seconds >= 60
+    error_message = "customauth_otp_ratelimit_window_seconds must be >= 60."
+  }
+}
+
+variable "customauth_otp_send_cap" {
+  description = "Max OTP emails per email address per window before create_auth stops emailing (email-bomb guard). Fails OPEN on any counter error."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.customauth_otp_send_cap >= 1
+    error_message = "customauth_otp_send_cap must be >= 1."
+  }
+}
+
+variable "customauth_otp_fail_cap" {
+  description = "Max wrong-code attempts per email address per window before define_auth stops issuing challenges (brute-force guard). Fails OPEN on any counter error."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.customauth_otp_fail_cap >= 1
+    error_message = "customauth_otp_fail_cap must be >= 1."
+  }
+}
+
 # ---------------------------------------------------------------------------
 # Locals.
 # ---------------------------------------------------------------------------
@@ -98,6 +137,15 @@ locals {
       desc       = "Cognito VerifyAuthChallengeResponse: constant-time compare + 5-min expiry check (HA-3, first factor)."
       ses        = false
     }
+  }
+
+  # SEC-AUTH-2: least-privilege counter action per trigger on the SHARED signup
+  # rate-limit table. create/verify INCREMENT (UpdateItem); define only READS the
+  # brute-force counter (GetItem). No table-admin, no Scan, no wildcard.
+  customauth_counter_action = {
+    define_auth = "dynamodb:GetItem"
+    create_auth = "dynamodb:UpdateItem"
+    verify_auth = "dynamodb:UpdateItem"
   }
 }
 
@@ -178,6 +226,29 @@ resource "aws_iam_role_policy" "customauth_logs" {
   policy = data.aws_iam_policy_document.customauth_logs[each.key].json
 }
 
+# SEC-AUTH-2 — per-function least-privilege access to the SHARED signup
+# rate-limit counter table (signups.tf). create/verify get UpdateItem (atomic
+# ADD increment); define gets GetItem (read-only brute-force gate). Scoped to the
+# single table ARN — no index, no Scan, no wildcard.
+data "aws_iam_policy_document" "customauth_counter" {
+  for_each = local.customauth_functions
+
+  statement {
+    sid       = "OtpRateLimitCounter"
+    effect    = "Allow"
+    actions   = [local.customauth_counter_action[each.key]]
+    resources = [aws_dynamodb_table.signup_ratelimit.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "customauth_counter" {
+  for_each = local.customauth_functions
+
+  name   = "${each.value.name}-otp-ratelimit"
+  role   = aws_iam_role.customauth[each.key].id
+  policy = data.aws_iam_policy_document.customauth_counter[each.key].json
+}
+
 # SES send — attached to ONLY the CreateAuthChallenge role (the only function
 # that emails). Reuses the least-privilege managed policy from ses.tf; Define /
 # Verify never get SES.
@@ -214,10 +285,18 @@ resource "aws_lambda_function" "customauth" {
     variables = merge(
       {
         OTP_TTL_SECONDS = tostring(var.customauth_otp_ttl_seconds)
+        # SEC-AUTH-2: all three triggers use the shared counter table + window.
+        OTP_RATELIMIT_TABLE          = aws_dynamodb_table.signup_ratelimit.name
+        OTP_RATELIMIT_WINDOW_SECONDS = tostring(var.customauth_otp_ratelimit_window_seconds)
       },
-      # DefineAuthChallenge needs the attempt budget.
+      # DefineAuthChallenge needs the attempt budget + the brute-force fail cap.
       each.key == "define_auth" ? {
         OTP_MAX_ATTEMPTS = tostring(var.customauth_otp_max_attempts)
+        OTP_FAIL_CAP     = tostring(var.customauth_otp_fail_cap)
+      } : {},
+      # CreateAuthChallenge needs the email-bomb issuance cap.
+      each.key == "create_auth" ? {
+        OTP_SEND_CAP = tostring(var.customauth_otp_send_cap)
       } : {},
       # CreateAuthChallenge needs the SES send inputs (from ses.tf).
       each.key == "create_auth" ? {
