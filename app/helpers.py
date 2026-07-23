@@ -103,6 +103,7 @@ def _require_cognito_jwt(cfg, issuer: str, required: str | None = None) -> None:
     # HA-5 admin endpoints refuse to block/delete/demote the caller themselves).
     # Never populated from an unverified source — only from a passed signature.
     g.cognito_claims = claims
+    _enforce_principal_throttle(cfg, claims)  # SEC-DOS-2: per-sub, fail-open
     required = required or _required_permission(cfg)
     granted = _effective_permissions(_token_groups(claims, cfg), _group_permissions(cfg))
     if required not in granted:
@@ -112,6 +113,38 @@ def _require_cognito_jwt(cfg, issuer: str, required: str | None = None) -> None:
                 f"Token's Cognito groups do not grant '{required}' "
                 "(required for this request)."
             ),
+        )
+
+
+def _enforce_principal_throttle(cfg, claims: dict) -> None:
+    """Per-authenticated-principal (per ``sub``) API throttle (SEC-DOS-2).
+
+    An ADDITIVE limiter layered AFTER token verification (it does NOT change auth
+    or isolation logic): keyed on the VERIFIED access-token ``sub`` only (never a
+    request header/body/param), applied to the authenticated ``/api/v1`` data
+    plane so one token/tenant cannot exhaust the single stage-wide API Gateway
+    budget shared across ALL tokens.
+
+    FAILS OPEN — the limiter is disabled unless ``API_RATELIMIT_TABLE`` is
+    configured, and any counter/DynamoDB error allows the request (see
+    :mod:`app.api_ratelimit`). On breach -> 429 with a ``Retry-After`` header.
+
+    Global admins (``AUTH_GROUP_ADMIN``) are EXEMPT: they are a small, trusted
+    operator set and must never be throttled while doing recovery work."""
+    from .api_ratelimit import check_rate_limit
+
+    sub = claims.get("sub")
+    if not sub:
+        return  # no verified principal to key on -> nothing to throttle
+    admin_group = cfg.get("AUTH_GROUP_ADMIN", "spec-admins")
+    if admin_group in _token_groups(claims, cfg):
+        return  # global admins exempt (trusted operators)
+    limited, retry_after = check_rate_limit(cfg, sub)
+    if limited:
+        abort(
+            429,
+            message="API rate limit exceeded for this principal; slow down.",
+            headers={"Retry-After": str(retry_after)},
         )
 
 

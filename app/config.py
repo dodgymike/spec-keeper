@@ -151,6 +151,22 @@ class Config:
         k.strip() for k in os.environ.get("API_KEYS", "").split(",") if k.strip()
     ]
 
+    # --- Per-authenticated-principal API throttle (SEC-DOS-2) ----------------
+    # A per-`sub` in-app rate limit layered AFTER the JWT is verified, on the
+    # authenticated /api/v1 data-plane, so one token/tenant cannot starve the
+    # single stage-wide API Gateway budget shared across ALL tokens. Keyed ONLY
+    # on the VERIFIED access-token `sub` (never client input). FAILS OPEN: the
+    # limiter is DISABLED unless API_RATELIMIT_TABLE is set, and any DynamoDB
+    # error allows the request (never 429 a legit agent on a counter hiccup).
+    # Reuses the signup-ratelimit DynamoDB table (distinct `apisub#` key
+    # namespace) to avoid new infra/IAM. Generous default (120 req / 10 s per
+    # sub) sits well above normal agent usage; both knobs are env-tunable.
+    # Global spec-admins are EXEMPT (trusted operators — never throttle recovery
+    # work). UNSET (the local/dev default) => the throttle is off (fail open).
+    API_RATELIMIT_TABLE = os.environ.get("API_RATELIMIT_TABLE") or None
+    API_RATELIMIT_MAX = int(os.environ.get("API_RATELIMIT_MAX", "120"))
+    API_RATELIMIT_WINDOW_S = int(os.environ.get("API_RATELIMIT_WINDOW_S", "10"))
+
     # --- Origin lock (SEC-EDGE-1) --------------------------------------------
     # The raw API Gateway execute-api hostname bypasses Cloudflare's WAF/rate
     # limits. Cloudflare injects a shared-secret request header on traffic it
@@ -290,3 +306,7 @@ class TestConfig(Config):
     ORIGIN_LOCK_SECRET = ""
     ORIGIN_LOCK_MODE = "off"
     ORIGIN_LOCK_HEADER = "X-Origin-Lock"
+    # Per-`sub` API throttle (SEC-DOS-2) OFF by default so a stray
+    # API_RATELIMIT_TABLE env var can't flip the baseline; the throttle tests set
+    # it explicitly on a subclass (and inject an in-memory counter table).
+    API_RATELIMIT_TABLE = None

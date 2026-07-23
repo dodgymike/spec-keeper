@@ -59,6 +59,27 @@ variable "lambda_log_retention_days" {
   default     = 30
 }
 
+# SEC-DOS-2 — per-authenticated-principal (per Cognito `sub`) API throttle. The
+# app enforces a per-`sub` fixed-window limit AFTER the JWT is verified, on the
+# /api/v1 data-plane, so one token/tenant cannot starve the single stage-wide
+# API Gateway budget (apigw.tf default_route_settings) shared across all tokens.
+# It reuses the signup-ratelimit DynamoDB table + its existing app-Lambda IAM
+# (signups.tf `AppRateLimitCounter` already grants dynamodb:UpdateItem) under a
+# distinct `apisub#` key namespace — NO new table/IAM. Generous defaults sit well
+# above normal agent usage; the limiter FAILS OPEN (unset table or any DDB error
+# => allow) so it can never throttle a legitimate agent.
+variable "api_ratelimit_max" {
+  description = "Max authenticated /api/v1 requests per verified `sub` per window before a 429 (SEC-DOS-2). Generous by design — well above normal agent usage. Global spec-admins are exempt."
+  type        = number
+  default     = 120
+}
+
+variable "api_ratelimit_window_seconds" {
+  description = "The per-`sub` API-throttle fixed window in seconds (SEC-DOS-2)."
+  type        = number
+  default     = 10
+}
+
 # ---------------------------------------------------------------------------
 # Deployment artifact: prebuilt zip if provided, else the committed placeholder
 # zipped locally by the archive provider (no AWS / no build tooling needed).
@@ -176,6 +197,17 @@ resource "aws_lambda_function" "app" {
       SIGNUP_ALLOWED_ORIGINS   = var.signup_allowed_origins
       SES_FROM_ADDRESS         = var.ses_from_address
       SES_CONFIG_SET           = aws_sesv2_configuration_set.auth.configuration_set_name
+
+      # SEC-DOS-2 — per-authenticated-principal (per `sub`) API throttle. Keyed
+      # on the VERIFIED token `sub`, enforced after auth on the /api/v1 data
+      # plane so one token/tenant can't starve the stage-wide API Gateway budget.
+      # REUSES the signup-ratelimit counter table (distinct `apisub#` key
+      # namespace) — its app-Lambda IAM (signups.tf `AppRateLimitCounter`,
+      # dynamodb:UpdateItem) already covers it, so no new table/IAM. FAILS OPEN:
+      # unset table or any DDB error => allow (never 429 a legit agent).
+      API_RATELIMIT_TABLE    = aws_dynamodb_table.signup_ratelimit.name
+      API_RATELIMIT_MAX      = tostring(var.api_ratelimit_max)
+      API_RATELIMIT_WINDOW_S = tostring(var.api_ratelimit_window_seconds)
 
       # SEC-EDGE-1 — origin lock. The app compares the ORIGIN_LOCK_HEADER value on
       # incoming requests to ORIGIN_LOCK_SECRET (a Cloudflare Transform Rule
