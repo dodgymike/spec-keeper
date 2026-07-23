@@ -20,6 +20,7 @@ from __future__ import annotations
 import threading
 import time
 
+from app.specmd import ParsedSpec, ParsedTask
 from app.storage.errors import Conflict
 
 BASE = "/api/v1/projects/demo/tasks"
@@ -215,3 +216,63 @@ def test_expired_lease_reclaim(app, project):
     body = second.get_json()
     assert body["key"] == "R-1"
     assert body["owner"] == "bob"
+
+
+def _tagged_spec():
+    """A parsed SPEC.md tree whose tasks carry tags — what ``parse_spec`` yields
+    for tagged tasks and what the API create-path already accepts. Rebuilt fresh
+    each call so callers can mutate it without cross-test bleed."""
+    return ParsedSpec(title="Demo", epics={}, tasks=[
+        ParsedTask(key="TAG-1", title="First", section="backlog", position=1.0,
+                   tags=["urgent", "backend"]),
+        ParsedTask(key="TAG-2", title="Second", section="backlog", position=2.0,
+                   tags=["frontend"]),
+        ParsedTask(key="TAG-3", title="Third", section="backlog", position=3.0,
+                   tags=[]),
+    ])
+
+
+def test_import_persists_task_tags_parity(app, project):
+    """PORT-7: ``import_spec`` persists parsed task tags IDENTICALLY on BOTH
+    backends. Before the fix, Postgres dropped tags on the create-path while
+    DynamoDB kept them (a P1 backend-parity violation). Now, on either backend:
+    import stores the parsed tags, export re-emits them (the SPEC.md round-trip
+    that was lossy on Postgres only), re-import is a genuine no-op with tags in
+    the unchanged-detection, and a tag-only change is detected and applied."""
+    st = app.storage
+
+    # ``import_spec``/``get_task`` are called directly (not via HTTP) because the
+    # SPEC.md *parser* does not itself re-extract tags; the Postgres adapter needs
+    # a Flask app context for its scoped session.
+    with app.app_context():
+        counts = st.import_spec("demo", _tagged_spec())
+        assert counts["tasks_created"] == 3
+        assert counts["tasks_updated"] == 0
+        assert counts["tasks_unchanged"] == 0
+
+        # stored tags == parsed tags (exactly what Postgres used to drop)
+        assert set(st.get_task("demo", "TAG-1").tags) == {"urgent", "backend"}
+        assert set(st.get_task("demo", "TAG-2").tags) == {"frontend"}
+        assert st.get_task("demo", "TAG-3").tags == []
+
+        # export re-emits the tags — the round-trip that was lossy on Postgres
+        # only. Tags render in a deterministic (sorted) order, so the exact meta
+        # line is byte-identical on BOTH backends (no association-order drift).
+        exported = st.render_spec_text("demo")
+        assert "- [ ] TAG-1 · First — backend, urgent" in exported
+        assert "- [ ] TAG-2 · Second — frontend" in exported
+
+        # idempotent re-import: tags are in the unchanged-detection -> 0 writes
+        counts2 = st.import_spec("demo", _tagged_spec())
+        assert counts2["tasks_created"] == 0
+        assert counts2["tasks_updated"] == 0
+        assert counts2["tasks_unchanged"] == 3
+        assert set(st.get_task("demo", "TAG-1").tags) == {"urgent", "backend"}
+
+        # a tag-only change IS detected and rewrites the stored tags on both backends
+        changed = _tagged_spec()
+        changed.tasks[0].tags = ["urgent", "p0-blocker"]  # dropped "backend", +1
+        counts3 = st.import_spec("demo", changed)
+        assert counts3["tasks_updated"] == 1
+        assert counts3["tasks_unchanged"] == 2
+        assert set(st.get_task("demo", "TAG-1").tags) == {"urgent", "p0-blocker"}

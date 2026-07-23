@@ -17,6 +17,7 @@ from datetime import timedelta
 
 import sqlalchemy as sa
 from flask import current_app
+from sqlalchemy.orm import selectinload
 
 from .extensions import db
 from .models import (
@@ -27,6 +28,7 @@ from .models import (
     LeaseState,
     Priority,
     Reservation,
+    Tag,
     Task,
     TaskStatus,
     utcnow,
@@ -196,13 +198,35 @@ def import_spec(project_id: int, parsed: ParsedSpec) -> dict:
         epics_by_key[ekey] = epic
     db.session.flush()  # assign epic ids for the FK below (one round-trip)
 
-    # --- tasks: bulk-load existing, upsert in memory -----------------------
+    # --- tasks: bulk-load existing (with tags), upsert in memory -----------
+    # ``selectinload(Task.tags)`` eager-loads every task's tags in ONE extra
+    # query (not one lazy round-trip per task), so the tag-parity check below
+    # keeps PORT-6's batched-import shape.
     existing_tasks = {
         t.key: t for t in db.session.execute(
-            sa.select(Task).where(Task.project_id == project_id)
+            sa.select(Task)
+            .where(Task.project_id == project_id)
+            .options(selectinload(Task.tags))
         ).scalars().all()
         if t.key is not None
     }
+    # Bulk-load existing tags once; ``_tag`` get-or-creates in memory so an
+    # import that reuses/adds tags is still a handful of statements. Parsed tags
+    # are de-duplicated (order-preserving) to match the many-to-many, which can
+    # hold each (task, tag) association only once.
+    existing_tags = {
+        tag.key: tag for tag in db.session.execute(
+            sa.select(Tag).where(Tag.project_id == project_id)
+        ).scalars().all()
+    }
+
+    def _tag(key: str) -> Tag:
+        tag = existing_tags.get(key)
+        if tag is None:
+            tag = Tag(project_id=project_id, key=key)
+            db.session.add(tag)
+            existing_tags[key] = tag
+        return tag
     # De-duplicate within the same import by key (last occurrence wins), mirroring
     # the old read-then-write path where a later duplicate updated the earlier row.
     deduped: dict[str, object] = {}
@@ -219,6 +243,7 @@ def import_spec(project_id: int, parsed: ParsedSpec) -> dict:
         epic_id = epics_by_key[pt.epic_key].id if pt.epic_key in epics_by_key else None
         status = TaskStatus(pt.status)
         priority = Priority(pt.priority) if pt.priority else None
+        desired_tags = list(dict.fromkeys(pt.tags or []))
         task = existing_tasks.get(key)
         if task is None:
             db.session.add(Task(
@@ -226,9 +251,10 @@ def import_spec(project_id: int, parsed: ParsedSpec) -> dict:
                 description=pt.description, status=status, priority=priority,
                 component=pt.component, proof_cmd=pt.proof_cmd,
                 section=pt.section, position=pt.position, epic_id=epic_id,
+                tags=[_tag(k) for k in desired_tags],
             ))
             created_tasks += 1
-        elif _task_unchanged(task, pt, status, priority, epic_id):
+        elif _task_unchanged(task, pt, status, priority, epic_id, desired_tags):
             unchanged_tasks += 1  # no write, no version bump
         else:
             task.title = pt.title
@@ -240,6 +266,7 @@ def import_spec(project_id: int, parsed: ParsedSpec) -> dict:
             task.section = pt.section
             task.position = pt.position
             task.epic_id = epic_id
+            task.tags = [_tag(k) for k in desired_tags]
             task.version += 1
             updated_tasks += 1
     db.session.flush()
@@ -250,9 +277,11 @@ def import_spec(project_id: int, parsed: ParsedSpec) -> dict:
     }
 
 
-def _task_unchanged(task, pt, status, priority, epic_id) -> bool:
+def _task_unchanged(task, pt, status, priority, epic_id, desired_tags) -> bool:
     """True when every import-controlled field already matches (so re-importing an
-    unchanged SPEC.md is a genuine no-op — no write, no version bump)."""
+    unchanged SPEC.md is a genuine no-op — no write, no version bump). Tags are
+    compared as a set (association order is not meaningful) so a tag-only change
+    IS detected and updates the task, identically to the DynamoDB adapter."""
     return (
         task.title == pt.title
         and task.description == pt.description
@@ -263,6 +292,7 @@ def _task_unchanged(task, pt, status, priority, epic_id) -> bool:
         and task.section == pt.section
         and task.position == pt.position
         and task.epic_id == epic_id
+        and {t.key for t in task.tags} == set(desired_tags)
     )
 
 

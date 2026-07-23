@@ -347,7 +347,9 @@ def _render_task(t) -> list[str]:
         meta.append(t.priority)
     if t.status in {"blocked", "deferred", "cancelled", "in_progress"}:
         meta.append(t.status.replace("_", " "))
-    for tag in getattr(t, "tag_keys", []) or []:
+    # Sort tags so the rendered meta line is deterministic and backend-agnostic
+    # (Postgres association order vs DynamoDB list order would otherwise diverge).
+    for tag in sorted(getattr(t, "tag_keys", []) or []):
         meta.append(tag)
     head = f"- [{glyph}] {t.key} · {t.title}"
     if meta:

@@ -1461,6 +1461,9 @@ class DynamoBackend:
 
         task_writes = []
         for key, pt in deduped.items():
+            # De-duplicate parsed tags (order-preserving) to match the Postgres
+            # many-to-many, which holds each (task, tag) association only once.
+            desired_tags = list(dict.fromkeys(pt.tags or []))
             existing = existing_tasks.get(key)
             if existing is None:
                 pubid = _uuid()
@@ -1472,7 +1475,7 @@ class DynamoBackend:
                     "priority": pt.priority, "component": pt.component,
                     "proof_cmd": pt.proof_cmd, "status_note": None,
                     "section": pt.section, "owner": None, "lease_expires_at": None,
-                    "position": pt.position, "version": 1, "tags": pt.tags or [],
+                    "position": pt.position, "version": 1, "tags": desired_tags,
                     "created_at": now, "updated_at": now, "completed_at": None,
                 }
                 created_tasks += 1
@@ -1486,7 +1489,8 @@ class DynamoBackend:
                     "description": pt.description, "status": pt.status,
                     "priority": pt.priority, "component": pt.component,
                     "proof_cmd": pt.proof_cmd, "section": pt.section,
-                    "position": pt.position, "updated_at": now,
+                    "position": pt.position, "tags": desired_tags,
+                    "updated_at": now,
                     "version": int(_pyify(item.get("version", 1))) + 1,
                 })
                 updated_tasks += 1
@@ -1508,8 +1512,9 @@ class DynamoBackend:
     def _task_item_unchanged(existing: dict, pt) -> bool:
         """True when every import-controlled field of the stored task already
         matches the parsed task — mirrors the Postgres ``_task_unchanged`` so a
-        re-import is a genuine no-op on both backends (tags are create-only, so
-        excluded, matching the update path which never rewrites them)."""
+        re-import is a genuine no-op on both backends. Tags are compared as a set
+        (association order is not meaningful) so a tag-only change IS detected and
+        rewrites the task, identically to the Postgres adapter."""
         return (
             existing.get("epic_key") == pt.epic_key
             and existing.get("title") == pt.title
@@ -1520,6 +1525,7 @@ class DynamoBackend:
             and existing.get("proof_cmd") == pt.proof_cmd
             and existing.get("section") == pt.section
             and _pyify(existing.get("position")) == pt.position
+            and set(existing.get("tags") or []) == set(pt.tags or [])
         )
 
     def render_spec_text(self, slug: str) -> str:
