@@ -238,3 +238,30 @@ Decisions:
   idempotent provisioning, so even two coexisting active tokens for one pair redeem to the SAME
   Cognito user (a rotation) and never cross tenants. A future hardening could make it a hard
   invariant via a conditional write on a deterministic per-pair guard key.
+
+## DEC-PORT-8: full-fidelity JSON migration transport is idempotent on `public_id`, targets a fresh store
+
+**Context.** The `SPEC.md` text round-trip anchors and dedups tasks on their human `key`
+(`- [ ] EPIC-N · title`). A task with **no key has no representation**, so keyless tasks silently
+drop on a text export→import (a real project lost 267 keyless follow-up tasks). We need a lossless
+transport for migrating a whole project.
+
+**Decision.** Add an **additive** JSON format alongside the text one (never changing the text
+behaviour): `GET .../export?format=json` (or `Accept: application/json`) emits **every** task —
+keyed AND keyless — plus epics/tags/timestamps; `POST .../import` with `Content-Type:
+application/json` upserts each task **idempotently on its stable `public_id`** (not its key), so
+keyless tasks dedup by their id and round-trip losslessly. Both storage backends implement it
+identically (same dedup key, counts, unchanged-detection field set, tag/epic handling, batched
+writes). Runtime state (`owner`, `lease_expires_at`, `version`) is **excluded** — a fresh import
+starts each task unowned at `version` 1. Epics dedup on their `key`; their `public_id` is minted
+fresh on import (it is not an idempotency anchor and preserving it would collide on Postgres'
+global-unique `public_id`). Within a single payload, tasks are de-duplicated by `public_id`
+(last-wins) on both adapters for parity.
+
+**Consequences.** `import(export(project))` reproduces all tasks with fields+tags+epic and preserved
+task `public_id`; re-import into the same project is a genuine no-op (0 writes); a changed field
+re-imports as one update. Because a task's `public_id` is **globally unique on Postgres** (per-
+partition on DynamoDB), the transport targets a **fresh** project/server — importing a payload whose
+`public_id` already exists in a *different* project of the same Postgres store would raise (Dynamo
+would create in its own partition). This is acceptable for the migration use case; a future
+hardening could make `public_id` per-project unique to close the last cross-backend edge.

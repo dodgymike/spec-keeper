@@ -188,6 +188,180 @@ def test_import_oversize_body_is_413(client, project):
         cfg["MAX_CONTENT_LENGTH"] = original
 
 
+# --------------------------------------------------------------------------- #
+# PORT-8: lossless full-fidelity JSON export/import (keyless tasks survive)
+# --------------------------------------------------------------------------- #
+def _seed_mixed_backlog(client, base):
+    """A backlog with an epic, KEYED tasks (+tags, +epic) AND KEYLESS tasks —
+    the mix that the SPEC.md transport cannot represent losslessly."""
+    assert client.post(f"{base}/epics",
+                        json={"key": "MIG", "title": "Migration",
+                              "section": "backlog"}).status_code == 201
+    # keyed, in an epic, with tags
+    assert client.post(f"{base}/tasks", json={
+        "key": "MIG-1", "epic_key": "MIG", "title": "Keyed one",
+        "priority": "P1", "component": "BE", "tags": ["urgent", "backend"],
+        "position": 1.0}).status_code == 201
+    # keyless (no key) — the tasks the SPEC.md format silently drops
+    for i in range(3):
+        r = client.post(f"{base}/tasks", json={
+            "title": f"Keyless follow-up {i}", "tags": ["followup"],
+            "position": 10.0 + i})
+        assert r.status_code == 201
+        assert r.get_json()["key"] is None
+    # a keyed task with no epic
+    assert client.post(f"{base}/tasks", json={
+        "key": "MIG-2", "title": "Keyed two", "position": 2.0}).status_code == 201
+
+
+def test_json_export_includes_keyless_tasks(client, project):
+    B = "/api/v1/projects/demo"
+    _seed_mixed_backlog(client, B)
+
+    resp = client.get(f"{B}/export?format=json")
+    assert resp.status_code == 200
+    assert resp.mimetype == "application/json"
+    doc = resp.get_json()
+    assert doc["format"] == "spec-server-full/v1"
+    assert doc["project"]["slug"] == "demo"
+    assert {e["key"] for e in doc["epics"]} == {"MIG"}
+    assert len(doc["tasks"]) == 5  # 2 keyed + 3 keyless — none dropped
+
+    keyless = [t for t in doc["tasks"] if t["key"] is None]
+    assert len(keyless) == 3
+    assert all(t["public_id"] for t in keyless)  # every task carries its anchor
+    assert all(t["tags"] == ["followup"] for t in keyless)
+
+    # Accept-header negotiation is the other way to ask for JSON.
+    r2 = client.get(f"{B}/export", headers={"Accept": "application/json"})
+    assert r2.mimetype == "application/json"
+    assert len(r2.get_json()["tasks"]) == 5
+    # The default (no format / */*) is still the SPEC.md text mirror, unchanged.
+    r3 = client.get(f"{B}/export")
+    assert r3.mimetype == "text/markdown"
+
+
+def test_json_roundtrip_into_fresh_project_is_lossless(client, project):
+    """import(export(project)) into a FRESH project reproduces EVERY task — keyed
+    AND keyless — with fields, tags, epic and preserved public_id; re-import is a
+    genuine no-op; a changed field re-imports as exactly one update."""
+    src = "/api/v1/projects/demo"
+    _seed_mixed_backlog(client, src)
+    doc = client.get(f"{src}/export?format=json").get_json()
+    src_by_pub = {t["public_id"]: t for t in doc["tasks"]}
+
+    # Simulate a real migration to a fresh SERVER: the source is gone (in one DB,
+    # task public_id is globally unique on Postgres, so preservation requires the
+    # source not to coexist — Dynamo scopes it per project and behaves the same).
+    assert client.delete(src).status_code in (200, 204)
+
+    # Fresh, empty destination project.
+    assert client.post("/api/v1/projects",
+                       json={"slug": "dest", "name": "Dest"}).status_code == 201
+    dst = "/api/v1/projects/dest"
+
+    imp = client.post(f"{dst}/import", json=doc)
+    assert imp.status_code == 200, imp.get_data(as_text=True)[:400]
+    body = imp.get_json()
+    assert body["created"] == 5
+    assert body["updated"] == 0 and body["unchanged"] == 0
+    assert body["failed"] == []
+    assert body["epics_created"] == 1
+
+    # Every task present with correct fields + preserved public_id (keyed+keyless).
+    got = client.get(f"{dst}/tasks?limit=1000").get_json()
+    assert len(got) == 5
+    got_by_pub = {t["public_id"]: t for t in got}
+    assert set(got_by_pub) == set(src_by_pub)  # public_ids preserved exactly
+
+    # The core bug: the KEYLESS tasks survived the round-trip.
+    keyless = [t for t in got if t["key"] is None]
+    assert len(keyless) == 3
+    assert all(set(t["tags"]) == {"followup"} for t in keyless)
+
+    # A keyed task kept its epic + tags + priority + component.
+    mig1 = next(t for t in got if t["key"] == "MIG-1")
+    assert mig1["epic_key"] == "MIG"
+    assert set(mig1["tags"]) == {"urgent", "backend"}
+    assert mig1["priority"] == "P1" and mig1["component"] == "BE"
+
+    # Re-import the SAME document into the SAME project -> genuine no-op.
+    reimp = client.post(f"{dst}/import", json=doc).get_json()
+    assert reimp["created"] == 0
+    assert reimp["updated"] == 0
+    assert reimp["unchanged"] == 5
+
+    # Change ONE task (a keyless one) and re-import -> exactly one update.
+    target_pub = keyless[0]["public_id"]
+    changed = {**doc, "tasks": [
+        {**t, "title": "Edited keyless title"} if t["public_id"] == target_pub else t
+        for t in doc["tasks"]
+    ]}
+    upd = client.post(f"{dst}/import", json=changed).get_json()
+    assert upd["updated"] == 1
+    assert upd["unchanged"] == 4
+    assert upd["created"] == 0
+    edited = client.get(f"{dst}/tasks/{target_pub}").get_json()
+    assert edited["title"] == "Edited keyless title"
+
+
+def test_json_import_rejects_non_object_body(client, project):
+    B = "/api/v1/projects/demo"
+    r = client.post(f"{B}/import", json=[1, 2, 3])
+    assert r.status_code == 400
+    assert "JSON object" in r.get_json()["message"]
+
+
+def test_json_import_reports_bad_task_not_500(client, project):
+    """A task with an empty title is reported in ``failed`` (207); the rest import.
+    Keyless-and-anchored tasks import fine alongside it."""
+    B = "/api/v1/projects/demo"
+    doc = {
+        "format": "spec-server-full/v1",
+        "project": {"slug": "demo", "name": "Demo"},
+        "epics": [],
+        "tasks": [
+            {"public_id": "11111111-1111-1111-1111-111111111111",
+             "key": "OK-1", "title": "Fine", "status": "todo",
+             "section": "backlog", "position": 1.0, "tags": []},
+            {"public_id": "22222222-2222-2222-2222-222222222222",
+             "key": None, "title": "   ", "status": "todo",
+             "section": "backlog", "position": 2.0, "tags": []},  # empty title
+        ],
+    }
+    r = client.post(f"{B}/import", json=doc)
+    assert r.status_code == 207, r.get_data(as_text=True)[:400]
+    j = r.get_json()
+    assert j["created"] == 1
+    assert len(j["failed"]) == 1
+    assert "title" in j["failed"][0]["error"]
+
+
+def test_json_import_dedupes_repeated_public_id(client, project):
+    """Two payload rows sharing one public_id collapse to a single upsert (last
+    wins) — identical on both backends (no IntegrityError on Postgres, no silent
+    divergence on DynamoDB)."""
+    B = "/api/v1/projects/demo"
+    pub = "33333333-3333-3333-3333-333333333333"
+    doc = {
+        "format": "spec-server-full/v1",
+        "project": {"slug": "demo", "name": "Demo"},
+        "epics": [],
+        "tasks": [
+            {"public_id": pub, "key": None, "title": "First write",
+             "status": "todo", "section": "backlog", "position": 1.0, "tags": []},
+            {"public_id": pub, "key": None, "title": "Last write wins",
+             "status": "todo", "section": "backlog", "position": 1.0, "tags": []},
+        ],
+    }
+    r = client.post(f"{B}/import", json=doc)
+    assert r.status_code == 200, r.get_data(as_text=True)[:400]
+    assert r.get_json()["created"] == 1
+    got = client.get(f"{B}/tasks").get_json()
+    assert len(got) == 1
+    assert got[0]["title"] == "Last write wins"
+
+
 def test_export_diff_detects_change(client, project):
     B = "/api/v1/projects/demo"
     client.post(f"{B}/import", data=SAMPLE,

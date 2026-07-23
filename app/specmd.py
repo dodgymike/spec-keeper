@@ -70,6 +70,28 @@ def validate_parsed_task(pt: "ParsedTask") -> None:
         )
 
 
+def validate_doc_task(task: dict) -> None:
+    """Validate one task from a full-fidelity JSON document (PORT-8) before it is
+    written. Shared by the Postgres and DynamoDB adapters so a malformed task
+    fails identically on both backends (parity). Unlike ``validate_parsed_task``
+    the ``key`` may be absent/None — keyless tasks are first-class in this
+    transport (they dedup on ``public_id``). Raises ``TaskValidationError``."""
+    title = task.get("title")
+    if not (title or "").strip():
+        ident = task.get("key") or task.get("public_id") or "<unknown>"
+        raise TaskValidationError(f"task {ident!r} has an empty title")
+    status = task.get("status") or "todo"
+    if status not in VALID_STATUSES:
+        raise TaskValidationError(
+            f"task {(task.get('key') or task.get('public_id'))!r} has invalid status {status!r}"
+        )
+    priority = task.get("priority")
+    if priority is not None and priority not in VALID_PRIORITIES:
+        raise TaskValidationError(
+            f"task {(task.get('key') or task.get('public_id'))!r} has invalid priority {priority!r}"
+        )
+
+
 @dataclass
 class ParsedTask:
     key: str | None

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 from ..extensions import db
 from ..idempotency import lookup_idempotent, store_idempotent
@@ -45,6 +46,7 @@ from ..models import (
 from ..services import (
     claim_next_task,
     close_active_lease,
+    import_doc as _import_doc_svc,
     import_spec as _import_spec_svc,
     log_event,
     reserve_number as _reserve_number_svc,
@@ -68,6 +70,10 @@ from .dto import (
     TaskDTO,
 )
 from .errors import BackendUnavailable, Conflict, NotFound, VersionConflict
+
+
+# Format marker stamped on / accepted by the full-fidelity JSON document (PORT-8).
+_EXPORT_FORMAT = "spec-server-full/v1"
 
 
 # --------------------------------------------------------------------------- #
@@ -911,6 +917,58 @@ class PostgresBackend:
         ).scalars().all()
         render_tasks = [_RenderTask(t, epic_key_by_id.get(t.epic_id)) for t in tasks]
         return render_spec(project.name or project.slug, epics, render_tasks)
+
+    def export_doc(self, slug: str) -> dict:
+        """Full-fidelity JSON export (PORT-8): EVERY task (keyed AND keyless) with
+        all core fields + tags, plus the epics. Runtime state (owner/lease/version)
+        is intentionally excluded — see ``ExportDocOut``."""
+        project = self._project(slug)
+        epics = db.session.execute(
+            sa.select(Epic)
+            .where(Epic.project_id == project.id)
+            .order_by(Epic.position, Epic.id)
+        ).scalars().all()
+        epic_key_by_id = {e.id: e.key for e in epics}
+        tasks = db.session.execute(
+            sa.select(Task)
+            .where(Task.project_id == project.id)
+            .options(selectinload(Task.tags))
+            .order_by(Task.position, Task.id)
+        ).scalars().all()
+        return {
+            "format": _EXPORT_FORMAT,
+            "project": {
+                "slug": project.slug, "name": project.name,
+                "description": project.description,
+                "default_branch": project.default_branch,
+            },
+            "epics": [{
+                "public_id": e.public_id, "key": e.key, "title": e.title,
+                "description": e.description, "section": e.section,
+                "position": e.position,
+            } for e in epics],
+            "tasks": [{
+                "public_id": t.public_id, "key": t.key,
+                "epic_key": epic_key_by_id.get(t.epic_id),
+                "title": t.title, "description": t.description,
+                "status": t.status.value,
+                "priority": t.priority.value if t.priority else None,
+                "component": t.component, "proof_cmd": t.proof_cmd,
+                "status_note": t.status_note, "section": t.section,
+                "position": t.position, "tags": [tag.key for tag in t.tags],
+                "created_at": t.created_at, "updated_at": t.updated_at,
+                "completed_at": t.completed_at,
+            } for t in tasks],
+        }
+
+    def import_doc(self, slug: str, doc: dict) -> dict:
+        """Idempotent full-fidelity JSON import (PORT-8): upsert each task by its
+        stable ``public_id`` (create-with-public_id or update-existing) so KEYLESS
+        tasks round-trip losslessly and re-import is a genuine no-op."""
+        project = self._project(slug)
+        counts = _import_doc_svc(project.id, doc)
+        db.session.commit()
+        return counts
 
 
 class _RenderTask:

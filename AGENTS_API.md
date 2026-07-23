@@ -302,6 +302,43 @@ structured so an agent can self-verify:
 - The redeem/enrollment bearer is reusable for ~1 hour, so a transient import failure can be retried
   with the **same** token — no fresh enrollment needed.
 
+### Lossless full-fidelity JSON transport (PORT-8)
+
+The `text/markdown` round-trip above is the **human-readable** mirror: it lists only tasks that have
+a human `key` (the checkbox anchor `- [ ] EPIC-N · title`). A task with **no key has no line**, so
+keyless follow-up tasks are silently dropped by a `SPEC.md` export→import. For a **lossless
+migration** (moving a whole project to a fresh server) use the **JSON** transport instead — it
+carries **every** task, keyed *and* keyless, and is idempotent on each task's stable `public_id`
+(not its key):
+
+```bash
+# Full-fidelity JSON export — EVERY task (keyed AND keyless) + epics + tags + timestamps:
+curl -s "$B/projects/corsearch/export?format=json" > backlog.json
+#   (or: curl -s $B/projects/corsearch/export -H 'Accept: application/json')
+# -> {"format":"spec-server-full/v1","project":{...},"epics":[...],
+#     "tasks":[{"public_id":"…","key":null,"title":"a keyless follow-up",...}, …]}
+
+# Import it into a fresh project — idempotent on public_id (re-import is a no-op):
+curl -s -X POST $B/projects/corsearch/import \
+  --data-binary @backlog.json -H 'Content-Type: application/json'
+# -> 200 {"total":310,"created":310,"updated":0,"unchanged":0,"failed":[], …}
+```
+
+- The import is **dispatched on `Content-Type`**: `application/json` → this lossless path;
+  `text/markdown` (or anything else) → the SPEC.md path above, unchanged. The `export` default is
+  still `text/markdown`; JSON is opt-in via `?format=json` or `Accept: application/json`.
+- **Idempotent on `public_id`.** Each task upserts by its `public_id` (preserved on create), so
+  keyless tasks dedup by their stable id and round-trip losslessly; re-importing an unchanged
+  document makes **no writes** (all `unchanged`), and a changed field re-imports as one `update`.
+- Same structured `{total,created,updated,unchanged,failed}` result, same **207**-on-`failed`, same
+  **413** body cap, same **batched** write path (Postgres bulk upsert / DynamoDB `BatchWriteItem`),
+  identical on both backends.
+- **Runtime state is excluded** by design: `owner`, `lease_expires_at` and the optimistic-lock
+  `version` are not carried — a fresh import starts each task unowned at `version` 1. Epics dedup on
+  their `key` (their `public_id` is minted fresh on import). Because a task's `public_id` is globally
+  unique on Postgres, the JSON transport targets a **fresh** project/server; re-import into the same
+  project is the idempotent no-op.
+
 ## Log your work and record decisions
 
 The append-only event stream replaces `AGENT_LOG.md`; decisions replace `DECISIONS.md`. Claim,

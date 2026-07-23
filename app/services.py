@@ -31,9 +31,10 @@ from .models import (
     Tag,
     Task,
     TaskStatus,
+    _uuid,
     utcnow,
 )
-from .specmd import ParsedSpec, validate_parsed_task
+from .specmd import ParsedSpec, validate_doc_task, validate_parsed_task
 
 
 def log_event(project_id: int, event_type: str, agent=None, task_id=None,
@@ -275,6 +276,180 @@ def import_spec(project_id: int, parsed: ParsedSpec) -> dict:
         "tasks_created": created_tasks, "tasks_updated": updated_tasks,
         "tasks_unchanged": unchanged_tasks, "failed": failed,
     }
+
+
+def import_doc(project_id: int, doc: dict) -> dict:
+    """Idempotently upsert a full-fidelity JSON document (PORT-8) into the project.
+
+    Unlike ``import_spec`` (which dedups tasks on their human ``key`` and so drops
+    KEYLESS tasks), this dedups on the stable ``public_id`` — so every task, keyed
+    AND keyless, round-trips losslessly, and re-importing an unchanged document is
+    a genuine no-op (no write, no version bump). The supplied ``public_id`` is
+    preserved on create so ``import(export(project))`` re-exports identically.
+
+    Batched exactly like ``import_spec``: existing epics/tasks are bulk-loaded in
+    a handful of queries (not one round-trip per task), and only genuinely-changed
+    rows are written. Per-task validation errors are collected in ``failed`` (the
+    row is skipped) rather than aborting the whole import.
+
+    Runtime state (owner/lease/version) is NOT taken from the payload: a fresh
+    import starts each task unowned at version 1.
+    """
+    created_epics = updated_epics = 0
+    created_tasks = updated_tasks = unchanged_tasks = 0
+    failed: list[dict] = []
+
+    # --- epics: bulk-load existing, upsert by key (epics require a key) -----
+    existing_epics = {
+        e.key: e for e in db.session.execute(
+            sa.select(Epic).where(Epic.project_id == project_id)
+        ).scalars().all()
+    }
+    epics_by_key: dict[str, Epic] = dict(existing_epics)
+    for pe in doc.get("epics", []) or []:
+        ekey = pe.get("key")
+        if not ekey:
+            continue
+        epic = existing_epics.get(ekey)
+        if epic is None:
+            # Epics dedup on (project, key), NOT public_id, so a fresh public_id
+            # is minted here — preserving the payload's would collide across
+            # projects (public_id is globally unique) with no idempotency benefit.
+            epic = Epic(
+                project_id=project_id, key=ekey, title=pe.get("title") or ekey,
+                description=pe.get("description"),
+                section=pe.get("section") or "backlog",
+                position=pe.get("position", 1000.0) if pe.get("position") is not None else 1000.0,
+            )
+            db.session.add(epic)
+            created_epics += 1
+        else:
+            epic.title = pe.get("title") or epic.title
+            epic.description = pe.get("description")
+            epic.section = pe.get("section") or "backlog"
+            if pe.get("position") is not None:
+                epic.position = pe["position"]
+            updated_epics += 1
+        epics_by_key[ekey] = epic
+    db.session.flush()  # assign epic ids for the FK below (one round-trip)
+
+    # --- tasks: bulk-load existing by public_id, upsert in memory -----------
+    existing_tasks = {
+        t.public_id: t for t in db.session.execute(
+            sa.select(Task)
+            .where(Task.project_id == project_id)
+            .options(selectinload(Task.tags))
+        ).scalars().all()
+    }
+    existing_tags = {
+        tag.key: tag for tag in db.session.execute(
+            sa.select(Tag).where(Tag.project_id == project_id)
+        ).scalars().all()
+    }
+
+    def _tag(key: str) -> Tag:
+        tag = existing_tags.get(key)
+        if tag is None:
+            tag = Tag(project_id=project_id, key=key)
+            db.session.add(tag)
+            existing_tags[key] = tag
+        return tag
+
+    # De-duplicate within this import by public_id (last wins), mirroring
+    # ``import_spec``'s per-key dedup — so a payload that repeats a public_id
+    # yields one upsert (not an IntegrityError), identically to the DynamoDB
+    # adapter's last-write-wins batch. Tasks without a public_id (hand-authored
+    # docs) always create, so they are processed as-is under a minted id.
+    deduped: dict[str, dict] = {}
+    keyless_rows: list[dict] = []
+    for t in doc.get("tasks", []) or []:
+        try:
+            validate_doc_task(t)
+        except ValueError as exc:
+            failed.append({
+                "task_key_or_line": t.get("key") or t.get("title")
+                or t.get("public_id") or "<unknown>",
+                "error": str(exc),
+            })
+            continue
+        if t.get("public_id"):
+            deduped[t["public_id"]] = t
+        else:
+            keyless_rows.append(t)
+
+    for t in list(deduped.values()) + keyless_rows:
+        pubid = t.get("public_id") or _uuid()
+        epic_key = t.get("epic_key")
+        epic = epics_by_key.get(epic_key) if epic_key else None
+        epic_id = epic.id if epic is not None else None
+        status = TaskStatus(t["status"]) if t.get("status") else TaskStatus.todo
+        priority = Priority(t["priority"]) if t.get("priority") else None
+        section = t.get("section") or "backlog"
+        position = t.get("position", 1000.0) if t.get("position") is not None else 1000.0
+        desired_tags = list(dict.fromkeys(t.get("tags") or []))
+
+        task = existing_tasks.get(pubid)
+        if task is None:
+            db.session.add(Task(
+                project_id=project_id, public_id=pubid, key=t.get("key"),
+                title=t["title"], description=t.get("description"),
+                status=status, priority=priority, component=t.get("component"),
+                proof_cmd=t.get("proof_cmd"), status_note=t.get("status_note"),
+                section=section, position=position, epic_id=epic_id,
+                tags=[_tag(k) for k in desired_tags],
+                created_at=t.get("created_at") or utcnow(),
+                updated_at=t.get("updated_at") or utcnow(),
+                completed_at=t.get("completed_at"),
+            ))
+            created_tasks += 1
+        elif _doc_task_unchanged(task, t, status, priority, epic_id, section,
+                                 position, desired_tags):
+            unchanged_tasks += 1  # no write, no version bump
+        else:
+            task.key = t.get("key")
+            task.title = t["title"]
+            task.description = t.get("description")
+            task.status = status
+            task.priority = priority
+            task.component = t.get("component")
+            task.proof_cmd = t.get("proof_cmd")
+            task.status_note = t.get("status_note")
+            task.section = section
+            task.position = position
+            task.epic_id = epic_id
+            task.tags = [_tag(k) for k in desired_tags]
+            if t.get("completed_at") is not None:
+                task.completed_at = t.get("completed_at")
+            task.version += 1
+            updated_tasks += 1
+    db.session.flush()
+    return {
+        "epics_created": created_epics, "epics_updated": updated_epics,
+        "tasks_created": created_tasks, "tasks_updated": updated_tasks,
+        "tasks_unchanged": unchanged_tasks, "failed": failed,
+    }
+
+
+def _doc_task_unchanged(task, t, status, priority, epic_id, section, position,
+                        desired_tags) -> bool:
+    """True when every import-controlled field of the stored task already matches
+    the JSON payload (so re-importing an unchanged document is a genuine no-op).
+    Timestamps and runtime state are not part of change detection — identical to
+    the DynamoDB adapter's ``_doc_item_unchanged`` (parity)."""
+    return (
+        task.key == t.get("key")
+        and task.title == t.get("title")
+        and task.description == t.get("description")
+        and task.status == status
+        and task.priority == priority
+        and task.component == t.get("component")
+        and task.proof_cmd == t.get("proof_cmd")
+        and task.status_note == t.get("status_note")
+        and task.section == section
+        and task.position == position
+        and task.epic_id == epic_id
+        and {tag.key for tag in task.tags} == set(desired_tags)
+    )
 
 
 def _task_unchanged(task, pt, status, priority, epic_id, desired_tags) -> bool:

@@ -5,7 +5,7 @@ auto-generated OpenAPI document that agents consume.
 """
 from __future__ import annotations
 
-from marshmallow import Schema, fields, validate
+from marshmallow import EXCLUDE, Schema, fields, validate
 
 from .models import Priority, RelationKind, TaskStatus, LeaseState  # noqa: F401
 
@@ -320,6 +320,76 @@ class ImportResultOut(Schema):
     failed = fields.List(fields.Nested(ImportFailureOut))
     epics_created = fields.Int()
     epics_updated = fields.Int()
+
+
+# --------------------------------------------------------------------------- #
+# Full-fidelity JSON export/import (PORT-8) — the lossless MACHINE transport for
+# migration. Unlike the human-readable SPEC.md (keyed tasks only), this carries
+# EVERY task, keyed AND keyless, and dedups on the stable ``public_id`` so a
+# re-export -> re-import is a genuine no-op. Runtime lease state (``owner``,
+# ``lease_expires_at``) and the optimistic-lock token (``version``) are
+# deliberately EXCLUDED — they are per-deployment runtime state, not migration
+# content, and a fresh import starts each task unowned at ``version`` 1.
+# --------------------------------------------------------------------------- #
+class ExportProjectOut(Schema):
+    """Project header of the export document (identity/config, not runtime)."""
+    class Meta:
+        unknown = EXCLUDE
+
+    slug = fields.Str()
+    name = fields.Str()
+    description = fields.Str(allow_none=True)
+    default_branch = fields.Str()
+
+
+class ExportEpicOut(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    public_id = fields.Str(allow_none=True)
+    key = fields.Str()
+    title = fields.Str()
+    description = fields.Str(allow_none=True)
+    section = fields.Str()
+    position = fields.Float()
+
+
+class ExportTaskOut(Schema):
+    """One task in the full-fidelity document. ``public_id`` is the idempotency
+    anchor (present for every task, keyed or KEYLESS); ``key`` is nullable."""
+    class Meta:
+        unknown = EXCLUDE
+
+    public_id = fields.Str(allow_none=True, metadata={
+        "description": "Stable id — the import dedup key. Preserved on import so re-import is a no-op."})
+    key = fields.Str(allow_none=True, metadata={"description": "Human id, e.g. 'PORT-8'. Nullable (keyless tasks are carried too)."})
+    epic_key = fields.Str(allow_none=True)
+    title = fields.Str()
+    description = fields.Str(allow_none=True)
+    status = fields.Str(metadata={"description": f"One of {STATUS_VALUES}."})
+    priority = fields.Str(allow_none=True, metadata={"description": f"One of {PRIORITY_VALUES} or null."})
+    component = fields.Str(allow_none=True)
+    proof_cmd = fields.Str(allow_none=True)
+    status_note = fields.Str(allow_none=True)
+    section = fields.Str()
+    position = fields.Float()
+    tags = fields.List(fields.Str())
+    created_at = fields.DateTime(allow_none=True)
+    updated_at = fields.DateTime(allow_none=True)
+    completed_at = fields.DateTime(allow_none=True)
+
+
+class ExportDocOut(Schema):
+    """The full-fidelity JSON migration document (PORT-8). Serves as BOTH the
+    export dump AND the import body (idempotent on each task's ``public_id``).
+    Runtime state (owner/lease/version) is intentionally omitted."""
+    class Meta:
+        unknown = EXCLUDE
+
+    format = fields.Str(metadata={"description": "Format marker, e.g. 'spec-server-full/v1'."})
+    project = fields.Nested(ExportProjectOut)
+    epics = fields.List(fields.Nested(ExportEpicOut))
+    tasks = fields.List(fields.Nested(ExportTaskOut))
 
 
 # --------------------------------------------------------------------------- #

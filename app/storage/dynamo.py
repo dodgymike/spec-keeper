@@ -118,6 +118,21 @@ def _dt(s):
     return datetime.fromisoformat(s)
 
 
+def _iso(v):
+    """Normalise a timestamp to an ISO-8601 string for storage. Accepts a
+    ``datetime`` (as ``ExportDocOut`` yields on load) or an already-ISO string;
+    ``None`` passes through so ``_strip_none`` drops it."""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.isoformat()
+    return v
+
+
+# Format marker stamped on / accepted by the full-fidelity JSON document (PORT-8).
+_EXPORT_FORMAT = "spec-server-full/v1"
+
+
 def _uuid() -> str:
     return str(uuid.uuid4())
 
@@ -1554,6 +1569,214 @@ class DynamoBackend:
             epic_key=t.get("epic_key"), tag_keys=list(t.get("tags", [])),
         ) for t in tasks]
         return render_spec(project.get("name") or slug, epic_views, task_views)
+
+    def export_doc(self, slug: str) -> dict:
+        """Full-fidelity JSON export (PORT-8): EVERY task (keyed AND keyless) with
+        all core fields + tags, plus the epics. Runtime state (owner/lease/version)
+        is intentionally excluded — see ``ExportDocOut``. Timestamps are returned
+        as datetimes so ``ExportDocOut`` serialises them identically to Postgres."""
+        project = self._project_item(slug)
+        epics = self._query(
+            KeyConditionExpression=Key("PK").eq(K.pk(slug))
+            & Key("SK").begins_with("EPIC#"),
+            FilterExpression=Attr("type").eq("epic"),
+        )
+        tasks = self._query(
+            KeyConditionExpression=Key("PK").eq(K.pk(slug))
+            & Key("SK").begins_with("TASK#"),
+            FilterExpression=Attr("type").eq("task"),
+        )
+        epics.sort(key=lambda e: (_pyify(e.get("position", 1000.0)), e.get("key") or ""))
+        tasks.sort(key=lambda t: (_pyify(t.get("position", 1000.0)),
+                                  t.get("created_at", ""), t["public_id"]))
+        return {
+            "format": _EXPORT_FORMAT,
+            "project": {
+                "slug": project["slug"], "name": project.get("name"),
+                "description": project.get("description"),
+                "default_branch": project.get("default_branch", "main"),
+            },
+            "epics": [{
+                "public_id": e.get("public_id"), "key": e["key"],
+                "title": e["title"], "description": e.get("description"),
+                "section": e.get("section", "backlog"),
+                "position": _pyify(e.get("position", 1000.0)),
+            } for e in epics],
+            "tasks": [{
+                "public_id": t["public_id"], "key": t.get("key"),
+                "epic_key": t.get("epic_key"), "title": t["title"],
+                "description": t.get("description"), "status": t["status"],
+                "priority": t.get("priority"), "component": t.get("component"),
+                "proof_cmd": t.get("proof_cmd"), "status_note": t.get("status_note"),
+                "section": t.get("section", "backlog"),
+                "position": _pyify(t.get("position", 1000.0)),
+                "tags": list(t.get("tags", [])),
+                "created_at": _dt(t.get("created_at")),
+                "updated_at": _dt(t.get("updated_at")),
+                "completed_at": _dt(t.get("completed_at")),
+            } for t in tasks],
+        }
+
+    def import_doc(self, slug: str, doc: dict) -> dict:
+        """Idempotent full-fidelity JSON import (PORT-8): upsert each task by its
+        stable ``public_id`` (create-with-public_id or update-existing) so KEYLESS
+        tasks round-trip losslessly and re-import is a genuine no-op.
+
+        Parity with the Postgres adapter: same dedup key (public_id), same counts,
+        same skip-on-unchanged (no write, no version bump), same tag/epic handling,
+        same batched write path (``batch_writer``). Runtime state (owner/lease/
+        version) is NOT taken from the payload — a fresh import starts each task
+        unowned at version 1."""
+        from ..specmd import validate_doc_task
+
+        self._project_item(slug)
+        created_epics = updated_epics = 0
+        created_tasks = updated_tasks = unchanged_tasks = 0
+        failed: list[dict] = []
+        now = _now_iso()
+
+        # --- epics: bulk-load existing partition, upsert by key ------------
+        existing_epics = {
+            it["key"]: it for it in self._query(
+                KeyConditionExpression=Key("PK").eq(K.pk(slug))
+                & Key("SK").begins_with("EPIC#"),
+                FilterExpression=Attr("type").eq("epic"),
+            ) if it.get("key")
+        }
+        epic_writes = []
+        for pe in doc.get("epics", []) or []:
+            ekey = pe.get("key")
+            if not ekey:
+                continue
+            existing = existing_epics.get(ekey)
+            # Epics dedup on key (not public_id), so a fresh public_id is minted
+            # for parity with the Postgres adapter (see the note there).
+            item = existing or {
+                "PK": K.pk(slug), "SK": K.epic_sk(ekey), "type": "epic",
+                "public_id": _uuid(), "key": ekey,
+                "created_at": _iso(pe.get("created_at")) or now,
+            }
+            item.update({
+                "title": pe.get("title") or ekey,
+                "description": pe.get("description"),
+                "section": pe.get("section") or "backlog",
+                "position": pe.get("position", 1000.0) if pe.get("position") is not None else 1000.0,
+                "updated_at": now,
+            })
+            epic_writes.append(item)
+            if existing:
+                updated_epics += 1
+            else:
+                created_epics += 1
+
+        # --- tasks: bulk-load existing partition, dedup by public_id -------
+        existing_tasks = {
+            it["public_id"]: it for it in self._query(
+                KeyConditionExpression=Key("PK").eq(K.pk(slug))
+                & Key("SK").begins_with("TASK#"),
+                FilterExpression=Attr("type").eq("task"),
+            )
+        }
+        # De-duplicate within this import by public_id (last wins), parity with
+        # the Postgres adapter — otherwise two payload rows with the same
+        # public_id would both write to the same SK (silent last-wins) where
+        # Postgres would raise. Keyless-of-public_id rows (hand-authored) always
+        # create under a minted id and are processed as-is.
+        deduped: dict[str, dict] = {}
+        keyless_rows: list[dict] = []
+        for t in doc.get("tasks", []) or []:
+            try:
+                validate_doc_task(t)
+            except ValueError as exc:
+                failed.append({
+                    "task_key_or_line": t.get("key") or t.get("title")
+                    or t.get("public_id") or "<unknown>",
+                    "error": str(exc),
+                })
+                continue
+            if t.get("public_id"):
+                deduped[t["public_id"]] = t
+            else:
+                keyless_rows.append(t)
+
+        task_writes = []
+        for t in list(deduped.values()) + keyless_rows:
+            pubid = t.get("public_id") or _uuid()
+            section = t.get("section") or "backlog"
+            position = t.get("position", 1000.0) if t.get("position") is not None else 1000.0
+            desired_tags = list(dict.fromkeys(t.get("tags") or []))
+            existing = existing_tasks.get(pubid)
+            if existing is None:
+                item = {
+                    "PK": K.pk(slug), "SK": K.task_sk(pubid), "type": "task",
+                    "project_slug": slug, "public_id": pubid, "key": t.get("key"),
+                    "epic_key": t.get("epic_key"), "title": t["title"],
+                    "description": t.get("description"),
+                    "status": t.get("status") or "todo",
+                    "priority": t.get("priority"), "component": t.get("component"),
+                    "proof_cmd": t.get("proof_cmd"),
+                    "status_note": t.get("status_note"), "section": section,
+                    "owner": None, "lease_expires_at": None, "position": position,
+                    "version": 1, "tags": desired_tags,
+                    "created_at": _iso(t.get("created_at")) or now,
+                    "updated_at": _iso(t.get("updated_at")) or now,
+                    "completed_at": _iso(t.get("completed_at")),
+                }
+                created_tasks += 1
+            elif self._doc_item_unchanged(existing, t, section, position, desired_tags):
+                unchanged_tasks += 1  # no write, no version bump
+                continue
+            else:
+                item = existing
+                item.update({
+                    "key": t.get("key"), "epic_key": t.get("epic_key"),
+                    "title": t["title"], "description": t.get("description"),
+                    "status": t.get("status") or "todo",
+                    "priority": t.get("priority"), "component": t.get("component"),
+                    "proof_cmd": t.get("proof_cmd"),
+                    "status_note": t.get("status_note"), "section": section,
+                    "position": position, "tags": desired_tags,
+                    "updated_at": now,
+                    "version": int(_pyify(item.get("version", 1))) + 1,
+                })
+                if t.get("completed_at") is not None:
+                    item["completed_at"] = _iso(t.get("completed_at"))
+                updated_tasks += 1
+            self._apply_task_gsi(item)
+            task_writes.append(item)
+
+        with self.table.batch_writer() as bw:
+            for item in epic_writes:
+                bw.put_item(Item=_strip_none(_ddbify(item)))
+            for item in task_writes:
+                bw.put_item(Item=_strip_none(_ddbify(item)))
+        return {
+            "epics_created": created_epics, "epics_updated": updated_epics,
+            "tasks_created": created_tasks, "tasks_updated": updated_tasks,
+            "tasks_unchanged": unchanged_tasks, "failed": failed,
+        }
+
+    @staticmethod
+    def _doc_item_unchanged(existing: dict, t: dict, section: str, position,
+                            desired_tags: list) -> bool:
+        """True when every import-controlled field of the stored task already
+        matches the JSON payload — mirrors the Postgres ``_doc_task_unchanged`` so
+        a re-import is a genuine no-op on both backends. Timestamps/runtime state
+        are not part of change detection (parity)."""
+        return (
+            existing.get("key") == t.get("key")
+            and existing.get("epic_key") == t.get("epic_key")
+            and existing.get("title") == t.get("title")
+            and existing.get("description") == t.get("description")
+            and existing.get("status") == (t.get("status") or "todo")
+            and existing.get("priority") == t.get("priority")
+            and existing.get("component") == t.get("component")
+            and existing.get("proof_cmd") == t.get("proof_cmd")
+            and existing.get("status_note") == t.get("status_note")
+            and existing.get("section", "backlog") == section
+            and _pyify(existing.get("position", 1000.0)) == position
+            and set(existing.get("tags") or []) == set(desired_tags)
+        )
 
 
 # --------------------------------------------------------------------------- #
