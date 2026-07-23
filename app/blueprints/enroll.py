@@ -297,8 +297,30 @@ def _import_curl(import_url: str, bearer: str) -> str:
     )
 
 
-def _next_steps(*, have_token: bool) -> list[str]:
-    """The short ordered onboarding steps returned by redeem (ONBOARD-8)."""
+def _persist_step(*, expires_in=None, client_id=None, region=None) -> str:
+    """The prominent, EARLY instruction (ONBOARD-11) telling a headless agent to
+    PERSIST the durable Cognito credentials NOW, because the enrollment link is
+    single-use and will never return them again, and HOW to re-auth once the
+    short-lived access_token expires. Literal + agent-facing; never echoes the
+    password or the token (only the non-secret expires_in/client_id/region)."""
+    exp = expires_in if expires_in is not None else 3600
+    return (
+        "SAVE these credentials NOW — this enrollment link is SINGLE-USE and will "
+        "NOT show the username/password/refresh_token again. Store them in your "
+        "runtime's secret store or environment (NEVER in logs, source, or the task "
+        f"backlog). The access_token expires in ~{exp} seconds; to get a fresh one "
+        "WITHOUT re-enrolling, run USER_PASSWORD_AUTH with the saved "
+        "username+password (or REFRESH_TOKEN_AUTH with the refresh_token) against "
+        f"client_id={client_id or '<client_id>'} in region {region or '<region>'}, and "
+        "use its AccessToken (token_use=access) as the Bearer — NOT the IdToken, which "
+        "the API rejects with 401 'Unexpected token_use claim'. "
+        "scripts/agent_token.py is a drop-in provider that caches + auto-refreshes."
+    )
+
+
+def _next_steps(*, have_token: bool, expires_in=None, client_id=None, region=None) -> list[str]:
+    """The short ordered onboarding steps returned by redeem (ONBOARD-8). The FIRST
+    step (ONBOARD-11) is to PERSIST the one-time credentials for later re-auth."""
     first = (
         "You already hold a Bearer access_token — no separate token-mint step is "
         "needed."
@@ -308,6 +330,7 @@ def _next_steps(*, have_token: bool) -> list[str]:
         "IdToken) as the Bearer."
     )
     return [
+        _persist_step(expires_in=expires_in, client_id=client_id, region=region),
         first,
         "Export your local backlog to SPEC.md, e.g. "
         "curl -s http://localhost:8080/api/v1/projects/<local-slug>/export > SPEC.md",
@@ -432,6 +455,10 @@ def _recipe(cfg, *, api_base: str, region, client_id, username: str, project_slu
     """A short copy-paste setup guide (metadata only — NEVER the password)."""
     return {
         "1_mint_token": (
+            "SAVE these credentials NOW — this enrollment link is single-use and will "
+            "never show the username/password/refresh_token again; keep them in your "
+            "secret store/env (never in logs or source) to re-auth after the access_token "
+            "expires (USER_PASSWORD_AUTH, or REFRESH_TOKEN_AUTH with the refresh_token). "
             "Mint a Cognito access token from the credentials returned here. Either "
             "use scripts/agent_token.py with env "
             f"POOL_CLIENT_ID={client_id or '<client_id>'} REGION={region or '<region>'} "
@@ -551,9 +578,12 @@ class AgentEnrollmentRedeem(MethodView):
         if not signed:
             note = (
                 "Server-side sign-in was unavailable, so no access_token is "
-                "included. Run USER_PASSWORD_AUTH with the username/password/"
-                "client_id/region above and send the resulting AccessToken (NOT "
-                "the IdToken) as 'Authorization: Bearer'."
+                "included. SAVE the username/password/client_id/region NOW — this "
+                "enrollment link is single-use and will not show them again. Run "
+                "USER_PASSWORD_AUTH with the username/password/client_id/region above "
+                "and send the resulting AccessToken (NOT the IdToken) as "
+                "'Authorization: Bearer'; re-run it (or REFRESH_TOKEN_AUTH) whenever "
+                "the token expires."
             )
 
         # 7. Respond ONCE with a READY bearer + working creds + a copy-paste import.
@@ -575,7 +605,11 @@ class AgentEnrollmentRedeem(MethodView):
             "role": role,
             "import_url": import_url,
             "import_curl": import_curl,
-            "next": _next_steps(have_token=bool(signed)),
+            "next": _next_steps(
+                have_token=bool(signed),
+                expires_in=signed["expires_in"] if signed else None,
+                client_id=client_id, region=region,
+            ),
             "note": note,
             "recipe": _recipe(
                 cfg, api_base=api_base, region=region, client_id=client_id,
@@ -677,6 +711,11 @@ class AgentEnrollmentDiscovery(MethodView):
                 "WITHOUT consuming the token.",
                 "POST {token} to redeem_url to atomically redeem (single-use) and "
                 "receive a ready access_token + a copy-paste import_curl.",
+                "SAVE the returned username/password/refresh_token immediately — the "
+                "redeem is single-use and will NOT show them again. Persist them to "
+                "your secret store/env (never logs/source), then re-auth after the "
+                "short-lived access_token expires via USER_PASSWORD_AUTH (or "
+                "REFRESH_TOKEN_AUTH) — see scripts/agent_token.py.",
                 "Run the returned import_curl to migrate your local SPEC.md backlog "
                 "into the cloud project.",
             ],

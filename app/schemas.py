@@ -618,7 +618,7 @@ class EnrollRedeemOut(Schema):
     role = fields.Str(dump_only=True, metadata={"description": "Role granted on the project (reader/writer/admin)."})
     import_url = fields.Str(dump_only=True, metadata={"description": "Where to POST a local SPEC.md backlog to migrate it into the cloud project."})
     import_curl = fields.Str(dump_only=True, metadata={"description": "A literal, copy-paste curl that imports a local SPEC.md into the project with the Bearer token already substituted."})
-    next = fields.List(fields.Str(), dump_only=True, metadata={"description": "Short ordered next steps: you already hold a bearer -> export your local backlog -> run import_curl."})
+    next = fields.List(fields.Str(), dump_only=True, metadata={"description": "Short ordered next steps: SAVE these single-use credentials for later re-auth -> you already hold a bearer -> export your local backlog -> run import_curl."})
     note = fields.Str(dump_only=True, allow_none=True, metadata={"description": "Present only when the server-side sign-in fell back: how to mint an AccessToken yourself."})
     recipe = fields.Dict(dump_only=True, metadata={"description": "A short copy-paste setup guide (retained for compatibility)."})
 

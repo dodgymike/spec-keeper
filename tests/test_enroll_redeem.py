@@ -561,6 +561,71 @@ def test_redeem_returns_access_token_and_import_curl(fakes):
     assert isinstance(body["next"], list) and len(body["next"]) >= 2
 
 
+def test_redeem_next_steps_instruct_persist_for_reauth(fakes):
+    """ONBOARD-11: the redeem response must tell a headless agent, EARLY and
+    prominently, to PERSIST its one-time Cognito credentials for later re-auth —
+    the enrollment link is single-use and will never show them again. The first
+    'next' step carries the save/single-use warning + the re-auth recipe
+    (USER_PASSWORD_AUTH / refresh), and it is mirrored in the recipe. Neither the
+    password nor the access_token leaks into that instruction text."""
+    table, cog = fakes
+    app = _app()
+    c = app.test_client()
+    slug = f"proj-{uuid.uuid4().hex[:8]}"
+    _mk_project(c, slug)
+    token = "tok-" + uuid.uuid4().hex
+    table.seed(token, project_slug=slug, role="writer", agent_name="persistbot")
+
+    r = c.post("/api/v1/agent-enrollments/redeem", json={"token": token})
+    assert r.status_code == 201, r.get_json()
+    body = r.get_json()
+
+    steps = body["next"]
+    assert isinstance(steps, list) and steps
+    # The PERSIST instruction is the FIRST (earliest) step.
+    persist = steps[0]
+    low = persist.lower()
+    assert "save" in low
+    assert "single-use" in low or "single use" in low
+    # It names HOW to re-auth without re-enrolling.
+    assert "USER_PASSWORD_AUTH" in persist or "REFRESH_TOKEN_AUTH" in persist
+    assert "re-auth" in low or "re-enroll" in low or "expires" in low
+    # And it uses the non-secret client_id/region already in the response.
+    assert body["client_id"] in persist
+    assert body["region"] in persist
+    # Mirrored into the recipe too.
+    recipe_text = " ".join(body["recipe"].values()).lower()
+    assert "single-use" in recipe_text and "save" in recipe_text
+
+    # The instruction text NEVER embeds the live secrets.
+    assert body["password"] not in persist
+    assert body["access_token"] not in persist
+    for v in body["recipe"].values():
+        assert body["password"] not in v
+        assert body["access_token"] not in v
+
+
+def test_redeem_fallback_note_warns_single_use_persist(fakes):
+    """ONBOARD-11: when server-side sign-in falls back (no access_token), the note
+    must ALSO warn the creds are single-use and instruct saving + re-auth."""
+    table, cog = fakes
+    cog.auth_fails = True
+    app = _app()
+    c = app.test_client()
+    slug = f"proj-{uuid.uuid4().hex[:8]}"
+    _mk_project(c, slug)
+    token = "tok-" + uuid.uuid4().hex
+    table.seed(token, project_slug=slug, role="writer", agent_name="notebot")
+
+    r = c.post("/api/v1/agent-enrollments/redeem", json={"token": token})
+    assert r.status_code == 201, r.get_json()
+    note = r.get_json()["note"]
+    low = note.lower()
+    assert "save" in low
+    assert "single-use" in low or "single use" in low
+    assert "USER_PASSWORD_AUTH" in note or "REFRESH_TOKEN_AUTH" in note
+
+
 def test_redeem_falls_back_when_signin_fails(fakes):
     """If server-side initiate_auth fails, redeem STILL succeeds (single-use burn
     already happened) — access_token is null, a clear note is returned, and the raw

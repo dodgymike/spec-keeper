@@ -488,7 +488,8 @@ curl -s -H 'Content-Type: application/json' \
 #         "client_id":"1agentsclient23id", "project_slug":"corsearch", "role":"writer",
 #         "import_url":"https://api.spec.elasticninja.com/api/v1/projects/corsearch/import",
 #         "import_curl":"curl -X POST \"https://.../projects/corsearch/import\" -H \"Authorization: Bearer eyJra...\" -H \"Content-Type: text/markdown\" -H \"User-Agent: spec-agent/1.0\" --data-binary @SPEC.md",
-#         "next":["You already hold a Bearer access_token — no separate token-mint step is needed.",
+#         "next":["SAVE these credentials NOW — this enrollment link is single-use and will NOT show the username/password/refresh_token again; store them in your secret store/env (never in logs/source/backlog). To get a fresh token after the ~1h access_token expires WITHOUT re-enrolling: USER_PASSWORD_AUTH (username+password) or REFRESH_TOKEN_AUTH (refresh_token) against client_id in your region — scripts/agent_token.py caches + auto-refreshes.",
+#                  "You already hold a Bearer access_token — no separate token-mint step is needed.",
 #                  "Export your local backlog to SPEC.md, e.g. curl -s http://localhost:8080/api/v1/projects/<local-slug>/export > SPEC.md",
 #                  "Import it into your cloud project by running import_curl (below). Import is batched and returns {total,created,updated,unchanged,failed}; a malformed task is reported in 'failed' (HTTP 207), not a 500.",
 #                  "The access_token is reusable for ~1 hour — retry a failed import with the SAME bearer (no fresh enrollment). Oversize bodies return 413 with the limit, not a 500."],
@@ -510,8 +511,16 @@ curl -s -H 'Content-Type: application/json' \
   malformed task is reported in `failed` (HTTP 207), an oversize body returns 413, neither a 500.
   Because `access_token` is reusable for ~1 hour, a transient import failure can be retried with the
   **same** bearer — you do NOT need a fresh enrollment token.
-- **`next`**: short ordered next steps (already-have-a-token vs run-`USER_PASSWORD_AUTH` yourself,
-  then export-and-import) — the same guidance as `note`/`recipe` in a machine-friendly list.
+- **`next`**: short ordered next steps — the same guidance as `note`/`recipe` in a machine-friendly
+  list. The **first** step (ONBOARD-11) is to **PERSIST these credentials**: the
+  `username`/`password`/`refresh_token` (and the derived `access_token`) are returned **exactly
+  once** — the enrollment link is single-use and will never show them again. A headless agent MUST
+  save them to its runtime secret store / env (never to logs, source, or the task backlog), because
+  the `access_token` is short-lived (~1h). To get a fresh token **without re-enrolling**, re-run
+  `USER_PASSWORD_AUTH` with the saved `username`+`password`, or `REFRESH_TOKEN_AUTH` with the
+  `refresh_token`, against `client_id` in your `region` — `scripts/agent_token.py` is a drop-in
+  provider that caches and auto-refreshes. The remaining steps are already-have-a-token vs
+  run-`USER_PASSWORD_AUTH`-yourself, then export-and-import.
 - The provisioned Cognito **username is project-namespaced** (ONBOARD-3a):
   `<sanitized-agent-name>.<sanitized-project-slug>.<16-hex-digest-of-agent_name-NUL-project_slug>@
   <ENROLL_AGENT_DOMAIN>`. The same `agent_name` redeemed into different projects always provisions
