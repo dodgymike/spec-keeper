@@ -1398,33 +1398,70 @@ class DynamoBackend:
 
     # ----- ports ------------------------------------------------------- #
     def import_spec(self, slug: str, parsed) -> dict:
+        """Idempotently upsert a parsed SPEC.md tree. Batched for full-sized
+        backlogs (PORT-6): existing epics/tasks are loaded with two partition
+        queries (not a per-task GSI query + GetItem), and writes go through
+        ``BatchWriteItem`` (25/request, UnprocessedItems auto-retried by
+        ``batch_writer``) so a ~1,500-task import is a few dozen batched requests
+        instead of ~4,500 round-trips. Per-task validation errors are collected in
+        ``failed`` (that row is skipped), never 500ing the whole request. Parity
+        with the Postgres adapter: same counts, same idempotency, same skip-on-
+        unchanged (no write, no version bump), and existing owner/lease/status/
+        created_at are preserved across an update."""
+        from ..specmd import validate_parsed_task
+
         self._project_item(slug)
-        created_epics = updated_epics = created_tasks = updated_tasks = 0
+        created_epics = updated_epics = 0
+        created_tasks = updated_tasks = unchanged_tasks = 0
+        failed: list[dict] = []
+        now = _now_iso()
+
+        # --- epics: bulk-load existing partition, upsert, batch-write ------
+        existing_epics = {
+            it["key"]: it for it in self._query(
+                KeyConditionExpression=Key("PK").eq(K.pk(slug))
+                & Key("SK").begins_with("EPIC#"),
+                FilterExpression=Attr("type").eq("epic"),
+            ) if it.get("key")
+        }
+        epic_writes = []
         for ekey, pe in parsed.epics.items():
-            existing = self._get(K.pk(slug), K.epic_sk(ekey))
-            now = _now_iso()
+            existing = existing_epics.get(ekey)
             item = existing or {
                 "PK": K.pk(slug), "SK": K.epic_sk(ekey), "type": "epic",
                 "public_id": _uuid(), "key": ekey, "created_at": now,
             }
             item.update({"title": pe.title, "section": pe.section,
                          "position": pe.position, "updated_at": now})
-            self._put(item)
+            epic_writes.append(item)
             if existing:
                 updated_epics += 1
             else:
                 created_epics += 1
 
+        # --- tasks: bulk-load existing partition, classify, batch-write ----
+        existing_tasks = {
+            it["key"]: it for it in self._query(
+                KeyConditionExpression=Key("PK").eq(K.pk(slug))
+                & Key("SK").begins_with("TASK#"),
+                FilterExpression=Attr("type").eq("task"),
+            ) if it.get("key")
+        }
+        # De-duplicate within this import by key (last wins), mirroring the old
+        # read-then-write path where a later duplicate updated the earlier row.
+        deduped: dict = {}
         for pt in parsed.tasks:
-            existing = None
-            found = self._query(
-                IndexName=K.GSI3,
-                KeyConditionExpression=Key("GSI3PK").eq(K.gsi3_key_pk(slug, pt.key)),
-            )
-            if found:
-                pubid = found[0]["SK"].split("#", 1)[1]
-                existing = self._get(K.pk(slug), K.task_sk(pubid))
-            now = _now_iso()
+            try:
+                validate_parsed_task(pt)
+            except ValueError as exc:
+                failed.append({"task_key_or_line": pt.key or pt.title or "<unknown>",
+                               "error": str(exc)})
+                continue
+            deduped[pt.key] = pt
+
+        task_writes = []
+        for key, pt in deduped.items():
+            existing = existing_tasks.get(key)
             if existing is None:
                 pubid = _uuid()
                 item = {
@@ -1439,6 +1476,9 @@ class DynamoBackend:
                     "created_at": now, "updated_at": now, "completed_at": None,
                 }
                 created_tasks += 1
+            elif self._task_item_unchanged(existing, pt):
+                unchanged_tasks += 1  # no write, no version bump
+                continue
             else:
                 item = existing
                 item.update({
@@ -1451,11 +1491,36 @@ class DynamoBackend:
                 })
                 updated_tasks += 1
             self._apply_task_gsi(item)
-            self._put(item)
+            task_writes.append(item)
+
+        with self.table.batch_writer() as bw:
+            for item in epic_writes:
+                bw.put_item(Item=_strip_none(_ddbify(item)))
+            for item in task_writes:
+                bw.put_item(Item=_strip_none(_ddbify(item)))
         return {
             "epics_created": created_epics, "epics_updated": updated_epics,
             "tasks_created": created_tasks, "tasks_updated": updated_tasks,
+            "tasks_unchanged": unchanged_tasks, "failed": failed,
         }
+
+    @staticmethod
+    def _task_item_unchanged(existing: dict, pt) -> bool:
+        """True when every import-controlled field of the stored task already
+        matches the parsed task — mirrors the Postgres ``_task_unchanged`` so a
+        re-import is a genuine no-op on both backends (tags are create-only, so
+        excluded, matching the update path which never rewrites them)."""
+        return (
+            existing.get("epic_key") == pt.epic_key
+            and existing.get("title") == pt.title
+            and existing.get("description") == pt.description
+            and existing.get("status") == pt.status
+            and existing.get("priority") == pt.priority
+            and existing.get("component") == pt.component
+            and existing.get("proof_cmd") == pt.proof_cmd
+            and existing.get("section") == pt.section
+            and _pyify(existing.get("position")) == pt.position
+        )
 
     def render_spec_text(self, slug: str) -> str:
         from ..specmd import render_spec

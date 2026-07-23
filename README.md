@@ -89,7 +89,10 @@ same HA-7 guards) plus, for preview/redeem, the single-use-token semantics descr
 - **Per-project agent registry** — each project has its own roster (two projects can both have a
   `spec-keeper`).
 - **SPEC.md round-trip** — import an existing `SPEC.md`, export the DB back to one (`app/specmd.py` +
-  `blueprints/ports.py`); the migration bridge.
+  `blueprints/ports.py`); the migration bridge. Import is batched (a full ~1,500-task backlog in a
+  couple of seconds on either backend) and returns structured `{total, created, updated, unchanged,
+  failed}` counts — a malformed task is reported in `failed` (HTTP 207), an oversize body returns
+  413 (`MAX_CONTENT_LENGTH_BYTES`), neither a 500.
 - **Pluggable storage backend** — the same REST API runs on Postgres (default) or DynamoDB
   (`STORAGE_BACKEND=dynamodb`), with identical atomic-claim, atomic-reservation, and
   optimistic-lock (`If-Match`/412) guarantees on both (`app/storage/`).

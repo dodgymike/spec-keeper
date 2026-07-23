@@ -11,7 +11,7 @@ from flask.views import MethodView
 from flask_smorest import Blueprint
 
 from ..helpers import require_project_perm
-from ..schemas import MessageOut
+from ..schemas import ImportResultOut, MessageOut
 from ..specmd import normalize, parse_spec
 
 blp = Blueprint(
@@ -22,19 +22,43 @@ blp = Blueprint(
 
 @blp.route("/import")
 class ImportSpec(MethodView):
-    @blp.response(200, MessageOut)
+    @blp.response(200, ImportResultOut)
+    @blp.alt_response(207, schema=ImportResultOut, description=(
+        "Multi-Status: some tasks failed validation and were skipped (see "
+        "``failed``); the rest were imported."))
+    @blp.alt_response(413, schema=MessageOut, description=(
+        "Payload too large (over ``MAX_CONTENT_LENGTH``). The limit and its "
+        "approximate task capacity are stated in the message."))
     def post(self, slug):
         """Import a SPEC.md (raw ``text/markdown`` body) into the project.
-        Idempotent: re-importing the same file makes no duplicate tasks."""
+
+        Idempotent: re-importing the same file makes no duplicate tasks and, when
+        nothing changed, no writes at all (``unchanged``). Batched so a full
+        ~1,500-task backlog imports in a few seconds on both backends. Returns a
+        structured ``{total, created, updated, unchanged, failed, ...}`` result;
+        a malformed individual task is reported in ``failed`` (HTTP 207), not a
+        500. An oversize body is rejected with 413, not a 500."""
         require_project_perm(slug, "write")
         parsed = parse_spec(request.get_data(as_text=True))
         counts = current_app.storage.import_spec(slug, parsed)
-        return {"message": (
-            f"imported: {counts['tasks_created']} task(s) created, "
-            f"{counts['tasks_updated']} updated; "
-            f"{counts['epics_created']} epic(s) created, "
-            f"{counts['epics_updated']} updated."
-        )}
+        failed = counts.get("failed") or []
+        created, updated = counts["tasks_created"], counts["tasks_updated"]
+        unchanged = counts.get("tasks_unchanged", 0)
+        result = {
+            "message": (
+                f"imported: {created} task(s) created, {updated} updated, "
+                f"{unchanged} unchanged"
+                + (f", {len(failed)} failed" if failed else "")
+                + f"; {counts['epics_created']} epic(s) created, "
+                f"{counts['epics_updated']} updated."
+            ),
+            "total": created + updated + unchanged + len(failed),
+            "created": created, "updated": updated, "unchanged": unchanged,
+            "failed": failed,
+            "epics_created": counts["epics_created"],
+            "epics_updated": counts["epics_updated"],
+        }
+        return (result, 207) if failed else result
 
 
 @blp.route("/export")

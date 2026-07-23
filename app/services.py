@@ -31,7 +31,7 @@ from .models import (
     TaskStatus,
     utcnow,
 )
-from .specmd import ParsedSpec
+from .specmd import ParsedSpec, validate_parsed_task
 
 
 def log_event(project_id: int, event_type: str, agent=None, task_id=None,
@@ -163,14 +163,26 @@ def claim_next_task(project_id: int, agent: str, epic_id=None,
 
 def import_spec(project_id: int, parsed: ParsedSpec) -> dict:
     """Idempotently upsert a parsed SPEC.md tree into the project. Tasks are
-    keyed by ``(project_id, key)`` so re-importing the same file is a no-op."""
-    created_epics = updated_epics = created_tasks = updated_tasks = 0
+    keyed by ``(project_id, key)`` so re-importing the same file is a no-op.
 
+    Batched for full-sized backlogs (PORT-6): existing epics/tasks are loaded in
+    two bulk queries (not one round-trip per task), and only genuinely-changed
+    rows are written, so a ~1,500-task import is a handful of statements instead
+    of ~3,000 round-trips. Per-task validation errors are collected in ``failed``
+    (the row is skipped) rather than aborting the whole import."""
+    created_epics = updated_epics = 0
+    created_tasks = updated_tasks = unchanged_tasks = 0
+    failed: list[dict] = []
+
+    # --- epics: bulk-load existing, upsert in memory -----------------------
+    existing_epics = {
+        e.key: e for e in db.session.execute(
+            sa.select(Epic).where(Epic.project_id == project_id)
+        ).scalars().all()
+    }
     epics_by_key: dict[str, Epic] = {}
     for ekey, pe in parsed.epics.items():
-        epic = db.session.execute(
-            sa.select(Epic).where(Epic.project_id == project_id, Epic.key == ekey)
-        ).scalar_one_or_none()
+        epic = existing_epics.get(ekey)
         if epic is None:
             epic = Epic(project_id=project_id, key=ekey, title=pe.title,
                         section=pe.section, position=pe.position)
@@ -181,25 +193,43 @@ def import_spec(project_id: int, parsed: ParsedSpec) -> dict:
             epic.section = pe.section
             epic.position = pe.position
             updated_epics += 1
-        db.session.flush()
         epics_by_key[ekey] = epic
+    db.session.flush()  # assign epic ids for the FK below (one round-trip)
 
+    # --- tasks: bulk-load existing, upsert in memory -----------------------
+    existing_tasks = {
+        t.key: t for t in db.session.execute(
+            sa.select(Task).where(Task.project_id == project_id)
+        ).scalars().all()
+        if t.key is not None
+    }
+    # De-duplicate within the same import by key (last occurrence wins), mirroring
+    # the old read-then-write path where a later duplicate updated the earlier row.
+    deduped: dict[str, object] = {}
     for pt in parsed.tasks:
+        try:
+            validate_parsed_task(pt)
+        except ValueError as exc:
+            failed.append({"task_key_or_line": pt.key or pt.title or "<unknown>",
+                           "error": str(exc)})
+            continue
+        deduped[pt.key] = pt
+
+    for key, pt in deduped.items():
         epic_id = epics_by_key[pt.epic_key].id if pt.epic_key in epics_by_key else None
-        task = db.session.execute(
-            sa.select(Task).where(Task.project_id == project_id, Task.key == pt.key)
-        ).scalar_one_or_none()
         status = TaskStatus(pt.status)
         priority = Priority(pt.priority) if pt.priority else None
+        task = existing_tasks.get(key)
         if task is None:
-            task = Task(
+            db.session.add(Task(
                 project_id=project_id, key=pt.key, title=pt.title,
                 description=pt.description, status=status, priority=priority,
                 component=pt.component, proof_cmd=pt.proof_cmd,
                 section=pt.section, position=pt.position, epic_id=epic_id,
-            )
-            db.session.add(task)
+            ))
             created_tasks += 1
+        elif _task_unchanged(task, pt, status, priority, epic_id):
+            unchanged_tasks += 1  # no write, no version bump
         else:
             task.title = pt.title
             task.description = pt.description
@@ -216,7 +246,24 @@ def import_spec(project_id: int, parsed: ParsedSpec) -> dict:
     return {
         "epics_created": created_epics, "epics_updated": updated_epics,
         "tasks_created": created_tasks, "tasks_updated": updated_tasks,
+        "tasks_unchanged": unchanged_tasks, "failed": failed,
     }
+
+
+def _task_unchanged(task, pt, status, priority, epic_id) -> bool:
+    """True when every import-controlled field already matches (so re-importing an
+    unchanged SPEC.md is a genuine no-op — no write, no version bump)."""
+    return (
+        task.title == pt.title
+        and task.description == pt.description
+        and task.status == status
+        and task.priority == priority
+        and task.component == pt.component
+        and task.proof_cmd == pt.proof_cmd
+        and task.section == pt.section
+        and task.position == pt.position
+        and task.epic_id == epic_id
+    )
 
 
 def close_active_lease(task_id: int, state: LeaseState) -> None:

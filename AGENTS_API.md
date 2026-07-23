@@ -270,7 +270,9 @@ server-only. Bodies are raw `text/markdown`.
 # Import a repo's SPEC.md into the server (idempotent — safe to re-run):
 curl -s -X POST $B/projects/corsearch/import \
   --data-binary @SPEC.md -H 'Content-Type: text/markdown'
-# -> {"message":"imported: 43 task(s) created, 0 updated; ..."}
+# -> 200 {"total":43,"created":43,"updated":0,"unchanged":0,"failed":[],
+#         "epics_created":5,"epics_updated":0,
+#         "message":"imported: 43 task(s) created, 0 updated, 0 unchanged; ..."}
 
 # Render the backlog back to a SPEC.md mirror:
 curl -s $B/projects/corsearch/export > SPEC.md
@@ -284,6 +286,21 @@ curl -s -X POST $B/projects/corsearch/export/diff \
 The parser understands the observed dialects: `[ ] [~] [x] [-]` checkboxes, `**KEY · Title**`,
 epic headings (`### EPIC NAME — desc`), trailing `(BE, P0, blocked)` metadata, and `_Proof: <cmd>_`
 lines. Tasks are keyed by their human ID, so import upserts rather than duplicates.
+
+**Import is robust for a full-sized backlog (PORT-6).** Writes are batched (Postgres bulk upsert;
+DynamoDB `BatchWriteItem`), so a real ~1,500-task `SPEC.md` imports in a couple of seconds on both
+backends — well under the 30s edge cap — instead of timing out into a bare 500. The response is
+structured so an agent can self-verify:
+
+- `total` = `created` + `updated` + `unchanged` + `failed`. A re-import of an identical file makes
+  **no writes** and reports every task as `unchanged` (idempotent; no version bump).
+- A malformed individual task (e.g. an empty title) is reported in `failed`
+  (`[{"task_key_or_line","error"}]`) and the request returns **207 Multi-Status** — the other tasks
+  still import. Only a genuine backend fault returns 5xx.
+- An oversize body returns **413** with the byte limit in the message (default 8 MiB ≈ 2,000+
+  tasks; raise `MAX_CONTENT_LENGTH_BYTES` on the server if you need more), never a 500.
+- The redeem/enrollment bearer is reusable for ~1 hour, so a transient import failure can be retried
+  with the **same** token — no fresh enrollment needed.
 
 ## Log your work and record decisions
 
@@ -473,7 +490,8 @@ curl -s -H 'Content-Type: application/json' \
 #         "import_curl":"curl -X POST \"https://.../projects/corsearch/import\" -H \"Authorization: Bearer eyJra...\" -H \"Content-Type: text/markdown\" -H \"User-Agent: spec-agent/1.0\" --data-binary @SPEC.md",
 #         "next":["You already hold a Bearer access_token — no separate token-mint step is needed.",
 #                  "Export your local backlog to SPEC.md, e.g. curl -s http://localhost:8080/api/v1/projects/<local-slug>/export > SPEC.md",
-#                  "Import it into your cloud project by running import_curl (below). The import response echoes counts, e.g. 'imported: N task(s) created, M updated'."],
+#                  "Import it into your cloud project by running import_curl (below). Import is batched and returns {total,created,updated,unchanged,failed}; a malformed task is reported in 'failed' (HTTP 207), not a 500.",
+#                  "The access_token is reusable for ~1 hour — retry a failed import with the SAME bearer (no fresh enrollment). Oversize bodies return 413 with the limit, not a 500."],
 #         "note":null,
 #         "recipe": {"1_mint_token": "...", "2_first_call": "...", "3_migrate_local_backlog": "..."}}
 ```
@@ -487,7 +505,11 @@ curl -s -H 'Content-Type: application/json' \
 - **`import_url`/`import_curl`**: `import_curl` is a literal, copy-paste `curl` (with the Bearer
   already substituted) that `POST`s a local `SPEC.md` to `import_url` to migrate a local backlog
   into the enrolled project — see "Migrate a SPEC.md in and out (round-trip)" above for the
-  endpoint it targets.
+  endpoint it targets. Import is batched (a full ~1,500+ task backlog lands in a couple of seconds)
+  and returns structured `{total, created, updated, unchanged, failed}` counts to self-verify; a
+  malformed task is reported in `failed` (HTTP 207), an oversize body returns 413, neither a 500.
+  Because `access_token` is reusable for ~1 hour, a transient import failure can be retried with the
+  **same** bearer — you do NOT need a fresh enrollment token.
 - **`next`**: short ordered next steps (already-have-a-token vs run-`USER_PASSWORD_AUTH` yourself,
   then export-and-import) — the same guidance as `note`/`recipe` in a machine-friendly list.
 - The provisioned Cognito **username is project-namespaced** (ONBOARD-3a):

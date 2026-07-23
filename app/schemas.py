@@ -299,6 +299,29 @@ class MessageOut(Schema):
     message = fields.Str()
 
 
+class ImportFailureOut(Schema):
+    """One task that could not be imported (validation error). The rest of the
+    import still succeeds — this is reported, not fatal."""
+    task_key_or_line = fields.Str(metadata={
+        "description": "The offending task's key (or its title/line when keyless)."})
+    error = fields.Str(metadata={"description": "Why the task was skipped."})
+
+
+class ImportResultOut(Schema):
+    """Structured result of a ``POST /projects/<slug>/import`` (PORT-6). ``total``
+    = created + updated + unchanged + failed. HTTP 200 when ``failed`` is empty,
+    207 (Multi-Status) when some tasks were skipped but others imported."""
+    message = fields.Str()
+    total = fields.Int(metadata={"description": "Tasks processed (created+updated+unchanged+failed)."})
+    created = fields.Int()
+    updated = fields.Int()
+    unchanged = fields.Int(metadata={
+        "description": "Already identical — no write, no version bump (idempotent re-import)."})
+    failed = fields.List(fields.Nested(ImportFailureOut))
+    epics_created = fields.Int()
+    epics_updated = fields.Int()
+
+
 # --------------------------------------------------------------------------- #
 # Events (append-only log) and decisions
 # --------------------------------------------------------------------------- #

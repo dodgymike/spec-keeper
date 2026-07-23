@@ -311,8 +311,13 @@ def _next_steps(*, have_token: bool) -> list[str]:
         first,
         "Export your local backlog to SPEC.md, e.g. "
         "curl -s http://localhost:8080/api/v1/projects/<local-slug>/export > SPEC.md",
-        "Import it into your cloud project by running import_curl (below). The "
-        "import response echoes counts, e.g. 'imported: N task(s) created, M updated'.",
+        "Import it into your cloud project by running import_curl (below). Import is "
+        "batched (handles a full ~1,500+ task backlog in a few seconds) and returns "
+        "structured counts {total, created, updated, unchanged, failed} so you can "
+        "self-verify; a malformed task is reported in 'failed' (HTTP 207), not a 500.",
+        "The access_token above is reusable for ~1 hour, so if an import fails "
+        "transiently just retry it with the SAME bearer — you do NOT need a fresh "
+        "enrollment token. Oversize bodies return 413 with the byte limit, not a 500.",
     ]
 
 

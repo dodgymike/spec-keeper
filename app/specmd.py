@@ -37,6 +37,39 @@ _PROOF_RE = re.compile(r"_Proof:\s*(?P<cmd>.*)_", re.IGNORECASE)
 _PAREN_RE = re.compile(r"\(([^()]*)\)")
 
 
+# Valid enum domains, mirrored from ``app.models.TaskStatus`` / ``Priority`` so the
+# per-task import validator (used by BOTH storage adapters) applies identical rules
+# without importing the ORM layer. Keep in sync with the enums.
+VALID_STATUSES = frozenset({
+    "todo", "in_progress", "blocked", "deferred", "done", "superseded", "cancelled",
+})
+VALID_PRIORITIES = frozenset({"P0", "P1", "P2", "P3"})
+
+
+class TaskValidationError(ValueError):
+    """A single parsed task is not importable (empty title/key, bad enum). Raised
+    per task so the import handler can report it in ``failed`` rather than 500 the
+    whole request."""
+
+
+def validate_parsed_task(pt: "ParsedTask") -> None:
+    """Validate one parsed task before it is written. Shared by the Postgres and
+    DynamoDB adapters so a malformed task fails identically on both backends
+    (parity). Raises ``TaskValidationError`` on the first problem found."""
+    if not (pt.key or "").strip():
+        raise TaskValidationError("task key is empty")
+    if not (pt.title or "").strip():
+        raise TaskValidationError(f"task {pt.key!r} has an empty title")
+    if pt.status not in VALID_STATUSES:
+        raise TaskValidationError(
+            f"task {pt.key!r} has invalid status {pt.status!r}"
+        )
+    if pt.priority is not None and pt.priority not in VALID_PRIORITIES:
+        raise TaskValidationError(
+            f"task {pt.key!r} has invalid priority {pt.priority!r}"
+        )
+
+
 @dataclass
 class ParsedTask:
     key: str | None

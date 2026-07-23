@@ -32,6 +32,15 @@ class Config:
     # Default lease TTL (seconds) for a claimed task.
     LEASE_DEFAULT_TTL = int(os.environ.get("LEASE_DEFAULT_TTL", "1800"))
 
+    # --- Request body size (PORT-6) -------------------------------------
+    # Global max request body in bytes. Flask returns a clean 413 above this
+    # instead of a bare 500 mid-read. The SPEC.md import is the only large body;
+    # 8 MiB comfortably fits well over 2,000 tasks (a fat task line is ~200 B, so
+    # 2,000 tasks with proofs+descriptions is < 1 MiB). Raise via env if needed.
+    MAX_CONTENT_LENGTH = int(
+        os.environ.get("MAX_CONTENT_LENGTH_BYTES", str(8 * 1024 * 1024))
+    )
+
     # --- Per-project isolation (ISO-4) ---------------------------------
     # When True, project-scoped routes additionally require the VERIFIED caller
     # to be a member of the project whose role grants the route's permission

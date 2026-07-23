@@ -149,6 +149,7 @@ def _register_error_handlers(app: Flask) -> None:
     envelope the old ``abort(...)`` calls produced (``code``/``status``/``message``)
     so API consumers see byte-identical error responses."""
     from flask import jsonify
+    from werkzeug.exceptions import RequestEntityTooLarge
     from werkzeug.http import HTTP_STATUS_CODES
 
     def _handler(status: int):
@@ -164,6 +165,21 @@ def _register_error_handlers(app: Flask) -> None:
     app.register_error_handler(Conflict, _handler(409))
     app.register_error_handler(VersionConflict, _handler(412))
     app.register_error_handler(BackendUnavailable, _handler(503))
+
+    def _too_large(err):  # PORT-6: oversize import body -> a useful 413, not 500.
+        limit = app.config.get("MAX_CONTENT_LENGTH")
+        approx = f" (~{limit // 4096} tasks)" if limit else ""
+        return jsonify(
+            code=413,
+            status=HTTP_STATUS_CODES.get(413, "Request Entity Too Large"),
+            message=(
+                f"Payload too large; the request body limit is {limit} bytes"
+                f"{approx}. Split the SPEC.md into smaller imports, or raise "
+                "MAX_CONTENT_LENGTH_BYTES on the server."
+            ),
+        ), 413
+
+    app.register_error_handler(RequestEntityTooLarge, _too_large)
 
 
 def _register_cors(app: Flask) -> None:
