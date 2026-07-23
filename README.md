@@ -71,14 +71,15 @@ both are set. **CORS is off by default** too; set `CORS_ORIGINS` (an exact-match
 the full precedence ladder, the group table, and how to mint a token, and `.env.example` for
 every knob.
 
-Three routes are **always** public regardless of the auth mode — `POST /api/v1/signup` and
+Several routes are **always** public regardless of the auth mode — `POST /api/v1/signup` and
 `GET /api/v1/validate` (the public request→approve signup queue, HA-7; see "Public signup queue"
-below), plus `POST /api/v1/agent-enrollments/redeem` (the agent self-enrollment redeem,
-ONBOARD-3; see "Agent self-enrollment" below) — since a not-yet-a-user/agent has no token to
+below), plus `GET /api/v1/agent-enrollments`, `POST /api/v1/agent-enrollments/preview`, and
+`POST /api/v1/agent-enrollments/redeem` (the agent self-enrollment discovery/preview/redeem trio,
+ONBOARD-3/8; see "Agent self-enrollment" below) — since a not-yet-a-user/agent has no token to
 present. They are deliberately excluded from `require_api_key` and instead protect themselves:
 the signup routes with an origin-guard, a honeypot, a per-IP rate-limit, and (optionally)
-Cloudflare Turnstile; the redeem route with a per-IP rate-limit and an origin-guard (reusing the
-same HA-7 guards) plus an atomic single-use token burn.
+Cloudflare Turnstile; the agent routes with a per-IP rate-limit and an origin-guard (reusing the
+same HA-7 guards) plus, for preview/redeem, the single-use-token semantics described below.
 
 ## What's included
 
@@ -103,11 +104,13 @@ same HA-7 guards) plus an atomic single-use token burn.
 - **Admin user-lifecycle endpoints** (HA-5) — list/approve/reject/block/unblock/promote/demote/
   delete Cognito pool users (including agent users), admin-gated; see "Admin: user lifecycle"
   below.
-- **Agent self-enrollment** (ONBOARD-2/3) — an admin mints a single-use enrollment token
-  (`POST /api/v1/admin/agent-enrollments`); a brand-new agent redeems it once, PUBLIC/no-auth
-  (`POST /api/v1/agent-enrollments/redeem`), which atomically burns the token then provisions a
-  real Cognito credential + project membership and returns working creds + a setup recipe. See
-  "Agent self-enrollment" below.
+- **Agent self-enrollment** (ONBOARD-2/3/8) — an admin mints a single-use enrollment token
+  (`POST /api/v1/admin/agent-enrollments`); a brand-new agent then completes onboarding itself in
+  one headless pass, all PUBLIC/no-auth: `GET /api/v1/agent-enrollments` (discovery),
+  an optional `POST /api/v1/agent-enrollments/preview` (non-consuming inspect), and
+  `POST /api/v1/agent-enrollments/redeem` (atomically burns the token, provisions a real Cognito
+  credential + project membership, signs in on the agent's behalf, and returns a ready Bearer
+  access token + a copy-paste `import_curl`). See "Agent self-enrollment" below.
 - **Public request→approve signup queue** (HA-7) — a uniform-202, anti-enumeration
   `POST /api/v1/signup` intake + `GET /api/v1/validate` magic-link redeem (both PUBLIC, no
   auth), decoupled behind SQS to an async worker Lambda, plus an admin bridge
@@ -211,11 +214,11 @@ optimistic-lock/412 contract — passes identically on both backends.
 | `INVITES_TABLE` | _(none)_ | Dedicated DynamoDB table backing invite-only human signup (HA-2): `POST`/`GET /api/v1/admin/invites`. Unset ⇒ both endpoints return 501 (local-dev graceful default). Wired from terraform output `invites_table_name` (`infra/terraform/invites.tf`). |
 | `INVITE_TTL_DAYS` | `14` | Default validity window (days) for a freshly minted invite; overridable per-invite via the mint request's `ttl_days` (1-90). |
 | `INVITE_JOIN_BASE_URL` | _(empty)_ | Base URL prefixed to the `join_url` the mint endpoint returns (e.g. `https://spec.example.com`); empty ⇒ a relative `/join?code=...` link. |
-| `AGENT_ENROLLMENTS_TABLE` | _(none)_ | Dedicated DynamoDB table backing agent self-enrollment (ONBOARD-2/3): `POST`/`GET`/`DELETE /api/v1/admin/agent-enrollments*` (mint/list/revoke) and the public `POST /api/v1/agent-enrollments/redeem`. Unset ⇒ all of these return 501 (local-dev graceful default). Wired from terraform output `agent_enrollments_table_name`. |
+| `AGENT_ENROLLMENTS_TABLE` | _(none)_ | Dedicated DynamoDB table backing agent self-enrollment (ONBOARD-2/3/8): `POST`/`GET`/`DELETE /api/v1/admin/agent-enrollments*` (mint/list/revoke) and the public `GET /api/v1/agent-enrollments` (discovery), `POST /api/v1/agent-enrollments/preview`, and `POST /api/v1/agent-enrollments/redeem`. Unset ⇒ all of these return 501 (local-dev graceful default). Wired from terraform output `agent_enrollments_table_name`. |
 | `ENROLL_TTL_SECONDS` | `3600` | Default validity window (seconds) for a freshly minted enrollment token; overridable per-mint via the mint request's `ttl_seconds` (60-604800). |
 | `ENROLL_BASE_URL` | `https://spec.elasticninja.com` | Base URL the mint endpoint's `enrollment_url` is built from (the plaintext token rides in the fragment, `#token=...`). |
-| `ENROLL_API_BASE` | `https://api.spec.elasticninja.com` | API base URL the redeem endpoint hands back in its response/recipe, so a newly-enrolled agent knows where to call. |
-| `ENROLL_COGNITO_CLIENT_ID` | _(none)_ | Cognito app-client id (`USER_PASSWORD_AUTH`, no client secret) the redeem response/recipe tells the new agent to mint tokens against. Unset ⇒ omitted from the recipe. Wired from terraform. |
+| `ENROLL_API_BASE` | `https://api.spec.elasticninja.com` | API base URL the redeem endpoint hands back in its response (`api_base`/`import_url`/`import_curl`/`recipe`), so a newly-enrolled agent knows where to call. |
+| `ENROLL_COGNITO_CLIENT_ID` | _(none)_ | Cognito app-client id (`USER_PASSWORD_AUTH`, no client secret). Redeem uses it BOTH to sign in on the agent's behalf server-side (ONBOARD-8, returning a ready `access_token`) and, in its response/recipe, to tell the new agent which client to re-auth against. Unset ⇒ server-side sign-in is skipped (`access_token` is `null`, with a fallback `note`) and the id is omitted from the recipe. Wired from terraform. |
 | `ENROLL_AGENT_DOMAIN` | `agents.spec-server.internal` | Email-as-username domain for agent sign-in aliases: the redeem endpoint provisions a project-namespaced `<sanitized-agent-name>.<sanitized-project-slug>.<16-hex-digest>@<ENROLL_AGENT_DOMAIN>` (ONBOARD-3a — the same `agent_name` in different projects gets a different Cognito user; the 19 platform agents provisioned by `scripts/enrol_agents.py` still use the plain `<name>@<domain>` scheme and are unaffected). |
 | `COGNITO_USER_POOL_ID` | _(none)_ | Cognito user pool backing the admin user-lifecycle endpoints (HA-5): `/api/v1/admin/users*` (list/approve/reject/block/unblock/promote/demote/delete). Unset ⇒ every `/admin/users*` endpoint returns 501 (local-dev graceful default), same contract as `INVITES_TABLE` above. Reuses `AWS_REGION`. Wired from terraform output `cognito_user_pool_id` (`infra/terraform/cognito.tf`). |
 | `SIGNUPS_TABLE` | _(none)_ | Dedicated DynamoDB table backing the public signup queue (HA-7): `GET /api/v1/validate` and the admin `/api/v1/admin/signups*` bridge. Unset ⇒ validate returns the neutral `invalid` outcome and the admin endpoints return 501 (same graceful-default contract as `INVITES_TABLE`). Wired from terraform output `signups_table_name` (`infra/terraform/signups.tf`). |
@@ -279,35 +282,46 @@ refuse to demote the last remaining admin; those guarded mutations need the call
 Cognito identity, so they return 501 under static `API_KEYS` auth (no `COGNITO_ISSUER`). See
 `AGENTS_API.md` → "Admin: user lifecycle" for the request/response shapes.
 
-### Agent self-enrollment (ONBOARD-2/3)
+### Agent self-enrollment (ONBOARD-2/3/8)
 
 The agent counterpart to the invite/signup flows above: an admin mints a single-use enrollment
 token (`POST /api/v1/admin/agent-enrollments`, admin-gated on the target `project_slug`) and hands
-it to a brand-new agent, which redeems it exactly once (`POST /api/v1/agent-enrollments/redeem`,
-**PUBLIC, no auth** — a not-yet-a-credential agent has no token to authenticate with).
+it to a brand-new agent, which then completes onboarding itself in one headless pass — three
+PUBLIC/no-auth endpoints (a not-yet-a-credential agent has no token to authenticate with):
+`GET /api/v1/agent-enrollments` (machine-readable discovery — no token needed), an optional
+`POST /api/v1/agent-enrollments/preview` (inspect the token's target project/role WITHOUT
+consuming it), and `POST /api/v1/agent-enrollments/redeem` (atomically burns the token exactly
+once and provisions real credentials).
 
 Mint refuses (**409**) to create a second token while an active, unexpired enrollment already
 exists for the same `(project_slug, agent_name)` — a best-effort guard against two concurrent live
 tokens for one target; a prior enrollment that is used/expired/revoked never blocks a fresh mint.
 
 Redeem atomically **burns** the token first (a conditional DynamoDB update, `active`→`used`,
-under `expires_at > now`; a missing/used/expired/raced token all fail identically — no
-enumeration oracle), then **provisions** the agent's Cognito user (`AdminCreateUser` →
+under `expires_at > now`; a missing/expired/raced token all fail identically with a generic 400 —
+no enumeration oracle; a token that specifically was *already redeemed* gets a distinct 400
+message), then **provisions** the agent's Cognito user (`AdminCreateUser` →
 `AdminSetUserPassword` permanent → `AdminAddUserToGroup spec-writers`) and grants it membership on
-the enrolled project at the enrolled role, and returns the working username/password + a
-copy-paste setup recipe in the same response — the password is shown **once** and never stored or
-logged. The provisioned username is **project-namespaced** (ONBOARD-3a):
+the enrolled project at the enrolled role. It then **signs in on the agent's behalf**
+(server-side `USER_PASSWORD_AUTH`) so the response carries a ready-to-use Cognito `access_token`
+(plus `refresh_token`/`expires_in`) alongside the username/password and a copy-paste
+`import_curl` that migrates a local `SPEC.md` into the enrolled project — a headless agent needs
+**zero** further Cognito round-trip to get to work. If server-side sign-in is unavailable,
+`access_token` falls back to `null` with a `note` explaining to run `USER_PASSWORD_AUTH` manually
+and use its AccessToken (not the IdToken). Everything sensitive (`password`, `access_token`,
+`refresh_token`) is shown **once** and never stored or logged. The provisioned username is
+**project-namespaced** (ONBOARD-3a):
 `<sanitized-agent-name>.<sanitized-project-slug>.<16-hex-digest>@<ENROLL_AGENT_DOMAIN>`, so the
 same `agent_name` redeemed into different projects always provisions a *different* Cognito user
 (cross-tenant isolation), while re-enrolling the same `(project_slug, agent_name)` rotates the
 password on the *same* user. If provisioning fails after the burn, the token stays spent (500) and
-the remedy is to mint a fresh one; burn-then-provision never un-burns. Both endpoints return
-**501** when `AGENT_ENROLLMENTS_TABLE` (mint/list/revoke/redeem) or `COGNITO_USER_POOL_ID`
-(redeem's provisioning step) is unset — the same graceful-default contract as the
-invites/user-lifecycle endpoints above. The redeem route reuses the HA-7 per-IP rate-limit and
-origin-guard. See `AGENTS_API.md` → "Agent self-enrollment" for the request/response shapes, and
-`infra/terraform/apigw.tf` (`local.public_routes`) for how the redeem route bypasses the JWT
-authorizer.
+the remedy is to mint a fresh one; burn-then-provision never un-burns. All three agent-facing
+endpoints return **501** when `AGENT_ENROLLMENTS_TABLE` (discovery/preview/redeem) or
+`COGNITO_USER_POOL_ID` (redeem's provisioning step) is unset — the same graceful-default contract
+as the invites/user-lifecycle endpoints above. Preview and redeem reuse the HA-7 per-IP
+rate-limit and origin-guard (a 429 carries `Retry-After`). See `AGENTS_API.md` → "Agent
+self-enrollment" for the full request/response shapes, and `infra/terraform/apigw.tf`
+(`local.public_routes`) for how these routes bypass the JWT authorizer.
 
 ### Public signup queue (HA-7)
 

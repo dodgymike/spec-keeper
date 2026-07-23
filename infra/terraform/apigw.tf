@@ -81,6 +81,12 @@ locals {
   # must reach the redeem route without the authorizer. The app burns the token
   # atomically (single-use), rate-limits + origin-locks the path, and provisions
   # the agent's Cognito user itself — the endpoint does its own request-shaping.
+  #
+  # ONBOARD-8 adds two MORE public enrollment routes so a headless agent can
+  # onboard from the URL alone: POST /agent-enrollments/preview (NON-consuming
+  # inspect — never burns) and GET /agent-enrollments (a no-token, machine-readable
+  # description of the enrollment protocol). Both are rate-limited + origin-locked
+  # like redeem; preview reveals only active-vs-not (no enumeration oracle).
   public_routes = [
     "GET /readyz",
     "GET /healthz",
@@ -89,6 +95,8 @@ locals {
     "POST /api/v1/signup",
     "GET /api/v1/validate",
     "POST /api/v1/agent-enrollments/redeem",
+    "POST /api/v1/agent-enrollments/preview",
+    "GET /api/v1/agent-enrollments",
   ]
 }
 

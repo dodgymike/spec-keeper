@@ -48,14 +48,19 @@ import re
 import secrets
 import string
 
-from flask import current_app, request
+from flask import current_app, jsonify, make_response
 from flask.views import MethodView
 from flask_smorest import Blueprint, abort
 
 from . import admin as admin_bp  # reuse the SAME enrollments table + hashing (ONBOARD-2)
 from .signup import _client_ip, _origin_ok  # reuse the HA-7 public-path guards
 from ..signup_ratelimit import rate_limited
-from ..schemas import EnrollRedeemIn, EnrollRedeemOut
+from ..schemas import (
+    EnrollDiscoveryOut,
+    EnrollPreviewOut,
+    EnrollRedeemIn,
+    EnrollRedeemOut,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -74,9 +79,34 @@ class EnrollError(Exception):
     """Raised when a redeem token is missing / used / expired (generic to caller)."""
 
 
+class EnrollAlreadyRedeemed(EnrollError):
+    """A subtype for a token that exists but was ALREADY consumed (ONBOARD-8).
+
+    A subclass of :class:`EnrollError` so every existing ``except EnrollError``
+    still catches it; the redeem view catches it FIRST to surface the distinct,
+    actionable "already redeemed" message. Determining this needs one extra,
+    NON-mutating ``get_item`` on the (already-failed) burn — it never un-burns and
+    never weakens single-use. The 256-bit token entropy makes the used-vs-unknown
+    distinction useless as an enumeration oracle (the space cannot be walked)."""
+
+
 def _generate_password() -> str:
     alphabet = string.ascii_letters + string.digits
     return "Ag1!" + "".join(secrets.choice(alphabet) for _ in range(_PW_BODY_LEN))
+
+
+def _rate_limit_response(cfg):
+    """Return a 429 ``Response`` carrying ``Retry-After`` when the caller's IP is
+    over budget, else ``None`` (ONBOARD-8). Keyed on IP only (never the token), so
+    it is not an enumeration oracle; ``Retry-After`` tells a headless agent exactly
+    how long to back off. flask-smorest passes a returned ``Response`` through
+    untouched, so callers just ``return`` it."""
+    if rate_limited(cfg, _client_ip(), key_prefix="enr#ip#"):
+        window = int(cfg.get("SIGNUP_RATELIMIT_WINDOW_S", 60))
+        resp = make_response(jsonify(message="rate_limited"), 429)
+        resp.headers["Retry-After"] = str(window)
+        return resp
+    return None
 
 
 def _enrollments_table(cfg):
@@ -166,10 +196,124 @@ def _burn(table, token: str) -> dict:
         )
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-            # missing / used / expired / lost-the-race — all indistinguishable.
+            # The burn failed: missing / used / expired / lost-the-race. To surface
+            # the distinct "already redeemed" message (ONBOARD-8) we do ONE extra,
+            # NON-mutating read — it never un-burns. A used row -> AlreadyRedeemed;
+            # this INCLUDES the loser of a concurrent double-submit, which reads the
+            # winner's status='used' and so gets the "already redeemed" message.
+            # Missing / expired / revoked fold into the SAME generic error (no
+            # enumeration oracle). A failure of the follow-up read degrades to the
+            # generic error (never a 5xx, never a leak).
+            if _is_used(table, token_hash, now):
+                raise EnrollAlreadyRedeemed("This enrollment has already been redeemed.") from exc
             raise EnrollError("invalid or expired enrollment token") from exc
         raise
     return resp.get("Attributes", {}) or {}
+
+
+def _is_used(table, token_hash: str, now: int) -> bool:
+    """True iff the row exists and is a spent (``used``) token — the ONE case that
+    earns the distinct "already redeemed" message (ONBOARD-8). Non-mutating; any
+    read fault (or a missing/expired/revoked row) yields False -> generic error."""
+    try:
+        item = (table.get_item(Key={"token_hash": token_hash}) or {}).get("Item") or {}
+    except Exception:  # noqa: BLE001 — never let a read fault leak or 5xx the reject
+        return False
+    return item.get("status") == "used"
+
+
+def _preview(table, token: str) -> dict | None:
+    """NON-consuming lookup for the redeem token (ONBOARD-8): return the row iff it
+    is currently redeemable (``active`` AND unexpired), else ``None``. Uses a plain
+    ``get_item`` — it NEVER burns, NEVER writes. Callers reveal only active-vs-not,
+    so a missing / used / expired token all fold into the same ``None`` (no
+    enumeration oracle). Values bind via the Key mapping (no expression string)."""
+    import time
+
+    if not token:
+        return None
+    token_hash = admin_bp._hash(token)
+    now = int(time.time())
+    item = (table.get_item(Key={"token_hash": token_hash}) or {}).get("Item")
+    if (
+        item
+        and item.get("status") == "active"
+        and int(item.get("expires_at", 0) or 0) > now
+    ):
+        return item
+    return None
+
+
+def _sign_in(client, cfg, *, username: str, password: str) -> dict | None:
+    """Server-side USER_PASSWORD_AUTH so a headless agent needs ZERO Cognito round
+    trip (ONBOARD-8). Reuses the proven scripts/agent_token.py flow but on the
+    SERVER, against the agents app-client (``ENROLL_COGNITO_CLIENT_ID``), with the
+    username/password just provisioned. Returns
+    ``{access_token, expires_in, refresh_token}`` (the AccessToken — correct
+    ``token_use`` for this API) or ``None`` when the client id is unset or the
+    sign-in fails (the caller then falls back to returning the raw creds). The
+    password is NEVER logged (no exc_info; the message carries no material)."""
+    client_id = cfg.get("ENROLL_COGNITO_CLIENT_ID")
+    if not client_id:
+        return None
+    # The ENTIRE sign-in — the network call AND parsing its response — sits inside
+    # ONE try so the fallback is genuinely TOTAL: the token is already burned and
+    # the agent already provisioned by now, so ANY failure here (a raised
+    # initiate_auth, a challenge, or a malformed AuthenticationResult that trips
+    # int(ExpiresIn)) must degrade to "return the raw creds + note", NEVER a 5xx
+    # that discards a spent token. Never surfaces password/token material.
+    try:
+        resp = client.initiate_auth(
+            AuthFlow="USER_PASSWORD_AUTH",
+            ClientId=client_id,
+            AuthParameters={"USERNAME": username, "PASSWORD": password},
+        )
+        result = (resp or {}).get("AuthenticationResult") or {}
+        access = result.get("AccessToken")
+        if not access:
+            # A challenge (e.g. NEW_PASSWORD_REQUIRED) or malformed response.
+            _log.warning("enroll: server-side sign-in returned no AccessToken; returning creds")
+            return None
+        return {
+            "access_token": access,
+            "expires_in": int(result.get("ExpiresIn", 3600) or 3600),
+            "refresh_token": result.get("RefreshToken"),
+        }
+    except Exception:  # noqa: BLE001 — never surface material; fall back to raw creds
+        _log.warning("enroll: server-side sign-in unavailable; returning creds for self-auth")
+        return None
+
+
+def _import_curl(import_url: str, bearer: str) -> str:
+    """A literal, copy-paste ``curl`` that imports a local SPEC.md into the project
+    (ONBOARD-8). The real URL and Bearer are substituted in so a headless agent can
+    paste-and-run; the import response echoes created/updated counts."""
+    return (
+        f'curl -X POST "{import_url}" '
+        f'-H "Authorization: Bearer {bearer}" '
+        '-H "Content-Type: text/markdown" '
+        '-H "User-Agent: spec-agent/1.0" '
+        "--data-binary @SPEC.md"
+    )
+
+
+def _next_steps(*, have_token: bool) -> list[str]:
+    """The short ordered onboarding steps returned by redeem (ONBOARD-8)."""
+    first = (
+        "You already hold a Bearer access_token — no separate token-mint step is "
+        "needed."
+        if have_token
+        else "Server-side sign-in fell back: run USER_PASSWORD_AUTH with the "
+        "username/password/client_id/region above and use its AccessToken (NOT the "
+        "IdToken) as the Bearer."
+    )
+    return [
+        first,
+        "Export your local backlog to SPEC.md, e.g. "
+        "curl -s http://localhost:8080/api/v1/projects/<local-slug>/export > SPEC.md",
+        "Import it into your cloud project by running import_curl (below). The "
+        "import response echoes counts, e.g. 'imported: N task(s) created, M updated'.",
+    ]
 
 
 def _attr(attrs, name):
@@ -327,9 +471,11 @@ class AgentEnrollmentRedeem(MethodView):
             abort(403, message="forbidden")
 
         # 2. Per-IP rate-limit floor (independent budget; fails open). Keyed on IP,
-        # never the token, so it is not an enumeration oracle.
-        if rate_limited(cfg, _client_ip(), key_prefix="enr#ip#"):
-            abort(429, message="rate_limited")
+        # never the token, so it is not an enumeration oracle. A 429 carries
+        # Retry-After so a headless agent knows exactly how long to back off.
+        limited = _rate_limit_response(cfg)
+        if limited is not None:
+            return limited
 
         # 3. Graceful 501 when unconfigured (no table and/or no pool).
         table = _require_enrollments_table(cfg)
@@ -347,8 +493,14 @@ class AgentEnrollmentRedeem(MethodView):
         # a statement about token validity. The plaintext token is NEVER logged.
         try:
             row = _burn(table, token)
+        except EnrollAlreadyRedeemed:
+            # Distinct, actionable message for a token that was already consumed
+            # (ONBOARD-8). Single-use is unweakened — the burn already atomically
+            # failed; this only crafts a clearer message from a non-mutating read.
+            _log.warning("enroll: redeem rejected (token already redeemed)")
+            abort(400, message="This enrollment has already been redeemed.")
         except EnrollError:
-            _log.warning("enroll: redeem rejected (invalid/used/expired token)")
+            _log.warning("enroll: redeem rejected (invalid/expired token)")
             abort(400, message="invalid or expired enrollment token")
         except Exception:  # noqa: BLE001 — transient backend fault; token un-burned
             _log.exception("enroll: backend error burning token (token un-burned)")
@@ -377,9 +529,38 @@ class AgentEnrollmentRedeem(MethodView):
         client_id = cfg.get("ENROLL_COGNITO_CLIENT_ID")
         api_base = (cfg.get("ENROLL_API_BASE") or "").rstrip("/")
 
-        # 6. Respond ONCE with the working creds + recipe. The password is emitted
-        # here and NOWHERE else (never stored, never logged).
-        return {
+        # 6. SERVER-SIDE sign-in (ONBOARD-8) so a headless agent needs ZERO Cognito
+        # round trip: the server runs USER_PASSWORD_AUTH with the creds it just set
+        # and returns a ready AccessToken. On any failure (client id unset, the
+        # agents client rejects USER_PASSWORD_AUTH, an IAM issue) it falls back to
+        # returning the raw creds + a note so onboarding still completes. The
+        # password is passed in-memory only; never logged.
+        signed = _sign_in(client, cfg, username=username, password=password)
+        access_token = signed["access_token"] if signed else None
+
+        import_url = f"{api_base}/api/v1/projects/{project_slug}/import"
+        # When we have a real token, bake it into the copy-paste curl; otherwise
+        # leave a clear placeholder the agent substitutes after self-auth.
+        import_curl = _import_curl(import_url, access_token or "<access_token>")
+        note = None
+        if not signed:
+            note = (
+                "Server-side sign-in was unavailable, so no access_token is "
+                "included. Run USER_PASSWORD_AUTH with the username/password/"
+                "client_id/region above and send the resulting AccessToken (NOT "
+                "the IdToken) as 'Authorization: Bearer'."
+            )
+
+        # 7. Respond ONCE with a READY bearer + working creds + a copy-paste import.
+        # The password AND access_token are emitted here and NOWHERE else (never
+        # stored, never logged). Cache-Control: no-store hardens the one response
+        # that carries live credentials against any misbehaving intermediary
+        # (defense-in-depth; POSTs aren't cached by default and transport is TLS).
+        body = {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": signed["expires_in"] if signed else None,
+            "refresh_token": signed["refresh_token"] if signed else None,
             "username": username,
             "password": password,
             "api_base": api_base,
@@ -387,8 +568,111 @@ class AgentEnrollmentRedeem(MethodView):
             "client_id": client_id,
             "project_slug": project_slug,
             "role": role,
+            "import_url": import_url,
+            "import_curl": import_curl,
+            "next": _next_steps(have_token=bool(signed)),
+            "note": note,
             "recipe": _recipe(
                 cfg, api_base=api_base, region=region, client_id=client_id,
                 username=username, project_slug=project_slug,
             ),
+        }
+        return body, 201, {"Cache-Control": "no-store"}
+
+
+@blp.route("/agent-enrollments/preview")
+class AgentEnrollmentPreview(MethodView):
+    @blp.arguments(EnrollRedeemIn)
+    @blp.response(200, EnrollPreviewOut)
+    @blp.alt_response(429, description="Rate limited (carries Retry-After).")
+    @blp.alt_response(501, description="Enrollment not configured on this server.")
+    @blp.alt_response(503, description="Transient backend fault reading the token — retry.")
+    def post(self, data):
+        """PUBLIC, NON-consuming preview (ONBOARD-8). Inspect a token WITHOUT
+        burning it: an active/unexpired token returns ``{valid:true, project_slug,
+        role, agent_name, expires_at}``; a missing/used/expired token returns the
+        SAME generic ``{valid:false}`` (no enumeration oracle). This is the
+        inspect-before-commit path — it fixes both "burns on inspection" and
+        "wrong-project surprise". No auth (a brand-new agent holds only the token);
+        redeem stays strict single-use — preview never weakens it."""
+        cfg = current_app.config
+
+        # Same public-path guards as redeem: origin lock + per-IP rate floor.
+        if not _origin_ok(cfg):
+            abort(403, message="forbidden")
+        limited = _rate_limit_response(cfg)
+        if limited is not None:
+            return limited
+
+        # Only the enrollments table is needed — preview provisions NOTHING, so it
+        # does not require the Cognito pool.
+        table = _require_enrollments_table(cfg)
+
+        try:
+            row = _preview(table, data["token"])
+        except Exception:  # noqa: BLE001 — a backend fault is retryable, not "invalid"
+            _log.exception("enroll: preview backend error (token un-touched)")
+            abort(503, message="enrollment is temporarily unavailable; please retry")
+
+        if not row:
+            # Generic negative — indistinguishable across missing/used/expired.
+            return {"valid": False}
+        return {
+            "valid": True,
+            "project_slug": row.get("project_slug"),
+            "role": row.get("role"),
+            "agent_name": row.get("agent_name"),
+            "expires_at": (
+                int(row["expires_at"]) if row.get("expires_at") is not None else None
+            ),
+        }
+
+
+@blp.route("/agent-enrollments")
+class AgentEnrollmentDiscovery(MethodView):
+    @blp.response(200, EnrollDiscoveryOut)
+    @blp.alt_response(429, description="Rate limited (carries Retry-After).")
+    def get(self):
+        """PUBLIC machine-readable enrollment protocol (ONBOARD-8). A headless
+        agent GETs this (no token) to learn how to finish onboarding from the
+        enrollment URL alone: where the token comes from, the ``{token}`` body
+        shape, the preview + redeem URLs, and that the API wants the AccessToken as
+        ``Authorization: Bearer``.
+
+        Returns a static, backend-free document — but carries the SAME public-path
+        guards (origin-lock + per-IP rate floor) as preview/redeem for consistency
+        across the enrollment surface."""
+        cfg = current_app.config
+
+        if not _origin_ok(cfg):
+            abort(403, message="forbidden")
+        limited = _rate_limit_response(cfg)
+        if limited is not None:
+            return limited
+
+        base = (cfg.get("ENROLL_API_BASE") or "").rstrip("/")
+        return {
+            "service": "spec-server agent enrollment",
+            "preview_url": f"{base}/api/v1/agent-enrollments/preview",
+            "redeem_url": f"{base}/api/v1/agent-enrollments/redeem",
+            "discovery_url": f"{base}/api/v1/agent-enrollments",
+            "request_body": {"token": "the value after #token= in your enrollment URL"},
+            "token_source": (
+                "Your enrollment URL ends with '#token=<token>'. That fragment IS "
+                "the token — POST it as {\"token\": \"<token>\"} to preview or redeem."
+            ),
+            "authorization": (
+                "Redeem returns an access_token. Send it as 'Authorization: Bearer "
+                "<access_token>' on API calls — it is the Cognito AccessToken "
+                "(correct token_use); do NOT send the IdToken."
+            ),
+            "steps": [
+                "GET this document to learn the protocol (no token needed).",
+                "POST {token} to preview_url to inspect the target project/role "
+                "WITHOUT consuming the token.",
+                "POST {token} to redeem_url to atomically redeem (single-use) and "
+                "receive a ready access_token + a copy-paste import_curl.",
+                "Run the returned import_curl to migrate your local SPEC.md backlog "
+                "into the cloud project.",
+            ],
         }

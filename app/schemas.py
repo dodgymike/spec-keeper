@@ -550,18 +550,54 @@ class EnrollRedeemIn(Schema):
     )
 
 
+class EnrollPreviewOut(Schema):
+    """The NON-consuming preview response (ONBOARD-8). Reveals only whether a
+    token is currently redeemable (active + unexpired) and, if so, what it will
+    grant — WITHOUT burning it. A missing / used / expired token folds into the
+    SAME generic ``{valid: false}`` (no enumeration oracle) and never burns."""
+    valid = fields.Bool(dump_only=True, metadata={"description": "True iff the token is active and unexpired (redeemable now). Does NOT burn it."})
+    project_slug = fields.Str(dump_only=True, allow_none=True, metadata={"description": "Project the redeem will scope the agent to (present only when valid)."})
+    role = fields.Str(dump_only=True, allow_none=True, metadata={"description": "Role redeem will grant (reader/writer/admin) (present only when valid)."})
+    agent_name = fields.Str(dump_only=True, allow_none=True, metadata={"description": "Agent name the token was minted for (present only when valid)."})
+    expires_at = fields.Int(dump_only=True, allow_none=True, metadata={"description": "Epoch seconds the token expires (present only when valid)."})
+
+
+class EnrollDiscoveryOut(Schema):
+    """Machine-readable enrollment protocol description (ONBOARD-8). Public, needs
+    no token — a headless agent GETs this to learn how to complete onboarding from
+    the enrollment URL alone."""
+    service = fields.Str(dump_only=True)
+    preview_url = fields.Str(dump_only=True, metadata={"description": "POST {token} here to inspect a token WITHOUT consuming it."})
+    redeem_url = fields.Str(dump_only=True, metadata={"description": "POST {token} here to atomically redeem (single-use) and receive a ready Bearer access token."})
+    discovery_url = fields.Str(dump_only=True, metadata={"description": "This document's URL."})
+    request_body = fields.Dict(dump_only=True, metadata={"description": "The JSON body shape both preview and redeem expect: {\"token\": \"...\"}."})
+    token_source = fields.Str(dump_only=True, metadata={"description": "Where the token comes from: the #token=<...> fragment of the enrollment URL."})
+    authorization = fields.Str(dump_only=True, metadata={"description": "How to authenticate subsequent API calls: send redeem's access_token as 'Authorization: Bearer <access_token>' (the Cognito AccessToken, NOT the IdToken)."})
+    steps = fields.List(fields.Str(), dump_only=True, metadata={"description": "The ordered onboarding steps."})
+
+
 class EnrollRedeemOut(Schema):
-    """The redeem response — emits the generated password EXACTLY ONCE. The
-    password is never stored or logged; a lost password means minting a fresh
-    enrollment token (tokens are cheap)."""
+    """The redeem response — emits the generated password AND a ready Bearer
+    ``access_token`` EXACTLY ONCE. Neither is stored or logged; a lost credential
+    means minting a fresh enrollment token (tokens are cheap). ONBOARD-8: the
+    server signs in on the agent's behalf so a headless caller needs zero Cognito
+    round-trip — it can run ``import_curl`` immediately."""
+    access_token = fields.Str(dump_only=True, allow_none=True, metadata={"description": "A ready Cognito AccessToken (correct token_use for this API). Send as 'Authorization: Bearer <access_token>'. Null only if the server-side sign-in fell back (see note); then use username/password to run USER_PASSWORD_AUTH yourself and take the AccessToken."})
+    token_type = fields.Str(dump_only=True, metadata={"description": "Always 'Bearer'."})
+    expires_in = fields.Int(dump_only=True, allow_none=True, metadata={"description": "Seconds the access_token remains valid."})
+    refresh_token = fields.Str(dump_only=True, allow_none=True, metadata={"description": "Cognito refresh token to renew the access token without re-sending the password."})
     username = fields.Str(dump_only=True, metadata={"description": "The Cognito sign-in alias (email-as-username) for the new agent."})
     password = fields.Str(dump_only=True, metadata={"description": "The generated permanent password. Shown ONCE; never stored or logged."})
     api_base = fields.Str(dump_only=True, metadata={"description": "Base URL of the Spec Server API the agent should call."})
-    region = fields.Str(dump_only=True, allow_none=True, metadata={"description": "AWS region of the Cognito pool (for InitiateAuth)."})
-    client_id = fields.Str(dump_only=True, allow_none=True, metadata={"description": "Cognito app-client id used to mint tokens (USER_PASSWORD_AUTH)."})
+    region = fields.Str(dump_only=True, allow_none=True, metadata={"description": "AWS region of the Cognito pool (for re-auth via InitiateAuth)."})
+    client_id = fields.Str(dump_only=True, allow_none=True, metadata={"description": "Cognito app-client id to re-auth against (USER_PASSWORD_AUTH, no secret)."})
     project_slug = fields.Str(dump_only=True, metadata={"description": "Project the agent was granted membership on."})
     role = fields.Str(dump_only=True, metadata={"description": "Role granted on the project (reader/writer/admin)."})
-    recipe = fields.Dict(dump_only=True, metadata={"description": "A short copy-paste setup guide: mint a token, make the first authenticated call, and migrate a local backlog into the cloud project."})
+    import_url = fields.Str(dump_only=True, metadata={"description": "Where to POST a local SPEC.md backlog to migrate it into the cloud project."})
+    import_curl = fields.Str(dump_only=True, metadata={"description": "A literal, copy-paste curl that imports a local SPEC.md into the project with the Bearer token already substituted."})
+    next = fields.List(fields.Str(), dump_only=True, metadata={"description": "Short ordered next steps: you already hold a bearer -> export your local backlog -> run import_curl."})
+    note = fields.Str(dump_only=True, allow_none=True, metadata={"description": "Present only when the server-side sign-in fell back: how to mint an AccessToken yourself."})
+    recipe = fields.Dict(dump_only=True, metadata={"description": "A short copy-paste setup guide (retained for compatibility)."})
 
 
 # --------------------------------------------------------------------------- #

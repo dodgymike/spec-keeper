@@ -6,13 +6,15 @@ SPEC-driven workflow to concrete calls.
 
 Base URL: `http://localhost:8080/api/v1`. Every request needs `Authorization: Bearer <token>`
 under whichever auth mode is configured — see "Authentication" below for which kind of token
-and which group permission a given call needs. **Three routes are the exception and are always
+and which group permission a given call needs. **These routes are the exception and are always
 public, in every auth mode:** `POST /signup` and `GET /validate` (the human signup queue, HA-7 —
-see "Public signup queue" below), plus `POST /agent-enrollments/redeem` (the agent
-self-enrollment redeem, ONBOARD-3 — see "Agent self-enrollment" below) — a not-yet-a-user/agent
+see "Public signup queue" below), plus `GET /agent-enrollments`, `POST /agent-enrollments/preview`,
+and `POST /agent-enrollments/redeem` (the agent self-enrollment discovery/preview/redeem trio,
+ONBOARD-3/8 — see "Agent self-enrollment" below) — a not-yet-a-user/agent
 has no token to present, so each protects itself instead: the human routes with an origin-guard,
-a honeypot, a per-IP rate-limit, and optional Turnstile; the agent redeem route with a per-IP
-rate-limit and an origin-guard (reusing the same HA-7 guards) plus its own single-use-token burn.
+a honeypot, a per-IP rate-limit, and optional Turnstile; the agent routes with a per-IP
+rate-limit and an origin-guard (reusing the same HA-7 guards) plus (for preview/redeem) the
+single-use-token burn semantics described below.
 
 **Storage backend is transparent.** `STORAGE_BACKEND` selects Postgres (default) or DynamoDB; the
 HTTP API — every route, status code, and concurrency guarantee (atomic claim, collision-proof
@@ -59,7 +61,7 @@ which takes priority over no auth.
 | `/admin/users` and `/admin/users/{username}/*` (list/approve/reject/block/unblock/promote/demote/delete) | admin (all methods, overriding the default `read` a `GET` would otherwise get) |
 | `/admin/signups` and `/admin/signups/{email_hash}/*` (list/approve/reject) | admin (all methods) |
 | `GET`/`POST /admin/agent-enrollments`, `DELETE /admin/agent-enrollments/{token_hash}` | admin (all methods — mint/list/revoke of agent-enrollment tokens is admin-only) |
-| `POST /signup`, `GET /validate`, `POST /agent-enrollments/redeem` | **none — always public**, in every auth mode (see above) |
+| `POST /signup`, `GET /validate`, `GET /agent-enrollments`, `POST /agent-enrollments/preview`, `POST /agent-enrollments/redeem` | **none — always public**, in every auth mode (see above) |
 
 A request succeeds if ANY of the caller's groups grant the required permission — e.g. a
 `spec-writers` member has read+write but not admin; a `spec-admins` member has all three.
@@ -372,12 +374,15 @@ curl -s -X POST $B/projects/corsearch/tasks/claim-next \
 # Re-sending the identical request with the same key returns the SAME task.
 ```
 
-## Agent self-enrollment (ONBOARD-2/3)
+## Agent self-enrollment (ONBOARD-2/3/8)
 
 The self-service path for bootstrapping a brand-new **agent** Cognito credential — the agent
 counterpart to the human invite/signup flows below. An operator mints a single-use token
-(ONBOARD-2, admin-gated); the agent posts it back once (ONBOARD-3, PUBLIC) and gets working
-credentials in the same response.
+(ONBOARD-2, admin-gated); the agent completes the rest of the flow itself in a single headless
+pass (ONBOARD-8, all PUBLIC/no-auth): `GET /agent-enrollments` to learn the protocol, an optional
+`POST /agent-enrollments/preview` to inspect the token without spending it, then
+`POST /agent-enrollments/redeem` to burn it once and receive a ready-to-use Bearer access token
+plus a copy-paste import command — no separate Cognito round-trip required.
 
 **Mint an enrollment token** — admin-gated (project-admin on `project_slug`, or a global
 `spec-admins` member); returns the plaintext token **once**, only its SHA-256 hash is stored:
@@ -411,21 +416,80 @@ curl -s -H 'Authorization: Bearer <admin-token>' -X DELETE $B/admin/agent-enroll
 - `token_hash` is the SHA-256 hash of the token — the revocation id / `DELETE` key above. It is
   NOT the plaintext token and cannot be redeemed; the plaintext token is shown only once, by mint.
 
+**Discover the protocol** — `GET /api/v1/agent-enrollments`, **PUBLIC, no auth, no token**. A
+headless agent that has only the enrollment URL (`.../enroll#token=...`) GETs this first to learn
+the whole flow machine-readably — no human-readable docs required:
+
+```bash
+curl -s $B/agent-enrollments
+# -> 200 {"service":"spec-server agent enrollment",
+#         "preview_url":"https://api.spec.elasticninja.com/api/v1/agent-enrollments/preview",
+#         "redeem_url":"https://api.spec.elasticninja.com/api/v1/agent-enrollments/redeem",
+#         "discovery_url":"https://api.spec.elasticninja.com/api/v1/agent-enrollments",
+#         "request_body":{"token":"the value after #token= in your enrollment URL"},
+#         "token_source":"Your enrollment URL ends with '#token=<token>'. That fragment IS the
+#                          token — POST it as {\"token\": \"<token>\"} to preview or redeem.",
+#         "authorization":"Redeem returns an access_token. Send it as 'Authorization: Bearer
+#                          <access_token>' on API calls — it is the Cognito AccessToken (correct
+#                          token_use); do NOT send the IdToken.",
+#         "steps":["GET this document to learn the protocol (no token needed).", "..."]}
+```
+
+**Preview the token (optional, non-consuming)** — `POST /api/v1/agent-enrollments/preview`,
+**PUBLIC, no auth**. Inspects a token WITHOUT burning it, so an agent can confirm the target
+project/role before committing the single-use redeem:
+
+```bash
+curl -s -H 'Content-Type: application/json' \
+  -X POST $B/agent-enrollments/preview -d '{"token":"kX9f..."}'
+# -> 200 {"valid":true, "project_slug":"corsearch", "role":"writer",
+#         "agent_name":"alice", "expires_at":1753603600}
+# an unknown/used/expired token instead returns the generic:
+# -> 200 {"valid":false}
+```
+- Never burns the token — a plain, non-mutating lookup. A missing/used/expired token all fold into
+  the same `{"valid":false}` (no enumeration oracle).
+- Same public-path guards as redeem: origin-guard + per-IP rate-limit. Failure modes: **429**
+  (rate-limited, carries `Retry-After`), **501** (`AGENT_ENROLLMENTS_TABLE` unset), **503**
+  (transient backend fault — retry; the token is untouched either way).
+
 **Redeem the token** — `POST /api/v1/agent-enrollments/redeem`, **PUBLIC, no auth** (a brand-new
 agent holds only the token, nothing else). Atomically burns it (single-use — a missing, already-
 used, expired, or raced redeem of the same token all fail identically), then provisions the
 agent's Cognito user (`spec-writers` group + membership at the enrolled role on the enrolled
-project), and returns working credentials **exactly once**:
+project), signs in on the agent's behalf, and returns working credentials plus a ready Bearer
+access token **exactly once**:
 
 ```bash
 curl -s -H 'Content-Type: application/json' \
   -X POST $B/agent-enrollments/redeem -d '{"token":"kX9f..."}'
-# -> 201 {"username":"alice.corsearch.3f9a1b2c4d5e6f70@agents.spec-server.internal",
+# -> 201 {"access_token":"eyJra...", "token_type":"Bearer", "expires_in":3600,
+#         "refresh_token":"eyJjd...",
+#         "username":"alice.corsearch.3f9a1b2c4d5e6f70@agents.spec-server.internal",
 #         "password":"Ag1!...",
 #         "api_base":"https://api.spec.elasticninja.com", "region":"eu-west-1",
 #         "client_id":"1agentsclient23id", "project_slug":"corsearch", "role":"writer",
+#         "import_url":"https://api.spec.elasticninja.com/api/v1/projects/corsearch/import",
+#         "import_curl":"curl -X POST \"https://.../projects/corsearch/import\" -H \"Authorization: Bearer eyJra...\" -H \"Content-Type: text/markdown\" -H \"User-Agent: spec-agent/1.0\" --data-binary @SPEC.md",
+#         "next":["You already hold a Bearer access_token — no separate token-mint step is needed.",
+#                  "Export your local backlog to SPEC.md, e.g. curl -s http://localhost:8080/api/v1/projects/<local-slug>/export > SPEC.md",
+#                  "Import it into your cloud project by running import_curl (below). The import response echoes counts, e.g. 'imported: N task(s) created, M updated'."],
+#         "note":null,
 #         "recipe": {"1_mint_token": "...", "2_first_call": "...", "3_migrate_local_backlog": "..."}}
 ```
+- **`access_token`/`token_type`/`expires_in`/`refresh_token`** (ONBOARD-8): the server signs in on
+  the agent's behalf (server-side `USER_PASSWORD_AUTH` against `ENROLL_COGNITO_CLIENT_ID`) with the
+  credentials it just provisioned, so a headless caller needs **zero Cognito round-trip** — it can
+  use `access_token` as `Authorization: Bearer <access_token>` immediately. It is the Cognito
+  **AccessToken**, not the IdToken. If server-side sign-in is unavailable or fails, `access_token`/
+  `expires_in`/`refresh_token` are `null` and `note` explains to run `USER_PASSWORD_AUTH` yourself
+  with the returned `username`/`password`/`client_id`/`region` and use its AccessToken.
+- **`import_url`/`import_curl`**: `import_curl` is a literal, copy-paste `curl` (with the Bearer
+  already substituted) that `POST`s a local `SPEC.md` to `import_url` to migrate a local backlog
+  into the enrolled project — see "Migrate a SPEC.md in and out (round-trip)" above for the
+  endpoint it targets.
+- **`next`**: short ordered next steps (already-have-a-token vs run-`USER_PASSWORD_AUTH` yourself,
+  then export-and-import) — the same guidance as `note`/`recipe` in a machine-friendly list.
 - The provisioned Cognito **username is project-namespaced** (ONBOARD-3a):
   `<sanitized-agent-name>.<sanitized-project-slug>.<16-hex-digest-of-agent_name-NUL-project_slug>@
   <ENROLL_AGENT_DOMAIN>`. The same `agent_name` redeemed into different projects always provisions
@@ -438,18 +502,24 @@ curl -s -H 'Content-Type: application/json' \
   `scripts/agent_token.py` or a raw `InitiateAuth` curl), make the first authenticated call (note
   Cloudflare 1010-blocks the default `python-urllib` User-Agent, so send a real one and the
   `Authorization: Bearer` header), then migrate any local backlog into the enrolled cloud project
-  — are shown **once** and never stored or logged.
-- Failure modes: **400** (generic — missing/used/expired/raced token; no enumeration oracle),
-  **429** (rate-limited), **501** (`AGENT_ENROLLMENTS_TABLE` or `COGNITO_USER_POOL_ID` unset),
+  — are shown **once** and never stored or logged (`recipe` is retained for compatibility; `next`/
+  `import_curl` are the more direct path now).
+- Failure modes: **400** — either the generic message (missing/expired/raced token; no
+  enumeration oracle) or, when the token specifically exists and was already consumed, the distinct
+  `"This enrollment has already been redeemed."` (ONBOARD-8; determined by one extra non-mutating
+  read after the burn already atomically failed — single-use is unweakened, and the 256-bit token
+  entropy makes this distinction useless as an enumeration oracle); **429** (rate-limited, carries
+  `Retry-After`), **501** (`AGENT_ENROLLMENTS_TABLE` or `COGNITO_USER_POOL_ID` unset),
   **503** (a transient backend fault *before* the burn — the token is still unspent, safe to
   retry), **500** (the token was already spent but provisioning failed afterward — the remedy is
   to mint a fresh enrollment token; tokens are cheap, never un-burn).
 
 Configuration: `AGENT_ENROLLMENTS_TABLE` / `ENROLL_TTL_SECONDS` / `ENROLL_BASE_URL` (mint side,
-ONBOARD-2); `ENROLL_API_BASE` / `ENROLL_COGNITO_CLIENT_ID` / `ENROLL_AGENT_DOMAIN` (redeem side,
-ONBOARD-3 — describe the deployed API/pool so the returned recipe is copy-paste ready). See
-`.env.example`. Infra: `POST /api/v1/agent-enrollments/redeem` is listed in
-`local.public_routes` (`infra/terraform/apigw.tf`) so it bypasses the JWT authorizer.
+ONBOARD-2); `ENROLL_API_BASE` / `ENROLL_COGNITO_CLIENT_ID` / `ENROLL_AGENT_DOMAIN` (preview/redeem
+side, ONBOARD-3/8 — describe the deployed API/pool so the returned recipe/import_curl are
+copy-paste ready). See `.env.example`. Infra: `GET /api/v1/agent-enrollments`,
+`POST /api/v1/agent-enrollments/preview`, and `POST /api/v1/agent-enrollments/redeem` are listed in
+`local.public_routes` (`infra/terraform/apigw.tf`) so they bypass the JWT authorizer.
 
 The `…/enroll#token=…` URL is a dashboard route (ONBOARD-5): `ui/src/pages/EnrollPage.tsx` reads
 the token from the URL hash and calls this redeem endpoint only on an explicit button click (never
