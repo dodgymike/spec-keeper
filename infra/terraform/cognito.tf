@@ -125,14 +125,16 @@ variable "enable_mfa" {
 
 # WebAuthn Relying-Party ID. This is DOMAIN-PINNED: a passkey enrolled against
 # one RP-ID cannot be used from another origin, and CHANGING this value RESETS
-# (invalidates) every enrolled passkey. It currently points at the deployed
-# CloudFront UI host. HA-8 moves the UI to spec.elasticninja.com; flipping this
-# to that domain at cutover will require all humans to re-enroll their passkeys
-# (there are no human users yet, so today the reset is a no-op).
+# (invalidates) every enrolled passkey. It MUST match the origin the human UI is
+# actually served from — that is spec.elasticninja.com (HA-8 moved the UI there).
+# The default is pinned to that live origin so a missing/empty tfvars can never
+# silently set the RP-ID back to the old CloudFront host (which would make every
+# enrolled passkey fail from the real origin). There are no human users yet, so
+# no passkey reset is incurred by this change.
 variable "webauthn_rp_id" {
-  description = "WebAuthn Relying-Party ID (the registrable domain the passkey is bound to). Must match the origin the human UI is served from. Domain-pinned: changing it invalidates all enrolled passkeys. Defaults to the current CloudFront UI host; HA-8 will move it to spec.elasticninja.com."
+  description = "WebAuthn Relying-Party ID (the registrable domain the passkey is bound to). Must match the origin the human UI is served from (spec.elasticninja.com). Domain-pinned: changing it invalidates all enrolled passkeys."
   type        = string
-  default     = "do153mulmuok3.cloudfront.net"
+  default     = "spec.elasticninja.com"
 }
 
 # ---------------------------------------------------------------------------
