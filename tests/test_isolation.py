@@ -291,6 +291,50 @@ def test_on_reader_member_cannot_write_403(app_on, rsa_key):
     assert c.get(f"/api/v1/projects/{slug}/tasks", headers=_auth(tok)).status_code == 200
 
 
+def test_on_paginated_task_list_read_is_consistent_for_members(app_on, rsa_key):
+    """ISO-10: a paginated task-list read is gated on exactly ``read`` — the SAME
+    permission as a ``?limit=1`` read — with NO difference between ``?limit=1`` and
+    ``?limit=N&offset=M``.
+
+    A ``reader`` AND a ``writer`` member each get 200 on both forms (writer has
+    read+write, so it must never be denied a read); a non-member is hidden (404 on
+    the paginated read, existence not leaked); and writes still require write
+    (writer 200 create, reader 403 create). This locks the guarantee that the
+    list endpoint never diverges into a stricter perm for the paginated branch."""
+    c = app_on.test_client()
+    admin = _mint(rsa_key, sub=ADMIN_SUB, groups=[GROUP_ADMIN])
+    slug = _mk_project(c, admin)
+    # Enough tasks that offset/limit actually paginate a non-trivial window.
+    for i in range(5):
+        assert c.post(f"/api/v1/projects/{slug}/tasks", json={"title": f"T{i}"},
+                      headers=_auth(admin)).status_code == 201
+    _add_member(c, admin, slug, "reader-sub", "reader")
+    _add_member(c, admin, slug, "writer-sub", "writer")
+    reader = _mint(rsa_key, sub="reader-sub", groups=[GROUP_READ])
+    writer = _mint(rsa_key, sub="writer-sub", groups=[GROUP_WRITE])
+
+    for tok in (reader, writer):
+        # A single-item read and a paginated window are BOTH 200 and BOTH return
+        # tasks — identical gating, no stricter perm on the paginated branch.
+        small = c.get(f"/api/v1/projects/{slug}/tasks?limit=1", headers=_auth(tok))
+        paged = c.get(f"/api/v1/projects/{slug}/tasks?limit=2&offset=1", headers=_auth(tok))
+        assert small.status_code == 200, small.get_json()
+        assert paged.status_code == 200, paged.get_json()
+        assert len(small.get_json()) == 1
+        assert len(paged.get_json()) == 2
+
+    # A non-member is still hidden on the paginated read (404, not 403/200).
+    stranger = _mint(rsa_key, sub="nobody", groups=[GROUP_READ])
+    assert c.get(f"/api/v1/projects/{slug}/tasks?limit=2&offset=1",
+                 headers=_auth(stranger)).status_code == 404
+
+    # Writes are unchanged: writer member creates (201), reader member is 403.
+    assert c.post(f"/api/v1/projects/{slug}/tasks", json={"title": "W"},
+                  headers=_auth(writer)).status_code == 201
+    assert c.post(f"/api/v1/projects/{slug}/tasks", json={"title": "R"},
+                  headers=_auth(reader)).status_code == 403
+
+
 def test_on_spec_admin_bypasses_membership(app_on, rsa_key):
     """A platform super-admin (spec-admins) reaches any project without being a
     member: read 200, write 201, and project-admin ops succeed."""
