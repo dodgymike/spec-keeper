@@ -309,6 +309,66 @@ export interface EnrollRedeemOut {
   recipe: Record<string, string>;
 }
 
+// ---- Delta change feed (UI-DELTA-*) -----------------------------------
+// Mirrors the pinned server contract for the incremental change feed:
+//   GET /api/v1/projects/<slug>/changes/head
+//   GET /api/v1/projects/<slug>/changes?since=<int>&limit=<int>
+// The feed lets the dashboard sync incrementally (a per-project cursor) instead
+// of re-fetching whole lists. This module only defines the wire types + the
+// client calls + the pure cache; the useLiveRefresh rewire (UI-DELTA-8) and
+// full-resync orchestration (UI-DELTA-9) consume them later.
+
+/** The entity kinds a change entry can describe. */
+export type ChangeEntityType = "task" | "epic" | "note" | "commit" | "relation";
+
+/** upsert = create-or-replace the snapshot; delete = evict the entity. */
+export type ChangeOp = "upsert" | "delete";
+
+/**
+ * One entry in the change feed. Entries are strictly ascending by `seq`.
+ * `snapshot` is the full server-side representation of the entity for an
+ * `upsert` (e.g. a `Task` for `entity_type: "task"`); it may be `null` on a
+ * `delete`. It is typed `unknown` here because it is polymorphic over
+ * `entity_type`; cache selectors narrow it when reading a specific bucket.
+ */
+export interface ChangeEntry {
+  seq: number;
+  entity_type: ChangeEntityType;
+  entity_pubid: string;
+  op: ChangeOp;
+  version: number;
+  occurred_at: string;
+  snapshot: unknown;
+}
+
+/** `GET .../changes/head` — the current tip + the oldest still-retained seq. */
+export interface ChangesHead {
+  /** Highest `seq` currently available (the tip cursor). */
+  cursor: number;
+  /**
+   * Oldest `seq` the server still retains. A local checkpoint older than this
+   * cannot be caught up incrementally → a full resync is required (UI-DELTA-9).
+   */
+  min_retained_seq: number;
+}
+
+/** `GET .../changes?since=&limit=` — one ascending page of changes. */
+export interface ChangesPage {
+  /** Highest `seq` in this page (advance the checkpoint to this after applying). */
+  cursor: number;
+  /** Entries in ascending `seq` order. */
+  changes: ChangeEntry[];
+  /** True when more pages remain past this one (page hit `limit`). */
+  truncated: boolean;
+  /**
+   * True when `since` is older than `min_retained_seq`, so the caller must drop
+   * its cache and re-fetch from scratch rather than apply this page.
+   */
+  full_resync_required: boolean;
+  /** Oldest `seq` the server still retains (mirrors the head value). */
+  min_retained_seq: number;
+}
+
 // HA-7 public access-request intake. The body is deliberately minimal; the
 // server always answers with a uniform 202 (never reveals whether the address
 // is known/eligible).

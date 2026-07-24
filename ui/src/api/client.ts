@@ -3,6 +3,8 @@ import type {
   AdminUser,
   AdminUsersQuery,
   ChainRun,
+  ChangesHead,
+  ChangesPage,
   Counter,
   Decision,
   EnrollRedeemOut,
@@ -196,6 +198,28 @@ export function getChainRun(slug: string, runId: string): Promise<ChainRun> {
   return request<ChainRun>(
     `/api/v1/projects/${encodeURIComponent(slug)}/chain-runs/${encodeURIComponent(runId)}`
   );
+}
+
+// ---- Delta change feed (UI-DELTA-*) ------------------------------------
+// The incremental sync feed. `getChangesHead` reports the tip cursor +
+// oldest-retained seq; `getChanges` returns one ascending page since a cursor.
+// These are plain reads (bearer-authed like the rest); the cache + apply logic
+// lives in `../lib/deltaCache.ts`. Wired into useLiveRefresh in UI-DELTA-8.
+
+/** Current tip of a project's change feed (cursor + oldest retained seq). */
+export function getChangesHead(slug: string): Promise<ChangesHead> {
+  return request<ChangesHead>(`/api/v1/projects/${encodeURIComponent(slug)}/changes/head`);
+}
+
+/**
+ * One ascending page of changes strictly after `since` (0 = from the start),
+ * capped at `limit` entries. Inspect `truncated` to page and
+ * `full_resync_required` to decide whether the page is applicable at all.
+ */
+export function getChanges(slug: string, since: number, limit: number): Promise<ChangesPage> {
+  return request<ChangesPage>(`/api/v1/projects/${encodeURIComponent(slug)}/changes`, {
+    params: { since, limit },
+  });
 }
 
 // ---- Admin console (HA-5-UI / UI-9) ------------------------------------
