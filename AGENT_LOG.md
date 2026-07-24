@@ -1158,3 +1158,41 @@ to the server's `/events` endpoint.
   conditional-put idempotency proven by the re-run test; full `LastEvaluatedKey` pagination; dry-run
   read-only; a non-conditional `ClientError` fails loudly (a one-shot re-run resumes idempotently).
 - **Safe to run against prod:** dry-run default + read-only; `--apply` is idempotent conditional writes.
+
+## 2026-07-24 — SEC-FIX-2/3/4/6: app-level security hardening (feature-runner)
+- **Tasks:** SEC-FIX-4 (P2), SEC-FIX-3 (P2), SEC-FIX-2 (P1), SEC-FIX-6 (P2) — epic SECURITY, one
+  cohesive change (shared `app/config.py` + `app/__init__.py`). Claimed by key on the cloud Spec
+  Server (owner=spec-keeper) and completed there.
+- **Files:** `app/config.py` (AUTH_LEEWAY default 0->45, env-overridable), `app/__init__.py`
+  (`_validate_config`: two non-bricking boot WARNINGs; `_register_error_handlers`: neutral 503),
+  `app/blueprints/health.py` (/readyz neutral), `.env.example` (AUTH_LEEWAY doc 0->45), tests
+  `tests/test_sec_hardening.py` (new), `tests/test_health.py` (neutrality), `tests/test_auth.py`
+  (pin AUTH_LEEWAY=0 in the cognito_app fixture so the expiry matrix stays deterministic).
+- **SEC-FIX-4:** clock-skew leeway now defaults to 45s so a token verified moments after issuance is
+  not 401d on sub-second iat/nbf-in-future skew. Env-overridable.
+- **SEC-FIX-3:** when COGNITO_ISSUER is set (Cognito mode) but COGNITO_AUDIENCE is empty, boot logs a
+  loud WARNING that the audience/client_id check is fail-open. Warning only (prod already pins it).
+- **SEC-FIX-2:** when COGNITO_ISSUER is set but ORIGIN_LOCK_MODE!=enforce or the secret is empty,
+  boot logs a loud WARNING that the raw execute-api Cloudflare bypass is unmitigated. Warning only
+  (asserts prod stays enforce; non-bricking).
+- **SEC-FIX-6:** the client-facing BackendUnavailable 503 handler now returns a FIXED neutral
+  message ("Backend temporarily unavailable.") and logs the real str(err) via app.logger.error;
+  the unauthenticated /readyz failure path returns status=unready + a generic reason (no raw
+  exception/host/SQL/table text), logging the detail server-side. The storage/* sites that raise
+  BackendUnavailable(str(exc)) are unchanged (they feed server-side logging only).
+- **Test:** in the app container against the specserver_test Postgres —
+  `pytest tests/test_sec_hardening.py tests/test_health.py tests/test_auth.py tests/test_boot_guard.py`
+  -> **35 passed**. Asserts: AUTH_LEEWAY default==45; both boot WARNINGs fire (caplog) and the app
+  still boots; correct-prod-config and local (issuer unset) emit neither warning; a simulated
+  BackendUnavailable("psycopg OperationalError host=... dbname=...") yields a 503 whose body carries
+  the neutral message and NOT the raw substring; /readyz failure leaks no raw text.
+- **Chain:** implementer -> test-engineer -> reviewer -> security, embodied inline by feature-runner
+  (no subagent-spawn tool in this environment; justification recorded here per the skip rule).
+  Reviewer: exactly the four scoped tasks; smallest change; warnings non-bricking; the AUTH_LEEWAY
+  default change surfaced a real interaction with test_expired_token_is_401 (a token expired 10s ago
+  now falls within the 45s leeway) — fixed correctly by pinning AUTH_LEEWAY=0 in the auth-matrix
+  fixture (test hygiene, mirrors TestConfig knob-pinning), not by weakening the production default.
+  Security: neutral client messages; the origin secret is NEVER logged (only "set"/"empty"); no raw
+  driver/host/SQL/table text reaches any client; no new user-input-in-SQL. Backend parity: SEC-FIX-6
+  changes are app-layer (error handler + probe), backend-agnostic, so parity holds automatically; no
+  adapter divergence introduced.

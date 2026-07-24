@@ -210,7 +210,12 @@ class Config:
     # Min seconds between JWKS refetches driven by an unknown `kid` (bounds a
     # bogus-kid flood into at most one outbound fetch per interval — anti-DoS).
     JWKS_MIN_REFRESH_INTERVAL = int(os.environ.get("JWKS_MIN_REFRESH_INTERVAL", "30"))
-    AUTH_LEEWAY = int(os.environ.get("AUTH_LEEWAY", "0"))
+    # Clock-skew tolerance (seconds) applied to exp/iat/nbf during JWT decode
+    # (app/helpers.verify_jwt). A small non-zero default (SEC-FIX-4) absorbs
+    # benign skew between Cognito's issuance clock and this server so a token
+    # verified moments after issuance isn't 401'd for a fraction-of-a-second
+    # iat/nbf-in-the-future. Env-overridable; keep it modest (skew, not lifetime).
+    AUTH_LEEWAY = int(os.environ.get("AUTH_LEEWAY", "45"))
     # Access-token claim carrying the caller's Cognito group list.
     AUTH_GROUPS_CLAIM = os.environ.get("AUTH_GROUPS_CLAIM", "cognito:groups")
     # Group names -> permissions (union'd per user in app/helpers):

@@ -86,6 +86,36 @@ def _validate_config(app: Flask) -> None:
             "COGNITO_ISSUER, or turn PROJECT_ISOLATION_ENFORCED off."
         )
 
+    # Cognito ("prod") mode = COGNITO_ISSUER is set. The next two guards assert two
+    # security controls that MUST hold whenever real JWT auth is active. Both are
+    # WARN-only (like the origin-lock empty-secret heads-up): prod already sets both
+    # correctly, and hard-failing boot on a misconfig would brick recovery — a loud
+    # startup WARNING makes a regression visible without taking the API down.
+    if app.config.get("COGNITO_ISSUER"):
+        # SEC-FIX-3: with no accepted audience/client_id, _check_audience returns
+        # early — the `aud`/`client_id` binding is fail-open, so a token minted for
+        # a DIFFERENT app client would be accepted. Prod pins COGNITO_AUDIENCE.
+        if not app.config.get("COGNITO_AUDIENCE"):
+            app.logger.warning(
+                "auth: COGNITO_ISSUER is set but COGNITO_AUDIENCE is empty; the "
+                "token audience/client_id check is DISABLED (fail-open) — tokens "
+                "from any Cognito app client in this pool are accepted. Set "
+                "COGNITO_AUDIENCE to the intended app-client id(s)."
+            )
+        # SEC-FIX-2: the origin lock is what keeps the raw execute-api hostname
+        # (which bypasses Cloudflare's WAF/rate limits) unreachable. If it is not
+        # enforcing — or has no secret to compare against — that bypass is open.
+        origin_mode = (app.config.get("ORIGIN_LOCK_MODE") or "off").strip().lower()
+        if origin_mode != "enforce" or not app.config.get("ORIGIN_LOCK_SECRET"):
+            app.logger.warning(
+                "origin-lock: COGNITO_ISSUER is set but the origin lock is not "
+                "enforcing (ORIGIN_LOCK_MODE=%s, secret %s); the raw execute-api "
+                "bypass of Cloudflare's WAF/rate limits is NOT mitigated. Set "
+                "ORIGIN_LOCK_MODE=enforce with a non-empty ORIGIN_LOCK_SECRET.",
+                origin_mode,
+                "set" if app.config.get("ORIGIN_LOCK_SECRET") else "empty",
+            )
+
 
 def _register_origin_lock(app: Flask) -> None:
     """Origin-lock gate (SEC-EDGE-1): staged off/warn/enforce switch.
@@ -165,10 +195,23 @@ def _register_error_handlers(app: Flask) -> None:
             ), status
         return handle
 
+    def _backend_unavailable(err):
+        # SEC-FIX-6: BackendUnavailable is raised across the storage layer with the
+        # raw driver/backend exception text (e.g. a psycopg OperationalError naming
+        # the host/dbname, or a boto ClientError). That detail is useful for
+        # server-side triage but MUST NOT reach the client — return a FIXED neutral
+        # message and log the real cause instead. Status + envelope shape unchanged.
+        app.logger.error("backend unavailable: %s", err)
+        return jsonify(
+            code=503,
+            status=HTTP_STATUS_CODES.get(503, "Service Unavailable"),
+            message="Backend temporarily unavailable.",
+        ), 503
+
     app.register_error_handler(NotFound, _handler(404))
     app.register_error_handler(Conflict, _handler(409))
     app.register_error_handler(VersionConflict, _handler(412))
-    app.register_error_handler(BackendUnavailable, _handler(503))
+    app.register_error_handler(BackendUnavailable, _backend_unavailable)
 
     def _too_large(err):  # PORT-6: oversize import body -> a useful 413, not 500.
         limit = app.config.get("MAX_CONTENT_LENGTH")

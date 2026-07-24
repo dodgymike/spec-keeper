@@ -20,11 +20,16 @@ def test_readyz_ready_on_any_backend(client):
 
 
 def test_readyz_unready_when_backend_ping_fails(client, monkeypatch):
-    """When the storage backend's ping() raises, /readyz reports 503 unready with
-    the error surfaced -- same wire shape as before, backend-neutral now."""
+    """When the storage backend's ping() raises, /readyz reports 503 unready.
+
+    SEC-FIX-6: /readyz is unauthenticated, so the raw backend exception text (which
+    can name the DB host/dbname, SQL, or DynamoDB table) MUST NOT be echoed. The
+    response carries only a coarse status + generic reason, never str(exc)."""
+
+    secret = "psycopg OperationalError host=db.internal dbname=specserver"
 
     def boom():
-        raise BackendUnavailable("backend down")
+        raise BackendUnavailable(secret)
 
     app = client.application
     monkeypatch.setattr(app.storage, "ping", boom)
@@ -32,4 +37,6 @@ def test_readyz_unready_when_backend_ping_fails(client, monkeypatch):
     assert resp.status_code == 503
     body = resp.get_json()
     assert body["status"] == "unready"
-    assert "backend down" in body["error"]
+    # No raw exception text leaks: not in "error", not anywhere in the body.
+    assert "error" not in body
+    assert secret not in resp.get_data(as_text=True)
