@@ -670,3 +670,51 @@ to the server's `/events` endpoint.
   Duplicate commits are no-ops (no entry → gap-free). Rejected mutations (stale If-Match → 412)
   write no change (atomicity, asserted). Concurrent conditional-write losers may skip a `seq`
   (harmless contiguity gap, never a duplicate — matches the reservation allocator).
+
+## 2026-07-24 — UI-DELTA-8: rewire live-refresh to head-poll → delta-fetch → cache → render
+
+- **Task (one sentence):** Rewire the dashboard live-refresh so a tick polls the cheap change-feed
+  head and only pulls + folds deltas when the cursor advances, rendering from the normalized delta
+  cache instead of refetching every list per tick (single-project; ProgressPage as the reference
+  consumer).
+- **Chain:** implementer → test-engineer → reviewer → security → ui-reviewer (all run in-process by
+  feature-runner; UI change so ui-reviewer included). CODE ONLY — no deploy.
+- **Backlog claim/complete: BLOCKED.** The source-of-truth cloud Spec Server requires a Cognito
+  bearer token; `scripts/agent_token.py` reports "Missing agent auth config" (no
+  AGENT_USERNAME/PASSWORD/CLIENT_ID/REGION nor `AGENT_CREDENTIALS_SECRET_ARN` in this environment),
+  and unauthenticated reads/writes return 401. The local docker mirror lacks the UI-DELTA backlog.
+  So UI-DELTA-8 could NOT be claimed/completed via the API from here — recorded for a human/agent
+  with credentials to flip status=done (commit + test summary below).
+- **Correction applied mid-task:** the initial brief's "cold start = getChanges(since=0) hydrates
+  everything" was wrong — the change log only records mutations FORWARD from go-live, so a since=0
+  delta omits pre-existing tasks/epics (would render empty). Reworked to: cold start does a FULL
+  REST fetch (listTasks/listEpics) and pins `cursor` to the change-feed head captured around the
+  fetch; only a populated cache takes the cheap head-poll → delta path. Factored the bootstrap as a
+  reusable `hydrateDelta` (seedCache) so UI-DELTA-9's full-resync reuses it.
+- **Files changed:**
+  - `ui/src/lib/deltaSync.ts` (new) — pure, framework-free tick core: `syncDelta` (idle-skip on
+    unchanged head; page while `truncated`; `saveCheckpoint` on advance; signal
+    `full_resync_required` without mutating the cache) + `hydrateDelta` (full REST bootstrap pinned
+    to head). Injectable `DeltaSyncApi`/`DeltaHydrateApi` for tests.
+  - `ui/src/lib/deltaSync.test.ts` (new) — 8 vitest cases: idle-skip (no getChanges), fold-on-
+    advance, checkpoint persisted / not-persisted-on-idle, truncated paging, full_resync signal,
+    cold-start hydrate uses REST + head (NOT since=0), delta folds onto hydrated cache by public_id.
+  - `ui/src/lib/deltaCache.ts` — added pure `SeedEntity` + `seedCache(entities, cursor)` primitive;
+    refreshed the stale "not wired into any page yet" header comment.
+  - `ui/src/hooks/useDeltaRefresh.ts` (new) — React hook: mount/`refresh()` = full hydrate; interval
+    ticks = cheap head-poll → delta; `full_resync_required` → drop checkpoint + re-hydrate
+    (TODO(UI-DELTA-9)); cadence driven by the shared auto-refresh preference (Off stops polling);
+    epoch guard drops stale in-flight results on slug change/unmount.
+  - `ui/src/pages/ProgressPage.tsx` — consume `useDeltaRefresh`; render charts from cache
+    `selectTasks`/`selectEpics`; dropped the per-tick `getProject`+`listEpics`+`listTasks` refetch
+    (project metadata was fetched but never rendered).
+  - `ui/src/api/client.ts` — refreshed the "Wired into useLiveRefresh" comment to point at
+    deltaSync/useDeltaRefresh.
+  - Left `useLiveRefresh` intact for the other pages that still full-refetch (out of scope here).
+- **Scope guard honoured:** no full-resync policy (UI-DELTA-9 — only a safe re-hydrate fallback +
+  TODO) and no multi-project fan-out poll (UI-DELTA-10). Notes are delta-only (the REST note DTO has
+  no `public_id` to key on) — flagged as a follow-up; ProgressPage needs only tasks/epics.
+- **Verification (node:20-alpine container; no host node/npm — musl native bindings):**
+  - `npx vitest run` → Test Files 2 passed (2), Tests 26 passed (26).
+  - `npx tsc --noEmit` → clean (exit 0).
+  - `npx vite build` → 82 modules transformed, built OK (dist/ is gitignored).

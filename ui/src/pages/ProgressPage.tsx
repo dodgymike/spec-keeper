@@ -1,20 +1,10 @@
-import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ApiError, getProject, listEpics, listTasks } from "../api/client";
-import type { Epic, Project, Task } from "../api/types";
 import { Card } from "../components/Card";
 import { EpicProgressChart } from "../components/EpicProgressChart";
 import { ThroughputChart } from "../components/ThroughputChart";
-import { formatRelativeTime, useLiveRefresh } from "../hooks/useLiveRefresh";
+import { useDeltaRefresh } from "../hooks/useDeltaRefresh";
+import { formatRelativeTime } from "../hooks/useLiveRefresh";
 import "./ProgressPage.css";
-
-type ProgressState =
-  | { status: "loading" }
-  | { status: "error"; error: ApiError | Error }
-  | { status: "ready"; project: Project; epics: Epic[]; tasks: Task[] };
-
-/** Same fetch cap the other project pages use - the API paginates by default. */
-const TASK_FETCH_LIMIT = 1000;
 
 /** Same background-refresh cadence as the other project pages. */
 const AUTO_REFRESH_MS = 30_000;
@@ -24,34 +14,18 @@ const AUTO_REFRESH_MS = 30_000;
  * progress. Both charts are hand-rolled inline SVG (see ThroughputChart /
  * EpicProgressChart) - no charting library, since the app ships under a CSP
  * with no `unsafe-inline` for styles.
+ *
+ * Live data comes from the incremental change feed (UI-DELTA-8): a cold start
+ * hydrates the cache with one full REST fetch, then each tick polls the head
+ * cursor and only re-fetches deltas when it moves, folding them into a
+ * normalized cache the charts render from — no more full list refetch per tick.
  */
 export function ProgressPage() {
   const { slug = "" } = useParams<{ slug: string }>();
-  const [state, setState] = useState<ProgressState>({ status: "loading" });
-  const { reload, refresh, lastUpdated, markUpdated, now } = useLiveRefresh(AUTO_REFRESH_MS);
-
-  useEffect(() => {
-    let cancelled = false;
-    setState({ status: "loading" });
-    Promise.all([getProject(slug), listEpics(slug), listTasks(slug, { limit: TASK_FETCH_LIMIT })])
-      .then(([project, epics, tasks]) => {
-        if (cancelled) return;
-        setState({ status: "ready", project, epics, tasks });
-        markUpdated();
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setState({
-            status: "error",
-            error: error instanceof Error ? error : new Error(String(error)),
-          });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slug, reload]);
+  const { tasks, epics, status, error, lastUpdated, now, refresh } = useDeltaRefresh(
+    slug,
+    AUTO_REFRESH_MS,
+  );
 
   return (
     <section className="progress-page">
@@ -80,42 +54,42 @@ export function ProgressPage() {
         </div>
       </header>
 
-      {state.status === "loading" && <ProgressSkeleton />}
+      {status === "loading" && <ProgressSkeleton />}
 
-      {state.status === "error" && (
+      {status === "error" && (
         <Card className="progress-page__error">
           <p>Could not load progress data from the Spec Server API.</p>
-          <p className="progress-page__error-detail">{state.error.message}</p>
+          <p className="progress-page__error-detail">{error?.message}</p>
           <button type="button" className="progress-page__retry-button" onClick={refresh}>
             Retry
           </button>
         </Card>
       )}
 
-      {state.status === "ready" && (
+      {status === "ready" && (
         <div aria-live="polite">
           <section className="progress-page__section" aria-label="Throughput">
             <h2 className="progress-page__section-title">Throughput</h2>
-            {state.tasks.length === 0 ? (
+            {tasks.length === 0 ? (
               <Card>
                 <p>Not enough data yet.</p>
               </Card>
             ) : (
               <Card>
-                <ThroughputChart tasks={state.tasks} />
+                <ThroughputChart tasks={tasks} />
               </Card>
             )}
           </section>
 
           <section className="progress-page__section" aria-label="Per-epic progress">
             <h2 className="progress-page__section-title">Per-epic progress</h2>
-            {state.epics.length === 0 && state.tasks.length === 0 ? (
+            {epics.length === 0 && tasks.length === 0 ? (
               <Card>
                 <p>Not enough data yet.</p>
               </Card>
             ) : (
               <Card>
-                <EpicProgressChart epics={state.epics} tasks={state.tasks} />
+                <EpicProgressChart epics={epics} tasks={tasks} />
               </Card>
             )}
           </section>

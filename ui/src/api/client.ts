@@ -204,7 +204,8 @@ export function getChainRun(slug: string, runId: string): Promise<ChainRun> {
 // The incremental sync feed. `getChangesHead` reports the tip cursor +
 // oldest-retained seq; `getChanges` returns one ascending page since a cursor.
 // These are plain reads (bearer-authed like the rest); the cache + apply logic
-// lives in `../lib/deltaCache.ts`. Wired into useLiveRefresh in UI-DELTA-8.
+// lives in `../lib/deltaCache.ts`; the tick that consumes them is
+// `deltaSync` / `useDeltaRefresh` (UI-DELTA-8).
 
 /** Current tip of a project's change feed (cursor + oldest retained seq). */
 export function getChangesHead(slug: string): Promise<ChangesHead> {

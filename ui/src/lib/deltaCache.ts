@@ -14,9 +14,10 @@
  *   - the apply/evict/coalesce/ordering logic is unit-tested in
  *     `deltaCache.test.ts` — this is exactly where cache bugs hide.
  *
- * NOT in scope here: the useLiveRefresh rewire (UI-DELTA-8) and the
- * full-resync orchestration (UI-DELTA-9). This module is not wired into any
- * page yet.
+ * The tick that folds the feed into this cache and renders from it lives in
+ * `useDeltaRefresh` / `deltaSync` (UI-DELTA-8); the full-resync orchestration
+ * (rebuild from the list endpoints when the cursor predates the retained
+ * window) remains out of scope here (UI-DELTA-9).
  */
 
 import type {
@@ -54,6 +55,43 @@ export function createCache(): DeltaCache {
 
 function entityKey(type: ChangeEntityType, pubid: string): string {
   return `${type}:${pubid}`;
+}
+
+/**
+ * One entity to seed into a cache during a FULL hydrate: its kind, its stable
+ * `public_id` (the SAME key the change feed uses as `entity_pubid`, so a later
+ * delta upsert replaces — not duplicates — the seeded snapshot), and the
+ * snapshot itself (a REST list DTO, shape-compatible with the feed snapshot).
+ */
+export interface SeedEntity {
+  type: ChangeEntityType;
+  pubid: string;
+  snapshot: unknown;
+}
+
+/**
+ * Build a cache from a FULL entity snapshot fetched over the REST list path,
+ * with `cursor` set to the change-feed head captured AROUND that fetch
+ * (UI-DELTA-8 cold start; reused by the UI-DELTA-9 full-resync).
+ *
+ * This is the bootstrap the delta feed alone cannot do: the change log only
+ * records mutations going FORWARD from when it went live, so `getChanges(0)`
+ * omits every pre-existing task/epic. A full REST fetch seeds those, and setting
+ * `cursor` to the head means the next tick's `getChanges(since=cursor)` folds
+ * only genuinely newer changes on top (idempotently re-applying anything that
+ * landed during the hydrate — never losing it).
+ *
+ * `seqByEntity` is intentionally left empty: every future delta carries
+ * `seq > cursor`, so the ordering guard admits the first update to each seeded
+ * entity without a recorded prior seq.
+ */
+export function seedCache(entities: readonly SeedEntity[], cursor: number): DeltaCache {
+  const cache = createCache();
+  for (const e of entities) {
+    cache.entities[e.type][e.pubid] = e.snapshot;
+  }
+  cache.cursor = Number.isInteger(cursor) && cursor > 0 ? cursor : 0;
+  return cache;
 }
 
 /**
