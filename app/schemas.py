@@ -450,6 +450,51 @@ class DecisionOut(Schema):
 
 
 # --------------------------------------------------------------------------- #
+# Change-log delta feed (UI-DELTA-5): incremental dashboard loading.
+# --------------------------------------------------------------------------- #
+CHANGE_OP_VALUES = ["upsert", "delete"]
+
+
+class ChangesQuery(Schema):
+    """Query args for the delta feed. ``since`` is the client's last-seen cursor
+    (0 == from the beginning); ``limit`` bounds the page (client re-polls with the
+    returned ``cursor`` while ``truncated`` is true)."""
+    since = fields.Int(load_default=0, validate=validate.Range(min=0),
+                       metadata={"description": "Last-seen cursor; entries with seq > since are returned."})
+    limit = fields.Int(load_default=200, validate=validate.Range(min=1, max=1000))
+
+
+class ChangeOut(Schema):
+    """One change-log entry. ``snapshot`` is the changed entity's current lean DTO
+    for ``op=upsert`` and null for ``op=delete`` (a tombstone)."""
+    seq = fields.Int()
+    entity_type = fields.Str()
+    entity_pubid = fields.Str()
+    op = fields.Str(validate=validate.OneOf(CHANGE_OP_VALUES))
+    version = fields.Int(allow_none=True)
+    occurred_at = fields.DateTime()
+    # Free-form: the entity's current DTO for upserts, null for delete tombstones.
+    snapshot = fields.Raw(allow_none=True)
+
+
+class ChangesHeadOut(Schema):
+    """Tiny cheap-poll payload: the current head cursor + the retained watermark."""
+    cursor = fields.Int()
+    min_retained_seq = fields.Int()
+
+
+class ChangesPageOut(Schema):
+    """A delta page: ascending ``changes``, the new ``cursor`` (max seq in the page,
+    or the head when empty), ``truncated`` (page filled to ``limit`` — re-poll), and
+    ``full_resync_required`` (the cursor predates the retained window)."""
+    cursor = fields.Int()
+    changes = fields.Nested(ChangeOut, many=True)
+    truncated = fields.Bool()
+    full_resync_required = fields.Bool()
+    min_retained_seq = fields.Int()
+
+
+# --------------------------------------------------------------------------- #
 # Chain runs and steps (LOG-3)
 # --------------------------------------------------------------------------- #
 STEP_STATUS_VALUES = ["pending", "running", "passed", "failed", "skipped"]

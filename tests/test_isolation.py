@@ -251,6 +251,24 @@ def test_on_nonmember_get_is_404(app_on, rsa_key):
     assert c.get(f"/api/v1/projects/{slug}/tasks", headers=_auth(reader)).status_code == 404
 
 
+def test_on_nonmember_changes_feed_is_404(app_on, rsa_key):
+    """UI-DELTA-6 isolation: the delta feed and head cursor are per-project reads,
+    gated exactly like the other project reads. A non-member is 404 (existence
+    hidden) — never a cross-project change leak — while a reader member is served."""
+    c = app_on.test_client()
+    admin = _mint(rsa_key, sub=ADMIN_SUB, groups=[GROUP_ADMIN])
+    slug = _mk_project(c, admin)
+
+    stranger = _mint(rsa_key, sub="stranger-r", groups=[GROUP_READ])
+    assert c.get(f"/api/v1/projects/{slug}/changes", headers=_auth(stranger)).status_code == 404
+    assert c.get(f"/api/v1/projects/{slug}/changes/head", headers=_auth(stranger)).status_code == 404
+
+    _add_member(c, admin, slug, "reader-sub", "reader")
+    member = _mint(rsa_key, sub="reader-sub", groups=[GROUP_READ])
+    assert c.get(f"/api/v1/projects/{slug}/changes", headers=_auth(member)).status_code == 200
+    assert c.get(f"/api/v1/projects/{slug}/changes/head", headers=_auth(member)).status_code == 200
+
+
 def test_on_nonmember_write_is_403(app_on, rsa_key):
     """A non-member with global write capability is 403 on a write to an existing
     project (a write reveals the project exists but denies access)."""
