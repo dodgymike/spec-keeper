@@ -225,3 +225,47 @@ export function clearCheckpoint(slug: string): void {
     /* storage unavailable — nothing to clear. */
   }
 }
+
+// ---- Cache-schema version ---------------------------------------------
+// A single global integer recording the cache/selector CONTRACT the persisted
+// checkpoints were written under. Bump `CACHE_SCHEMA_VERSION` whenever the cache
+// shape or the snapshot/selector contract changes incompatibly: a client that
+// then finds a stale recorded version must treat any persisted checkpoint as
+// untrusted and full-resync from REST rather than fold new deltas onto a
+// snapshot of the old shape (UI-DELTA-9, deepdive §5.2 "Full-resync fallback").
+
+/** The current cache-schema version. Bump on any incompatible cache/selector
+ *  contract change to force connected clients through a full resync. */
+export const CACHE_SCHEMA_VERSION = 1;
+
+/** localStorage key for the recorded cache-schema version (global, not per-slug). */
+const SCHEMA_VERSION_KEY = "spec.delta.schema";
+
+/**
+ * True when the recorded cache-schema version differs from this build's
+ * `CACHE_SCHEMA_VERSION` — including when none is recorded (an older client that
+ * predates versioning may have left checkpoints of an incompatible shape). A
+ * `true` return means "any persisted checkpoint is untrusted → full-resync".
+ * Pure read; never throws (storage unavailable → treated as stale, which only
+ * costs a resync).
+ */
+export function schemaVersionStale(): boolean {
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(SCHEMA_VERSION_KEY);
+  } catch {
+    return true; // storage unavailable — be safe and resync.
+  }
+  return Number(raw) !== CACHE_SCHEMA_VERSION;
+}
+
+/** Record `CACHE_SCHEMA_VERSION` as the version the local checkpoints now match,
+ *  so subsequent `schemaVersionStale()` checks pass until the next bump. Never
+ *  throws. */
+export function markSchemaCurrent(): void {
+  try {
+    window.localStorage.setItem(SCHEMA_VERSION_KEY, String(CACHE_SCHEMA_VERSION));
+  } catch {
+    /* storage unavailable — the next load simply resyncs again (correct, if costly). */
+  }
+}

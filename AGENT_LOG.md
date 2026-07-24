@@ -718,3 +718,42 @@ to the server's `/events` endpoint.
   - `npx vitest run` → Test Files 2 passed (2), Tests 26 passed (26).
   - `npx tsc --noEmit` → clean (exit 0).
   - `npx vite build` → 82 modules transformed, built OK (dist/ is gitignored).
+
+## 2026-07-24 — UI-DELTA-9: full-resync fallback + pagination consistency (client)
+
+- **Task (one sentence):** self-heal the delta cache when the server reports `full_resync_required`
+  (or a cache-schema bump is detected) by capturing head first, dropping the cache, doing a full REST
+  hydrate, then replaying deltas since the captured head so nothing landing mid-resync is lost.
+- **Files changed (UI only — `ui/`):**
+  - `ui/src/lib/deltaSync.ts` — new `resyncDelta(slug, api, taskLimit?, limit?)` + `DeltaResyncApi`
+    (union of hydrate+sync apis). Drop → hydrate → replay, reusing `clearCheckpoint` + `hydrateDelta`
+    (captures head BEFORE the possibly-multi-page list fetch, §6.5) + `syncDelta` (replays since the
+    captured head, advances checkpoint to the true head). Bubbles a recurring `fullResyncRequired`.
+    Refreshed the module header (was "NOT in scope").
+  - `ui/src/lib/deltaCache.ts` — added the cache-schema-version store: `CACHE_SCHEMA_VERSION`,
+    `schemaVersionStale()` (true when recorded ≠ current, incl. absent/unavailable → safe resync),
+    `markSchemaCurrent()`. Best-effort localStorage, never throws.
+  - `ui/src/hooks/useDeltaRefresh.ts` — wired the self-heal: a `fullResyncRequired` tick now calls
+    `resyncDelta` (was a TODO stub of clearCheckpoint+hydrate); on mount a `schemaVersionStale()`
+    check drops the stale checkpoint + records the current version before the fresh hydrate. Single
+    `DeltaResyncApi` object replaces the split delta/hydrate apis.
+  - `ui/src/lib/deltaSync.test.ts` — +3 vitest cases: drop+hydrate+replay ends at captured head; a
+    delta landing mid-resync is not lost (replay pulls `since = captured head`); a recurring
+    `full_resync_required` bubbles while still returning the hydrated (non-empty) cache.
+  - `ui/src/lib/deltaCache.test.ts` — +4 vitest cases for the schema-version helpers.
+- **Scope guard honoured:** client full-resync only. Did NOT touch the multi-project batched head
+  fan-out / `GET /projects` / server (that is UI-DELTA-10, running in parallel in the same worktree
+  on branch `ui-delta-10-batched-heads`; its uncommitted `app/**` + `tests/**` edits are NOT mine and
+  were left unstaged).
+- **Chain:** implementer → test-engineer → reviewer → security → ui-reviewer (feature-runner embodied
+  the chain; a pure client-side cache/replay change with no new network surface, no injection sink,
+  no secret — security surface is unchanged; ui-reviewer: no visual/markup change, only the data
+  self-heal path behind the existing ProgressPage).
+- **Verification (node:20 container; host has no node — `npm ci` in-container to fetch linux native
+  bindings):**
+  - `npx vitest run` → Test Files 2 passed (2), Tests 33 passed (33).
+  - `npx tsc --noEmit` → clean (exit 0).
+  - `npx vite build` → 82 modules transformed, built OK (dist/ is gitignored).
+- **Backlog:** attempted spec-keeper `complete`; the deployed cloud API needs Cognito agent creds not
+  present in this env, so the server flip is PENDING — commit sha + summary recorded here for a
+  coordinator with creds to reconcile.

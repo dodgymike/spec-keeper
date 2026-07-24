@@ -15,8 +15,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChangeEntry, ChangesHead, ChangesPage, Epic, Task } from "../api/types";
-import { createCache, loadCheckpoint, selectEpics, selectTasks } from "./deltaCache";
-import { hydrateDelta, syncDelta, type DeltaHydrateApi, type DeltaSyncApi } from "./deltaSync";
+import {
+  createCache,
+  loadCheckpoint,
+  saveCheckpoint,
+  selectEpics,
+  selectTasks,
+} from "./deltaCache";
+import {
+  hydrateDelta,
+  resyncDelta,
+  syncDelta,
+  type DeltaHydrateApi,
+  type DeltaResyncApi,
+  type DeltaSyncApi,
+} from "./deltaSync";
 
 /** A minimal upsert entry for a task snapshot (only the selector fields matter). */
 function taskUpsert(seq: number, pubid: string, position: number): ChangeEntry {
@@ -249,5 +262,106 @@ describe("hydrateDelta (cold start)", () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0].position).toBe(9);
     expect(outcome.cache.cursor).toBe(8);
+  });
+});
+
+describe("resyncDelta (full-resync fallback)", () => {
+  let store: Record<string, string>;
+
+  beforeEach(() => {
+    store = {};
+    const fake = {
+      getItem: (k: string) => (k in store ? store[k] : null),
+      setItem: (k: string, v: string) => {
+        store[k] = v;
+      },
+      removeItem: (k: string) => {
+        delete store[k];
+      },
+    };
+    (globalThis as unknown as { window: { localStorage: typeof fake } }).window = {
+      localStorage: fake,
+    };
+  });
+
+  afterEach(() => {
+    delete (globalThis as unknown as { window?: unknown }).window;
+  });
+
+  it("drops the stale checkpoint, hydrates from REST, and replays deltas since the captured head", async () => {
+    // A stale checkpoint from the offline window predates the retained tail.
+    saveCheckpoint("proj", 3);
+
+    const api: DeltaResyncApi = {
+      // Head captured BEFORE the hydrate list-fetch = 10; the replay poll sees no
+      // further movement (head still 10 == hydrated cursor → idle, no getChanges).
+      getChangesHead: vi.fn(async () => head(10)),
+      getChanges: vi.fn(async () => page({})),
+      listTasks: vi.fn(async () => [task("T-1", 1)]),
+      listEpics: vi.fn(async () => [epic("E-1", 1)]),
+    };
+
+    const outcome = await resyncDelta("proj", api);
+
+    // Rebuilt from REST (drop + hydrate), not from the stale since=3 cursor.
+    expect(api.listTasks).toHaveBeenCalledTimes(1);
+    expect(api.listEpics).toHaveBeenCalledTimes(1);
+    expect(api.getChanges).not.toHaveBeenCalled(); // replay was idle at head
+    expect(selectTasks(outcome.cache).map((t) => t.display_id)).toEqual(["T-1"]);
+    expect(selectEpics(outcome.cache).map((e) => e.key)).toEqual(["E-1"]);
+    // Checkpoint ends at the captured head, never the stale 3.
+    expect(outcome.advanced).toBe(true);
+    expect(outcome.cache.cursor).toBe(10);
+    expect(loadCheckpoint("proj")).toBe(10);
+  });
+
+  it("does not lose a delta that lands DURING the resync (captured-head replay)", async () => {
+    // Head is captured at 10 before the (slow, multi-page-capable) REST hydrate.
+    // A mutation lands mid-hydrate → the head has moved to 11 by the replay poll,
+    // and getChanges(since=10) carries that new task, which must survive.
+    const getChangesHead = vi
+      .fn<DeltaResyncApi["getChangesHead"]>()
+      .mockResolvedValueOnce(head(10)) // captured by hydrateDelta (before fetch)
+      .mockResolvedValue(head(11)); // replay poll sees the mid-resync mutation
+    const api: DeltaResyncApi = {
+      getChangesHead,
+      getChanges: vi.fn(async (_slug: string, since: number) =>
+        page({ cursor: 11, changes: [taskUpsert(11, "T-NEW", 5)], min_retained_seq: since }),
+      ),
+      listTasks: vi.fn(async () => [task("T-1", 1)]),
+      listEpics: vi.fn(async () => []),
+    };
+
+    const outcome = await resyncDelta("proj", api);
+
+    // The replay pulled deltas since the CAPTURED head (10), not since 0/11.
+    expect(api.getChanges).toHaveBeenCalledWith("proj", 10, expect.any(Number));
+    // Both the hydrated task and the mid-resync task are present — nothing lost.
+    expect(selectTasks(outcome.cache).map((t) => t.display_id)).toEqual(["T-1", "T-NEW"]);
+    // Checkpoint ends at the TRUE head after replay.
+    expect(outcome.cache.cursor).toBe(11);
+    expect(loadCheckpoint("proj")).toBe(11);
+    expect(outcome.fullResyncRequired).toBe(false);
+  });
+
+  it("bubbles a full_resync_required that recurs on the replay (retention pruned again)", async () => {
+    const getChangesHead = vi
+      .fn<DeltaResyncApi["getChangesHead"]>()
+      .mockResolvedValueOnce(head(10))
+      .mockResolvedValue(head(20, 15));
+    const api: DeltaResyncApi = {
+      getChangesHead,
+      getChanges: vi.fn(async () =>
+        page({ cursor: 20, full_resync_required: true, min_retained_seq: 15 }),
+      ),
+      listTasks: vi.fn(async () => [task("T-1", 1)]),
+      listEpics: vi.fn(async () => []),
+    };
+
+    const outcome = await resyncDelta("proj", api);
+
+    expect(outcome.fullResyncRequired).toBe(true);
+    // Still returns the freshly hydrated cache (never a partial/empty view).
+    expect(selectTasks(outcome.cache).map((t) => t.display_id)).toEqual(["T-1"]);
   });
 });

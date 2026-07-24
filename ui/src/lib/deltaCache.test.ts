@@ -14,10 +14,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ChangeEntry } from "../api/types";
 import {
   applyChanges,
+  CACHE_SCHEMA_VERSION,
   clearCheckpoint,
   createCache,
   loadCheckpoint,
+  markSchemaCurrent,
   saveCheckpoint,
+  schemaVersionStale,
   selectEpics,
   selectNotes,
   selectTasks,
@@ -214,5 +217,56 @@ describe("checkpoint store", () => {
     expect(() => saveCheckpoint("p", 1)).not.toThrow();
     expect(loadCheckpoint("p")).toBeNull();
     expect(() => clearCheckpoint("p")).not.toThrow();
+  });
+});
+
+describe("cache-schema version (full-resync trigger)", () => {
+  let store: Record<string, string>;
+
+  beforeEach(() => {
+    store = {};
+    const fake = {
+      getItem: (k: string) => (k in store ? store[k] : null),
+      setItem: (k: string, v: string) => {
+        store[k] = v;
+      },
+      removeItem: (k: string) => {
+        delete store[k];
+      },
+    };
+    (globalThis as unknown as { window: { localStorage: typeof fake } }).window = { localStorage: fake };
+  });
+
+  afterEach(() => {
+    delete (globalThis as unknown as { window?: unknown }).window;
+  });
+
+  it("reports stale when no version was ever recorded (pre-versioning client)", () => {
+    expect(schemaVersionStale()).toBe(true);
+  });
+
+  it("is not stale after markSchemaCurrent records the current version", () => {
+    markSchemaCurrent();
+    expect(schemaVersionStale()).toBe(false);
+  });
+
+  it("reports stale when the recorded version differs from the current build", () => {
+    store["spec.delta.schema"] = String(CACHE_SCHEMA_VERSION + 1);
+    expect(schemaVersionStale()).toBe(true);
+  });
+
+  it("treats unavailable storage as stale (safe → resync)", () => {
+    const throwing = {
+      getItem: () => {
+        throw new Error("denied");
+      },
+      setItem: () => {
+        throw new Error("denied");
+      },
+      removeItem: () => {},
+    };
+    (globalThis as unknown as { window: { localStorage: typeof throwing } }).window = { localStorage: throwing };
+    expect(schemaVersionStale()).toBe(true);
+    expect(() => markSchemaCurrent()).not.toThrow();
   });
 });

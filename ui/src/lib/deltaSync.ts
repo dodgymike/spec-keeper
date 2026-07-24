@@ -12,14 +12,16 @@
  * client calls from `../api/client.ts`. The React wiring lives in
  * `../hooks/useDeltaRefresh.ts`.
  *
- * NOT in scope (UI-DELTA-9): rebuilding the cache from the list endpoints when
- * `full_resync_required` is reported. Here we only SIGNAL it (see
- * `DeltaSyncOutcome.fullResyncRequired`) and leave the cache untouched.
+ * The full-resync fallback that rebuilds the cache from the list endpoints when
+ * `full_resync_required` is reported (or a cache-schema bump is detected) is
+ * `resyncDelta` below (UI-DELTA-9): `syncDelta` still only SIGNALS the condition
+ * (see `DeltaSyncOutcome.fullResyncRequired`) and leaves the cache untouched.
  */
 
 import type { ChangesHead, ChangesPage, Epic, Task, TaskListParams } from "../api/types";
 import {
   applyChanges,
+  clearCheckpoint,
   saveCheckpoint,
   seedCache,
   type DeltaCache,
@@ -148,4 +150,51 @@ export async function syncDelta(
   const advanced = current.cursor !== cache.cursor;
   if (advanced) saveCheckpoint(slug, current.cursor);
   return { cache: current, advanced, fullResyncRequired: false };
+}
+
+/** The reads a full resync needs: the HYDRATE reads (head + REST lists) plus the
+ *  delta reads (head + changes) to replay anything that lands during the
+ *  hydrate. It is exactly the union of the two tick apis, so the hook can pass a
+ *  single object built from `../api/client.ts`. */
+export interface DeltaResyncApi extends DeltaHydrateApi, DeltaSyncApi {}
+
+/**
+ * FULL-RESYNC fallback + pagination consistency (UI-DELTA-9; deepdive §5.2 /
+ * §6.5). The safety net when the cache cannot be advanced by deltas alone —
+ * `syncDelta` reported `full_resync_required` (the checkpoint predates the
+ * server's retained window after TTL pruning / a long-offline tab), or a
+ * cache-schema bump invalidated the persisted cache.
+ *
+ * The self-heal is DROP → HYDRATE → REPLAY, reusing the existing primitives (no
+ * reimplementation):
+ *   1. `clearCheckpoint` — the stale cursor must never be reused as a delta
+ *      `since` (that is the very condition that got us here).
+ *   2. `hydrateDelta` — captures the head cursor FIRST, then full-fetches the
+ *      current tasks + epics over REST and seeds a fresh cache with
+ *      `cursor = head`. Capturing head *before* the (possibly multi-page,
+ *      `taskLimit`-capped) list fetch is what makes the resync consistent: any
+ *      change that lands DURING the fetch has `seq > head`, so step 3 re-applies
+ *      it (deepdive §6.5 pagination interplay — nothing is lost across pages).
+ *   3. `syncDelta` — replays every delta since the captured head onto the fresh
+ *      cache and advances the persisted checkpoint to the true head.
+ *
+ * Returns the healed cache with `advanced: true` (the caller should always
+ * re-render after a resync). A `fullResyncRequired` still set on the replay
+ * (retention pruned again mid-resync — pathological) is bubbled so the caller
+ * can retry rather than silently show a partial cache.
+ */
+export async function resyncDelta(
+  slug: string,
+  api: DeltaResyncApi,
+  taskLimit: number = HYDRATE_TASK_LIMIT,
+  limit: number = DELTA_PAGE_LIMIT,
+): Promise<DeltaSyncOutcome> {
+  clearCheckpoint(slug);
+  const hydrated = await hydrateDelta(slug, api, taskLimit);
+  const replayed = await syncDelta(slug, hydrated, api, limit);
+  return {
+    cache: replayed.cache,
+    advanced: true,
+    fullResyncRequired: replayed.fullResyncRequired,
+  };
 }

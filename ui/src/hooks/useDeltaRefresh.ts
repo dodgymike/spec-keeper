@@ -4,6 +4,8 @@ import type { Epic, ProjectNote, Task } from "../api/types";
 import {
   clearCheckpoint,
   createCache,
+  markSchemaCurrent,
+  schemaVersionStale,
   selectEpics,
   selectNotes,
   selectTasks,
@@ -11,20 +13,18 @@ import {
 } from "../lib/deltaCache";
 import {
   hydrateDelta,
+  resyncDelta,
   syncDelta,
-  type DeltaHydrateApi,
-  type DeltaSyncApi,
+  type DeltaResyncApi,
 } from "../lib/deltaSync";
 import { resolveAutoRefreshMs, useAutoRefreshPreference } from "./autoRefresh";
 
 /** How often the "Updated Ns ago" indicator re-renders to stay current. */
 const RELATIVE_TIME_TICK_MS = 1000;
 
-/** The real change-feed reads, injected into the pure `syncDelta` tick. */
-const deltaApi: DeltaSyncApi = { getChangesHead, getChanges };
-
-/** The real reads for a full cold-start / resync hydrate. */
-const hydrateApi: DeltaHydrateApi = { getChangesHead, listTasks, listEpics };
+/** The real reads for every path — the cheap `syncDelta` tick, the cold-start
+ *  `hydrateDelta`, and the `resyncDelta` self-heal (which needs both sets). */
+const deltaApi: DeltaResyncApi = { getChangesHead, getChanges, listTasks, listEpics };
 
 export type DeltaRefreshStatus = "loading" | "ready" | "error";
 
@@ -47,8 +47,13 @@ export type DeltaRefreshStatus = "loading" | "ready" | "error";
  *
  * NOTE: only tasks + epics are REST-hydrated (their DTOs carry the `public_id`
  * the feed keys on); notes arrive via deltas only until the note DTO exposes it.
- * A real full-resync policy is UI-DELTA-9 — but its mechanism (re-hydrate from
- * REST) is shared here: on a `full_resync_required` signal we re-hydrate.
+ *
+ * FULL-RESYNC (UI-DELTA-9): when a tick reports `full_resync_required` (the
+ * checkpoint predates the server's retained window) the hook self-heals via
+ * `resyncDelta` — capture head → drop cache → REST hydrate → replay deltas since
+ * the captured head — so no change is lost and stale/empty data is never shown.
+ * A cache-schema bump (`schemaVersionStale`) is treated the same way: the stale
+ * checkpoint is dropped on mount before the fresh hydrate.
  */
 export function useDeltaRefresh(slug: string, autoRefreshMs: number) {
   const { preference } = useAutoRefreshPreference();
@@ -76,11 +81,22 @@ export function useDeltaRefresh(slug: string, autoRefreshMs: number) {
     setLastUpdated(Date.now());
   }, []);
 
-  // Full REST hydrate — cold start and the full_resync_required fallback.
+  // Full REST hydrate — cold start bootstrap (checkpoint pinned to head).
   const hydrate = useCallback(
     async (epoch: number) => {
-      const fresh = await hydrateDelta(slug, hydrateApi);
+      const fresh = await hydrateDelta(slug, deltaApi);
       commit(epoch, fresh);
+    },
+    [slug, commit],
+  );
+
+  // Full-resync self-heal (UI-DELTA-9): drop the stale checkpoint, re-hydrate
+  // from REST, then replay any deltas that landed during the hydrate. Used when a
+  // tick reports `full_resync_required` (cursor predates the retained window).
+  const resync = useCallback(
+    async (epoch: number) => {
+      const healed = await resyncDelta(slug, deltaApi);
+      commit(epoch, healed.cache);
     },
     [slug, commit],
   );
@@ -91,11 +107,10 @@ export function useDeltaRefresh(slug: string, autoRefreshMs: number) {
     try {
       const outcome = await syncDelta(slug, cacheRef.current, deltaApi);
       if (outcome.fullResyncRequired) {
-        // TODO(UI-DELTA-9): a real full-resync policy. Safe fallback: the cursor
-        // predates the retained window, so drop the checkpoint and re-hydrate
-        // the whole cache from REST (the shared bootstrap mechanism).
-        clearCheckpoint(slug);
-        await hydrate(epoch);
+        // The cursor predates the retained window; deltas cannot rebuild the
+        // cache. Self-heal by dropping the checkpoint and rebuilding from REST,
+        // replaying any change that lands during the resync (capture-head-first).
+        await resync(epoch);
       } else if (outcome.advanced) {
         commit(epoch, outcome.cache);
       }
@@ -109,7 +124,7 @@ export function useDeltaRefresh(slug: string, autoRefreshMs: number) {
       // very first load (nothing rendered yet) surfaces the error state.
       setStatus((prev) => (prev === "ready" ? prev : "error"));
     }
-  }, [slug, hydrate, commit]);
+  }, [slug, resync, commit]);
 
   // Manual refresh + reset-and-hydrate whenever the project changes.
   const refresh = useCallback(async () => {
@@ -128,6 +143,13 @@ export function useDeltaRefresh(slug: string, autoRefreshMs: number) {
 
   useEffect(() => {
     epochRef.current += 1;
+    // A cache-schema bump invalidates any persisted checkpoint from an older
+    // client — drop it (and record the current version) before the fresh hydrate
+    // so a stale cursor is never reused as a delta `since` (UI-DELTA-9 §5.2).
+    if (schemaVersionStale()) {
+      clearCheckpoint(slug);
+      markSchemaCurrent();
+    }
     const fresh = createCache();
     cacheRef.current = fresh;
     setCache(fresh);
