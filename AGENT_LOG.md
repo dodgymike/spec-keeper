@@ -1158,3 +1158,31 @@ to the server's `/events` endpoint.
   conditional-put idempotency proven by the re-run test; full `LastEvaluatedKey` pagination; dry-run
   read-only; a non-conditional `ClientError` fails loudly (a one-shot re-run resumes idempotently).
 - **Safe to run against prod:** dry-run default + read-only; `--apply` is idempotent conditional writes.
+
+## 2026-07-24 — SEC-6: synthesize SECURITY_DEEPDIVE.md + file remediation backlog
+
+- **Task:** `SEC-6` (project `spec-server`, epic SECURITY) — compile the five parallel read-only
+  reviews (SEC-1 auth/identity, SEC-2 API/edge, SEC-3 access/IAM, SEC-4 UI, SEC-5 data/secrets)
+  into a single deepdive and file one remediation task per finding. Doc + backlog only; no app-code
+  change. NOT marking SEC-1..6 done — the orchestrator reconciles.
+- **Files:** `SECURITY_DEEPDIVE.md` (rewritten for this second review round; the prior round's
+  findings are all already `done` in the SECURITY epic).
+- **Verdict:** strong core, **no P0/injection/leaked-secret** this round. The only P0/P1 code
+  findings are the merged **JIRA config surface** (cross-tenant IDOR + SSRF + reader-visible raw
+  JIRA error text) — **remediation IN PROGRESS under `SEC-FIX-1`**, referenced in the doc and NOT
+  re-filed. Everything else is P2 edge/config hardening.
+- **Live posture (read-only, boto3 `AWS_PROFILE=default`, `spec-server-dev-api`):** origin-lock is
+  **`ORIGIN_LOCK_MODE=enforce`** with a non-empty `ORIGIN_LOCK_SECRET` — the raw `execute-api`
+  bypass is currently mitigated. `COGNITO_AUDIENCE` set (agents+UI), `TURNSTILE_SECRET`/
+  `SIGNUP_PEPPER` set, `AUTH_LEEWAY` unset (→0). Nothing was changed.
+- **Filed 11 remediation tasks** (epic SECURITY, keys SEC-FIX-2..12): `SEC-FIX-2` origin-lock
+  enforce assertion (**P1**); `SEC-FIX-3` pin COGNITO_AUDIENCE; `SEC-FIX-4` AUTH_LEEWAY 30-60s;
+  `SEC-FIX-5` trust CF-Connecting-IP/XFF only when origin-locked (SEC-1c=SEC-2c, filed once);
+  `SEC-FIX-6` stop leaking backend exception strings (readyz + generic handler); `SEC-FIX-7`
+  validate ExportTaskOut import like TaskIn; `SEC-FIX-8` length caps on free-text; `SEC-FIX-9`
+  scope agent-creds CMK off principals wildcard; `SEC-FIX-10` meta CSP baseline in ui/index.html;
+  `SEC-FIX-11` CSP/XSS auto-P0 review guardrail; `SEC-FIX-12` JIRA Fernet key to Secrets Manager +
+  MultiFernet (all P2 except SEC-FIX-2). Did NOT file for the JIRA IDOR/SSRF/error-text — SEC-FIX-1
+  owns those.
+- **Chain:** doc-and-backlog task (no app code touched), so the implementer→reviewer→security code
+  chain does not apply; findings themselves are the output of the SEC-1..5 security reviews.
