@@ -592,6 +592,33 @@ resource "aws_cognito_user_in_group" "agent" {
 # public JWKS — see iam.tf: Secrets Manager is intentionally not granted), so no
 # Lambda role needs a kms:Decrypt grant here. Verified: no secretsmanager
 # GetSecretValue is granted to any Lambda role in this stack.
+#
+# SEC-FIX-9 (P2, 2026-07) — ASSESSED and INTENTIONALLY RETAINED (no policy
+# change). The AllowSecretsManagerUse `Principal = "*"` was flagged as a wildcard
+# decrypt grant. It is the CORRECT pattern here, not a bug:
+#   * There is NO stable, non-admin IAM principal that legitimately decrypts this
+#     secret. Agents authenticate as Cognito USERS (USER_PASSWORD_AUTH) and have
+#     NO IAM identity. The secret is read only by whoever runs
+#     scripts/agent_token.py with AWS creds — ad-hoc admin/deployer/CI identities
+#     (today: IAM user feeds.deployer via the Admins group's AdministratorAccess,
+#     plus account root by delegation). Hardcoding those ARNs would duplicate the
+#     IAM control and risk locking out future/rotated deployer or CI identities.
+#   * The REAL control lives at the IAM GetSecretValue layer and was verified
+#     intact: enumerating every customer-managed policy in the account, only two
+#     grant secretsmanager:GetSecretValue, and BOTH are scoped by condition/ARN to
+#     OTHER secrets (a SageMaker DataZone-tagged secret; the birdup
+#     origin-auth-token secret) — neither reaches this secret. No resource policy
+#     on the secret. So the only path to plaintext today is admin-level identities.
+#   * The two bounding conditions were verified present and correct against the
+#     LIVE key policy (no drift): kms:ViaService = secretsmanager.<region> (decrypt
+#     only THROUGH Secrets Manager, never direct KMS) and kms:CallerAccount =
+#     this account (no cross-account use). This mirrors the aws/secretsmanager
+#     managed key exactly.
+#   * Residual risk (accepted): a FUTURE broad secretsmanager:GetSecretValue grant
+#     to an in-account principal would gain decrypt. The guardrail is procedural —
+#     treat any new `GetSecretValue` with Resource="*" (or matching this ARN) as a
+#     security-review item; do NOT add one without scoping. See DECISIONS.md
+#     (SEC-FIX-9) for the full rationale.
 # ---------------------------------------------------------------------------
 data "aws_iam_policy_document" "agent_credentials_kms" {
   statement {

@@ -615,3 +615,42 @@ conditional put. This is safe because the forward item already exists durably; e
 independent and idempotent (`attribute_not_exists(PK) AND attribute_not_exists(SK)`), so a crash
 mid-run leaves a consistent partial state that a plain re-run completes without duplicates. No
 multi-item transaction is needed or used.
+
+## SEC-FIX-9 — agent-credentials CMK wildcard-principal decrypt grant: KEEP the pattern, document it
+
+**Finding.** `infra/terraform/cognito.tf` (`data.aws_iam_policy_document.agent_credentials_kms`,
+statement `AllowSecretsManagerUse`) grants `kms:Decrypt`/`GenerateDataKey*`/`CreateGrant`/… to
+`Principal = "*"`, bounded only by `kms:ViaService = secretsmanager.<region>` +
+`kms:CallerAccount = <account>`. Flagged (P2) because any FUTURE in-account principal granted a broad
+`secretsmanager:GetSecretValue` would silently gain plaintext agent creds.
+
+**Assessment (who can decrypt today).** The legitimate readers of `spec-server-dev/agent-credentials`
+are the identities that run `scripts/agent_token.py` with AWS creds. Agents themselves authenticate
+as Cognito USERS (`USER_PASSWORD_AUTH`) and hold NO IAM principal, so there is no fixed service role
+to scope to. Enumeration on account `985722751424` (`eu-west-1`):
+- IAM user `feeds.deployer` (the deployer/CI identity) is in group `Admins` → `AdministratorAccess`,
+  so it can `GetSecretValue` and therefore decrypt. Account root can too, by the key policy's
+  `EnableIAMRootPermissions` delegation.
+- Of ALL customer-managed policies in the account, exactly two grant `secretsmanager:GetSecretValue`,
+  and both are scoped away from this secret: a SageMaker managed policy (condition
+  `secretsmanager:ResourceTag/AmazonDataZoneDomain`, which this secret does not carry) and
+  `birdup-origin-auth-secret-read` (a specific different secret ARN). Neither reaches
+  `spec-server-dev/agent-credentials`.
+- The app Lambda exec role grants NO Secrets Manager action (verified in `iam.tf`), and the secret
+  has NO resource policy. So today the ONLY path to plaintext is admin-level identities.
+
+**DECISION — KEEP the `"*"` + ViaService + CallerAccount pattern; do NOT scope to an ARN list; no
+terraform key-policy change.** The set of legitimate readers is an ad-hoc, rotating collection of
+human/CI admin identities, not a stable ARN list. Hardcoding ARNs into the KMS key policy would
+duplicate the IAM control, be brittle, and risk locking out a future/rotated deployer or CI identity
+(and thus break agent-token minting). The chosen pattern mirrors the AWS-managed `aws/secretsmanager`
+key exactly: "if IAM lets you `GetSecretValue`, you can decrypt — but only through Secrets Manager,
+only from this account." The real security boundary is therefore the IAM `GetSecretValue` layer,
+which was verified intact (above). The two bounding conditions were verified present and correct
+against the LIVE key policy for CMK `fa2fe621-dcb3-4c6e-a413-f05fd1e74442` (no Terraform drift).
+
+**Outcome.** Documentation-only (this entry + an expanded SEC-FIX-9 comment in `cognito.tf`). No
+`terraform apply` was run; the KMS key policy is unchanged, so no legitimate reader was locked out.
+**Residual risk (accepted):** a future broad `secretsmanager:GetSecretValue` (Resource `*`, or
+matching this secret's ARN) granted to any in-account principal would gain decrypt. Guardrail is
+procedural — treat any such new grant as a security-review item.
