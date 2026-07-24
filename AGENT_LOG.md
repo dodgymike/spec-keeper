@@ -1158,3 +1158,32 @@ to the server's `/events` endpoint.
   conditional-put idempotency proven by the re-run test; full `LastEvaluatedKey` pagination; dry-run
   read-only; a non-conditional `ClientError` fails loudly (a one-shot re-run resumes idempotently).
 - **Safe to run against prod:** dry-run default + read-only; `--apply` is idempotent conditional writes.
+
+
+## SEC-FIX-5 — only trust forwarding headers when origin-locked (feature-runner, 2026-07-24)
+- **Task:** SEC-FIX-5 (epic SECURITY, P2). The public signup+enroll per-IP rate limiter keyed on
+  `_client_ip()`, which trusted `CF-Connecting-IP` then the first `X-Forwarded-For` hop
+  unconditionally — forgeable on the raw `execute-api` host, letting an attacker rotate the apparent
+  IP per request to defeat the per-IP floor.
+- **Change:** new `app/client_ip.py` `client_ip()` — trusts `CF-Connecting-IP` (a single edge-set
+  value) ONLY when origin-lock is *effectively* enforcing (`ORIGIN_LOCK_MODE == "enforce"` AND a
+  non-empty `ORIGIN_LOCK_SECRET`, mirroring the degrade-to-off rule in `_register_origin_lock`);
+  `X-Forwarded-For` is dropped as a source entirely; otherwise falls back to `request.remote_addr`.
+  `signup._client_ip` is now a thin re-export and `enroll` imports the shared helper, so both public
+  surfaces use ONE policy. In enforce mode the origin-lock before_request gate already 403s any
+  request lacking the CF-injected secret header, so anything reaching `client_ip()` provably transited
+  Cloudflare (which overwrites a client-supplied `CF-Connecting-IP`), making the header trustworthy.
+- **Tests:** new `tests/test_client_ip.py` (8 tests) — off/warn/enforce-without-secret all ignore
+  spoofed CF/XFF and share the `remote_addr` bucket (2nd hit trips MAX=1 → 429); enforce+secret keys
+  on `CF-Connecting-IP` (distinct CF IPs → distinct buckets; repeat CF IP trips the floor); enforce
+  falls back to `remote_addr` when the CF header is absent; uniform-202 neutral body unchanged.
+- **Verify:** `TEST_DATABASE_URL=...specserver_test pytest tests/test_client_ip.py tests/test_signup.py
+  tests/test_enroll_redeem.py tests/test_customauth_ratelimit.py tests/test_origin_lock.py` → 86 passed
+  (client_ip file: 8 passed). Adjacent `test_api_ratelimit test_admin_enrollments test_presignup` → 45
+  passed.
+- **Chain:** implementer + test-engineer + reviewer + security all ran (feature-runner). Reviewer:
+  exactly one task, request-layer only, no storage/schema/backend surface touched (no parity concern);
+  `signup` still imports `request` (used elsewhere). Security: pure hardening — no secrets, no SQL,
+  headers read safely with `.strip()`, `remote_addr` fallback is fail-safe (stricter, never a bypass).
+- **Note:** the sibling SEC-DOS-1 items (fail-open limiter on the intake path, `TURNSTILE_SECRET=""`,
+  WAFv2 rate rule) are out of scope for SEC-FIX-5 and remain open in `SECURITY_DEEPDIVE.md`.

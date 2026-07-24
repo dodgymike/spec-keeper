@@ -53,7 +53,8 @@ from flask.views import MethodView
 from flask_smorest import Blueprint, abort
 
 from . import admin as admin_bp  # reuse the SAME enrollments table + hashing (ONBOARD-2)
-from .signup import _client_ip, _origin_ok  # reuse the HA-7 public-path guards
+from .signup import _origin_ok  # reuse the HA-7 public-path origin guard
+from ..client_ip import client_ip  # SEC-FIX-5: shared origin-locked client-IP policy
 from ..signup_ratelimit import rate_limited
 from ..schemas import (
     EnrollDiscoveryOut,
@@ -101,7 +102,7 @@ def _rate_limit_response(cfg):
     it is not an enumeration oracle; ``Retry-After`` tells a headless agent exactly
     how long to back off. flask-smorest passes a returned ``Response`` through
     untouched, so callers just ``return`` it."""
-    if rate_limited(cfg, _client_ip(), key_prefix="enr#ip#"):
+    if rate_limited(cfg, client_ip(), key_prefix="enr#ip#"):
         window = int(cfg.get("SIGNUP_RATELIMIT_WINDOW_S", 60))
         resp = make_response(jsonify(message="rate_limited"), 429)
         resp.headers["Retry-After"] = str(window)

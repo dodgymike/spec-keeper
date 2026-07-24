@@ -36,6 +36,7 @@ from flask_smorest import Blueprint
 
 from .. import signup
 from .. import signup_aws
+from ..client_ip import client_ip
 from ..signup_ratelimit import rate_limited
 from ..schemas import (
     SignupAcceptedOut,
@@ -59,15 +60,12 @@ _SITEVERIFY_TIMEOUT_SECONDS = 5
 # Request helpers                                                               #
 # --------------------------------------------------------------------------- #
 def _client_ip() -> str:
-    """Prefer the real client IP behind a CDN (CF-Connecting-IP / first
-    X-Forwarded-For hop) over the immediate peer."""
-    cf = request.headers.get("CF-Connecting-IP")
-    if cf:
-        return cf.strip()
-    xff = request.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.remote_addr or ""
+    """Resolve the per-IP rate-limit key (SEC-FIX-5). Trusts the forwarding header
+    (``CF-Connecting-IP``) ONLY when origin-lock is effectively enforcing — so on
+    the raw ``execute-api`` host a spoofed header cannot rotate the apparent IP and
+    defeat the floor; otherwise falls back to ``remote_addr``. Thin re-export of the
+    shared :func:`app.client_ip.client_ip` so signup + enroll use ONE policy."""
+    return client_ip()
 
 
 def _origin_ok(cfg) -> bool:

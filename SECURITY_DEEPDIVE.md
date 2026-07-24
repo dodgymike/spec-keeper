@@ -30,9 +30,9 @@ Severity tally: **P0 = 0 · P1 = 4 · P2 = 6 · P3 = ~7.**
 - **Fix:** origin-lock — a Cloudflare Transform Rule injecting a secret header + an app/authorizer check that 403s when absent (or restrict API GW to Cloudflare IP ranges, or front with AWS WAFv2).
 
 ### SEC-DOS-1 · `/signup` is a cost-amplification DoS (defeatable limiter + Turnstile off)
-- **Evidence:** `app/blueprints/signup.py` `_client_ip()` trusts spoofable `CF-Connecting-IP`/`X-Forwarded-For` (forgeable on the raw path); `app/signup_ratelimit.py` **fails open** on any DynamoDB error; live `TURNSTILE_SECRET=""` (bot gate off) and `SIGNUP_ENFORCE_ORIGIN=false`. Each intake = 1 SQS msg + 1 worker Lambda + 1 Cognito `ListUsers`.
+- **Evidence:** ~~`app/blueprints/signup.py` `_client_ip()` trusts spoofable `CF-Connecting-IP`/`X-Forwarded-For`~~ (FIXED, SEC-FIX-5: `app/client_ip.py` `client_ip()` now trusts `CF-Connecting-IP` ONLY when origin-lock is effectively enforcing, drops `X-Forwarded-For` as a source, and otherwise keys on `remote_addr` — so a rotated forwarding header no longer defeats the per-IP floor on the raw path; signup + enroll share the one helper); `app/signup_ratelimit.py` **fails open** on any DynamoDB error; live `TURNSTILE_SECRET=""` (bot gate off) and `SIGNUP_ENFORCE_ORIGIN=false`. Each intake = 1 SQS msg + 1 worker Lambda + 1 Cognito `ListUsers`.
 - **Impact:** unbounded intake → SQS/Lambda/Cognito cost amplification + `ListUsers` throttle exhaustion. (Per-victim **mail-bomb is bounded** by the `bump_notify`/`bump_resend` caps — good — but cost/DoS is not.)
-- **Fix:** set a real `TURNSTILE_SECRET` (needs a Turnstile site+secret key from the owner); only trust `CF-Connecting-IP` when the request proves it came through Cloudflare (the origin-lock header above); make the limiter fail-closed on the intake path; add a WAFv2 rate rule.
+- **Fix:** set a real `TURNSTILE_SECRET` (needs a Turnstile site+secret key from the owner); ~~only trust `CF-Connecting-IP` when the request proves it came through Cloudflare~~ (DONE, SEC-FIX-5); make the limiter fail-closed on the intake path; add a WAFv2 rate rule.
 
 ### SEC-PII-1 · `SIGNUP_PEPPER` empty → unsalted `SHA-256(email)` as the signups PK
 - **Evidence:** live `SIGNUP_PEPPER=""`; `app/signup.py email_hash()` falls back to plain SHA-256; the signups-table partition key is that hash.
