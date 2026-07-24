@@ -1174,6 +1174,26 @@ class PostgresBackend:
         config.cached_transitions = transitions
         db.session.commit()
 
+    def record_jira_sync(self, slug: str, task_ident: str, *,
+                         issue_key: str | None = None,
+                         error: str | None = None) -> None:
+        """Best-effort write-back of a Jira sync result (SLS-J4).
+
+        D2: updates ONLY ``jira_issue_key`` / ``jira_sync_error`` and does NOT
+        bump ``task.version`` nor call ``record_change`` — so optimistic-locking
+        and the UI delta feed are unperturbed by this background metadata. On
+        error the existing ``jira_sync_error`` audit event is emitted (the /events
+        path, NOT the change-log)."""
+        project = self._project(slug)
+        task = self._task(project.id, task_ident)
+        if issue_key is not None:
+            task.jira_issue_key = issue_key
+        # ``error`` is the new value: a message on failure, None to clear on success.
+        task.jira_sync_error = error
+        if error is not None:
+            log_event(project.id, "jira_sync_error", task_id=task.id, message=error)
+        db.session.commit()
+
 
 class _RenderTask:
     """Lightweight view object the SPEC.md renderer understands."""

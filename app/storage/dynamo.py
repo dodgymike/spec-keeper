@@ -2095,6 +2095,64 @@ class DynamoBackend:
         it["updated_at"] = _now_iso()
         self._put(it)
 
+    def record_jira_sync(self, slug: str, task_ident: str, *,
+                         issue_key: str | None = None,
+                         error: str | None = None) -> None:
+        """Best-effort write-back of a Jira sync result (SLS-J4).
+
+        D2 (twin of the Postgres reference): updates ONLY ``jira_issue_key`` /
+        ``jira_sync_error`` on the task base item and does NOT bump ``version``
+        nor allocate a change-log ``seq`` / write a change item — so
+        optimistic-locking and the UI delta feed are unperturbed. On error the
+        existing ``jira_sync_error`` audit event is emitted (the /events path,
+        NOT the change-log).
+
+        A SCOPED ``UpdateItem`` (SET the two attrs, REMOVE the error on success)
+        mirrors Postgres' column-scoped UPDATE: it touches only these two
+        attributes, so a concurrent ``version`` bump is never clobbered (no
+        lost-update — full-item PutItem would). Values bind via
+        ``ExpressionAttributeValues``, never a string-formatted expression."""
+        self._project_item(slug)
+        base = self._get_task_base(slug, task_ident, consistent=True)
+        names: dict = {}
+        set_parts: list[str] = []
+        remove_parts: list[str] = []
+        values: dict = {}
+        if issue_key is not None:
+            names["#jik"] = "jira_issue_key"
+            set_parts.append("#jik = :jik")
+            values[":jik"] = issue_key
+        # ``error`` is the new value: a message on failure, or None to CLEAR the
+        # attribute on success (REMOVE -> reads back as None, matching Postgres).
+        names["#jse"] = "jira_sync_error"
+        if error is not None:
+            set_parts.append("#jse = :jse")
+            values[":jse"] = error
+        else:
+            remove_parts.append("#jse")
+        expr = ""
+        if set_parts:
+            expr += "SET " + ", ".join(set_parts)
+        if remove_parts:
+            expr += (" " if expr else "") + "REMOVE " + ", ".join(remove_parts)
+        kwargs = dict(
+            Key={"PK": base["PK"], "SK": base["SK"]},
+            UpdateExpression=expr,
+            ExpressionAttributeNames=names,
+        )
+        if values:
+            # Resource-level Table.update_item takes PLAIN python values (the
+            # SDK marshals them) — mirror the counter ADD at reserve_number.
+            kwargs["ExpressionAttributeValues"] = _ddbify(values)
+        try:
+            self.table.update_item(**kwargs)
+        except (ClientError, BotoCoreError) as exc:  # pragma: no cover - infra
+            raise BackendUnavailable(str(exc)) from exc
+        if error is not None:
+            self._emit_event(slug, "jira_sync_error",
+                             task_pubid=base["public_id"],
+                             task_key=base.get("key"), message=error)
+
 
 # --------------------------------------------------------------------------- #
 # module helpers

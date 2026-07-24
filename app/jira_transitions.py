@@ -17,12 +17,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-import sqlalchemy as sa
+from flask import current_app
 
 from .crypto import decrypt
-from .extensions import db
 from .jira_client import JiraClient, JiraClientError
-from .models import JiraProjectConfig
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +34,8 @@ class TransitionNotFoundError(Exception):
     even after a refresh attempt."""
 
 
-def _build_client(config: JiraProjectConfig) -> JiraClient:
-    """Construct a JiraClient from a JiraProjectConfig row."""
+def _build_client(config) -> JiraClient:
+    """Construct a JiraClient from a JiraConfigDTO (token decrypted here only)."""
     token = decrypt(config.api_token_encrypted)
     return JiraClient(
         base_url=config.base_url,
@@ -66,11 +64,14 @@ def _fetch_project_statuses(client: JiraClient, project_key: str) -> list[dict]:
     return statuses
 
 
-def warm_transition_cache(config: JiraProjectConfig) -> list[dict]:
-    """Fetch project statuses from Jira and store in cached_transitions.
+def warm_transition_cache(config, slug: str) -> list[dict]:
+    """Fetch project statuses from Jira and persist them via the storage port.
 
     Args:
-        config: A JiraProjectConfig row (must have api_token_encrypted set).
+        config: A ``JiraConfigDTO`` (must have ``api_token_encrypted`` set).
+        slug: The project slug — the cache is persisted through
+            ``current_app.storage.set_jira_transitions(slug, ...)`` so it works on
+            BOTH backends.
 
     Returns:
         The list of statuses that was cached.
@@ -96,16 +97,17 @@ def warm_transition_cache(config: JiraProjectConfig) -> list[dict]:
             f"Jira API call failed (HTTP {exc.status_code})"
         ) from exc
 
-    config.cached_transitions = {
+    transitions = {
         "statuses": statuses,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
-    db.session.commit()
+    current_app.storage.set_jira_transitions(slug, transitions)
     return statuses
 
 
 def find_transition(
-    config: JiraProjectConfig,
+    config,
+    slug: str,
     transition_name: str,
     *,
     allow_refresh: bool = True,
@@ -115,10 +117,12 @@ def find_transition(
     Implements the refresh-once-before-failing pattern:
     1. Look in the existing cache.
     2. If not found and allow_refresh is True, refresh the cache from Jira.
-    3. Look again. If still not found, raise TransitionNotFoundError.
+    3. Re-read the freshly persisted config and look again. If still not found,
+       raise TransitionNotFoundError.
 
     Args:
-        config: The JiraProjectConfig row.
+        config: The ``JiraConfigDTO``.
+        slug: The project slug (used to persist/re-read the refreshed cache).
         transition_name: The name to search for (case-insensitive match).
         allow_refresh: If True (default), refresh cache once on miss.
 
@@ -146,10 +150,12 @@ def find_transition(
         transition_name,
         config.jira_project_key,
     )
-    warm_transition_cache(config)
+    warm_transition_cache(config, slug)
 
-    # Second attempt after refresh
-    match = _find_in_cache(config, transition_name)
+    # Second attempt after refresh: re-read the freshly persisted config (the
+    # DTO we were handed is a stale snapshot — warmup wrote through storage).
+    fresh = current_app.storage.get_jira_config(slug)
+    match = _find_in_cache(fresh, transition_name) if fresh is not None else None
     if match is not None:
         return match
 
@@ -159,7 +165,7 @@ def find_transition(
     )
 
 
-def _find_in_cache(config: JiraProjectConfig, name: str) -> dict | None:
+def _find_in_cache(config, name: str) -> dict | None:
     """Search cached_transitions for a status matching `name` (case-insensitive)."""
     if not config.cached_transitions:
         return None

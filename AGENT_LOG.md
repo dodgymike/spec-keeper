@@ -1010,3 +1010,38 @@ to the server's `/events` endpoint.
   behaviour). Eager transition-cache warmup deferred to SLS-J4 (recorded in DECISIONS.md).
 - **Backlog:** claimed at start (PATCH), completed at end via `scripts/agent_token.py` (`spec-keeper`
   Cognito user) with commit sha + test summary + proof_cmd.
+
+## 2026-07-24 — SLS-J4: jira_sync + jira_transitions on the storage port; record_jira_sync (D2)
+
+- **Task:** refactor `app/jira_sync.py` + `app/jira_transitions.py` off direct ORM access onto
+  `current_app.storage` + DTOs, and add the `record_jira_sync` write-back primitive on both adapters.
+- **Signatures:** `sync_task_created(slug, task_dto)` / `sync_task_completed(slug, task_dto)`; read
+  config via `storage.get_jira_config` (None/not-enabled → no-op), decrypt the token at the call site
+  only, call `JiraClient`, write the result back via `storage.record_jira_sync`. Best-effort contract
+  preserved (NEVER raises; failure → `jira_sync_error` + existing `jira_sync_error` event).
+- **Transitions:** `warm_transition_cache(config_dto, slug)` / `find_transition(config_dto, slug,
+  name)` persist/refresh via `storage.set_jira_transitions`; eager warmup re-wired into the
+  `jira_config` blueprint (`_maybe_warm_transition_cache`, best-effort — never blocks the save). The 4
+  `TestEndpointTriggersWarmup` wiring tests un-deferred in conftest.
+- **record_jira_sync (D2):** updates ONLY `jira_issue_key` / `jira_sync_error`; NO `version` bump, NO
+  change-log entry — so optimistic-locking + the UI delta feed are unperturbed. Emits the
+  `jira_sync_error` audit event on failure (events ≠ change-log). Postgres = column-scoped `UPDATE`;
+  DynamoDB = scoped `UpdateItem` (SET/REMOVE), NOT a full-item PutItem, so a concurrent `version` bump
+  is never clobbered. Values bind via params / `ExpressionAttributeValues`.
+- **Security:** plaintext token decrypted only at the jira_sync/transitions call sites, handed to
+  `JiraClient`, never passed to storage, never logged, never string-formatted into SQL/Dynamo
+  expressions. Error messages carry no credential material (JiraClientError/DecryptionError omit it);
+  the `"secret-token"`-absent assertions still hold.
+- **Tests:** `pytest tests/test_jira_sync.py` → 9 passed (Postgres, new signature + storage asserts);
+  `tests/test_jira_transition_cache.py` → 17 passed (incl. the 4 un-deferred warmup tests); NEW
+  `tests/test_record_jira_sync.py` → 4 passed on BOTH backends (D2: version + changes/head unchanged).
+  Full Jira + parity + changelog sweep on `TEST_BACKENDS=postgres,dynamodb` → 145 passed, 82 skipped.
+  (Two unrelated collection errors from a stale container image — `scripts/backfill_memberships.py`
+  absent, `ratelimit` preload — were sidestepped by naming the test paths.)
+- **Chain:** implementer → test-engineer → reviewer → security → data-reviewer → reliability-reviewer
+  (feature-runner embodied these). data/reliability: adapter parity enforced by the both-backend
+  record_jira_sync test; the scoped Dynamo write mirrors Postgres' column-scoped UPDATE (no
+  lost-update). Out of scope (SLS-J5): lifecycle wiring + the retry endpoint — its two call sites now
+  mismatch the new signature (tests mock the sync fns; a documented handoff to J5).
+- **Backlog:** claimed at start (PATCH → in_progress/owner spec-keeper), completed at end via
+  `scripts/agent_token.py` (`spec-keeper` Cognito user) with commit sha + test summary + proof_cmd.

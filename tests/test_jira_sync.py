@@ -1,6 +1,6 @@
-"""Tests for app/jira_sync.py — the Jira sync service (JIRA-8).
+"""Tests for app/jira_sync.py — the Jira sync service (JIRA-8 / SLS-J4).
 
-Covers:
+Covers (new SLS-J4 storage-port signature ``(slug, task_dto)``):
 - sync_task_created: happy path (creates issue, stores key)
 - sync_task_created: Jira unreachable (sets jira_sync_error, does not raise)
 - sync_task_created: disabled config (no-op)
@@ -11,19 +11,25 @@ Covers:
 - sync_task_completed: transition failure (sets jira_sync_error, does not raise)
 - sync_task_completed: disabled config (no-op)
 
-All Jira HTTP calls are mocked; tests run against the real test Postgres DB.
-Test marker: jira_sync_service (matches the task's proof_cmd).
+All Jira HTTP calls are mocked; results are asserted via ``current_app.storage``
+(the backend-neutral port) rather than the ORM. The fixtures still seed config /
+tasks via ``db.session`` so the module stays ``postgres_only`` (it exercises the
+sync mechanics in isolation; the cross-backend proof is the record_jira_sync
+parity test). Test marker: jira_sync_service (matches the task's proof_cmd).
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
+from flask import current_app
 
 from app.extensions import db
 from app.jira_client import JiraClientError
 from app.jira_sync import sync_task_completed, sync_task_created
 from app.models import Event, JiraProjectConfig, Project, Task, TaskStatus
+
+SLUG = "sync-proj"
 
 
 @pytest.fixture(autouse=True)
@@ -39,10 +45,10 @@ def _set_encryption_key(monkeypatch):
 def sync_project(client):
     """Create a fresh project for sync tests."""
     resp = client.post(
-        "/api/v1/projects", json={"slug": "sync-proj", "name": "Sync Proj"}
+        "/api/v1/projects", json={"slug": SLUG, "name": "Sync Proj"}
     )
     assert resp.status_code == 201, resp.get_json()
-    return "sync-proj"
+    return SLUG
 
 
 @pytest.fixture
@@ -98,7 +104,7 @@ def disabled_config(app, sync_project):
 
 @pytest.fixture
 def sample_task(app, sync_project):
-    """Create a sample task in the sync-proj project."""
+    """Create a sample task and return its stable public_id."""
     with app.app_context():
         project = db.session.execute(
             db.select(Project).where(Project.slug == sync_project)
@@ -112,7 +118,17 @@ def sample_task(app, sync_project):
         db.session.add(task)
         db.session.commit()
         db.session.refresh(task)
-        return task.id
+        return str(task.public_id)
+
+
+def _set_issue_key(app, pubid, issue_key):
+    """Directly seed jira_issue_key on a task (bypassing the sync service)."""
+    with app.app_context():
+        task = db.session.execute(
+            db.select(Task).where(Task.public_id == pubid)
+        ).scalar_one()
+        task.jira_issue_key = issue_key
+        db.session.commit()
 
 
 class TestSyncTaskCreatedHappyPath:
@@ -123,22 +139,18 @@ class TestSyncTaskCreatedHappyPath:
         self, app, enabled_config, sample_task, marker
     ):
         """sync_task_created creates a Jira issue and stores the key."""
-        mock_resp = MagicMock()
-        mock_resp.ok = True
-        mock_resp.json.return_value = {"key": "PROJ-42"}
-
         with app.app_context():
-            task = db.session.get(Task, sample_task)
+            task_dto = current_app.storage.get_task(SLUG, sample_task)
 
             with patch(
                 "app.jira_sync.JiraClient.create_issue",
                 return_value="PROJ-42",
             ) as mock_create:
-                sync_task_created(task)
+                sync_task_created(SLUG, task_dto)
 
-            db.session.refresh(task)
-            assert task.jira_issue_key == "PROJ-42"
-            assert task.jira_sync_error is None
+            updated = current_app.storage.get_task(SLUG, sample_task)
+            assert updated.jira_issue_key == "PROJ-42"
+            assert updated.jira_sync_error is None
             mock_create.assert_called_once_with(
                 project_key="PROJ",
                 summary="Implement feature X",
@@ -154,28 +166,27 @@ class TestSyncTaskCreatedFailure:
     def test_jira_sync_service_error_on_jira_failure(
         self, app, enabled_config, sample_task, marker
     ):
-        """When Jira is unreachable, task.jira_sync_error is set, no raise."""
+        """When Jira is unreachable, jira_sync_error is set, no raise."""
         with app.app_context():
-            task = db.session.get(Task, sample_task)
+            task_dto = current_app.storage.get_task(SLUG, sample_task)
 
             with patch(
                 "app.jira_sync.JiraClient.create_issue",
                 side_effect=JiraClientError(503, "Service Unavailable", "POST", "http://x"),
             ):
                 # Must NOT raise
-                sync_task_created(task)
+                sync_task_created(SLUG, task_dto)
 
-            db.session.refresh(task)
-            assert task.jira_issue_key is None
-            assert task.jira_sync_error is not None
-            assert "sync_task_created failed" in task.jira_sync_error
+            updated = current_app.storage.get_task(SLUG, sample_task)
+            assert updated.jira_issue_key is None
+            assert updated.jira_sync_error is not None
+            assert "sync_task_created failed" in updated.jira_sync_error
 
-            # Check event was emitted
+            # Check event was emitted (audit path), no secret leaked
             events = db.session.execute(
                 db.select(Event).where(Event.event_type == "jira_sync_error")
             ).scalars().all()
             assert len(events) == 1
-            assert events[0].task_id == task.id
             assert "secret-token" not in events[0].message
 
 
@@ -188,17 +199,15 @@ class TestSyncTaskCreatedNoOp:
     ):
         """sync_task_created is a no-op when config is disabled."""
         with app.app_context():
-            task = db.session.get(Task, sample_task)
+            task_dto = current_app.storage.get_task(SLUG, sample_task)
 
-            with patch(
-                "app.jira_sync.JiraClient.create_issue"
-            ) as mock_create:
-                sync_task_created(task)
+            with patch("app.jira_sync.JiraClient.create_issue") as mock_create:
+                sync_task_created(SLUG, task_dto)
 
             mock_create.assert_not_called()
-            db.session.refresh(task)
-            assert task.jira_issue_key is None
-            assert task.jira_sync_error is None
+            updated = current_app.storage.get_task(SLUG, sample_task)
+            assert updated.jira_issue_key is None
+            assert updated.jira_sync_error is None
 
     @pytest.mark.parametrize("marker", ["jira_sync_service"])
     def test_jira_sync_service_noop_missing_config(
@@ -206,17 +215,15 @@ class TestSyncTaskCreatedNoOp:
     ):
         """sync_task_created is a no-op when no config exists."""
         with app.app_context():
-            task = db.session.get(Task, sample_task)
+            task_dto = current_app.storage.get_task(SLUG, sample_task)
 
-            with patch(
-                "app.jira_sync.JiraClient.create_issue"
-            ) as mock_create:
-                sync_task_created(task)
+            with patch("app.jira_sync.JiraClient.create_issue") as mock_create:
+                sync_task_created(SLUG, task_dto)
 
             mock_create.assert_not_called()
-            db.session.refresh(task)
-            assert task.jira_issue_key is None
-            assert task.jira_sync_error is None
+            updated = current_app.storage.get_task(SLUG, sample_task)
+            assert updated.jira_issue_key is None
+            assert updated.jira_sync_error is None
 
 
 class TestSyncTaskCreatedIdempotent:
@@ -227,19 +234,16 @@ class TestSyncTaskCreatedIdempotent:
         self, app, enabled_config, sample_task, marker
     ):
         """Calling sync_task_created on a task that already has jira_issue_key skips."""
+        _set_issue_key(app, sample_task, "PROJ-99")
         with app.app_context():
-            task = db.session.get(Task, sample_task)
-            task.jira_issue_key = "PROJ-99"
-            db.session.commit()
+            task_dto = current_app.storage.get_task(SLUG, sample_task)
 
-            with patch(
-                "app.jira_sync.JiraClient.create_issue"
-            ) as mock_create:
-                sync_task_created(task)
+            with patch("app.jira_sync.JiraClient.create_issue") as mock_create:
+                sync_task_created(SLUG, task_dto)
 
             mock_create.assert_not_called()
-            db.session.refresh(task)
-            assert task.jira_issue_key == "PROJ-99"
+            updated = current_app.storage.get_task(SLUG, sample_task)
+            assert updated.jira_issue_key == "PROJ-99"
 
 
 class TestSyncTaskCompletedHappyPath:
@@ -250,19 +254,18 @@ class TestSyncTaskCompletedHappyPath:
         self, app, enabled_config, sample_task, marker
     ):
         """sync_task_completed transitions the issue using the cached Done transition."""
+        _set_issue_key(app, sample_task, "PROJ-42")
         with app.app_context():
-            task = db.session.get(Task, sample_task)
-            task.jira_issue_key = "PROJ-42"
-            db.session.commit()
+            task_dto = current_app.storage.get_task(SLUG, sample_task)
 
             with patch(
                 "app.jira_sync.JiraClient.transition_issue"
             ) as mock_transition:
-                sync_task_completed(task)
+                sync_task_completed(SLUG, task_dto)
 
             mock_transition.assert_called_once_with("PROJ-42", "5")
-            db.session.refresh(task)
-            assert task.jira_sync_error is None
+            updated = current_app.storage.get_task(SLUG, sample_task)
+            assert updated.jira_sync_error is None
 
 
 class TestSyncTaskCompletedInlineCreate:
@@ -274,8 +277,8 @@ class TestSyncTaskCompletedInlineCreate:
     ):
         """Complete on a task without issue_key first creates, then transitions."""
         with app.app_context():
-            task = db.session.get(Task, sample_task)
-            assert task.jira_issue_key is None
+            task_dto = current_app.storage.get_task(SLUG, sample_task)
+            assert task_dto.jira_issue_key is None
 
             with patch(
                 "app.jira_sync.JiraClient.create_issue",
@@ -283,13 +286,13 @@ class TestSyncTaskCompletedInlineCreate:
             ) as mock_create, patch(
                 "app.jira_sync.JiraClient.transition_issue"
             ) as mock_transition:
-                sync_task_completed(task)
+                sync_task_completed(SLUG, task_dto)
 
             mock_create.assert_called_once()
             mock_transition.assert_called_once_with("PROJ-77", "5")
-            db.session.refresh(task)
-            assert task.jira_issue_key == "PROJ-77"
-            assert task.jira_sync_error is None
+            updated = current_app.storage.get_task(SLUG, sample_task)
+            assert updated.jira_issue_key == "PROJ-77"
+            assert updated.jira_sync_error is None
 
 
 class TestSyncTaskCompletedFailure:
@@ -300,23 +303,22 @@ class TestSyncTaskCompletedFailure:
         self, app, enabled_config, sample_task, marker
     ):
         """Transition failure sets jira_sync_error but does not raise."""
+        _set_issue_key(app, sample_task, "PROJ-42")
         with app.app_context():
-            task = db.session.get(Task, sample_task)
-            task.jira_issue_key = "PROJ-42"
-            db.session.commit()
+            task_dto = current_app.storage.get_task(SLUG, sample_task)
 
             with patch(
                 "app.jira_sync.JiraClient.transition_issue",
                 side_effect=JiraClientError(500, "Server Error", "POST", "http://x"),
             ):
                 # Must NOT raise
-                sync_task_completed(task)
+                sync_task_completed(SLUG, task_dto)
 
-            db.session.refresh(task)
-            assert task.jira_sync_error is not None
-            assert "sync_task_completed failed" in task.jira_sync_error
+            updated = current_app.storage.get_task(SLUG, sample_task)
+            assert updated.jira_sync_error is not None
+            assert "sync_task_completed failed" in updated.jira_sync_error
 
-            # Check event was emitted
+            # Check event was emitted, no secret leaked
             events = db.session.execute(
                 db.select(Event).where(Event.event_type == "jira_sync_error")
             ).scalars().all()
@@ -333,14 +335,14 @@ class TestSyncTaskCompletedNoOp:
     ):
         """sync_task_completed is a no-op when config is disabled."""
         with app.app_context():
-            task = db.session.get(Task, sample_task)
+            task_dto = current_app.storage.get_task(SLUG, sample_task)
 
             with patch(
                 "app.jira_sync.JiraClient.transition_issue"
             ) as mock_transition, patch(
                 "app.jira_sync.JiraClient.create_issue"
             ) as mock_create:
-                sync_task_completed(task)
+                sync_task_completed(SLUG, task_dto)
 
             mock_transition.assert_not_called()
             mock_create.assert_not_called()

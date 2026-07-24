@@ -153,6 +153,17 @@ class StorageBackend(Protocol):
     def create_jira_config(self, slug: str, data: dict) -> JiraConfigDTO: ...  # NotFound (project); Conflict if one exists
     def update_jira_config(self, slug: str, data: dict) -> JiraConfigDTO: ...  # NotFound (project or config)
     def set_jira_transitions(self, slug: str, transitions: dict) -> None: ...  # NotFound (project or config)
+    # Best-effort write-back of a Jira sync result (SLS-J4). Updates ONLY the two
+    # task attributes ``jira_issue_key`` (set when ``issue_key`` is given) and
+    # ``jira_sync_error`` (set to ``error``, i.e. cleared to None on success).
+    # D2 (hard rule): it MUST NOT bump ``task.version`` and MUST NOT write a
+    # change-log entry — this is best-effort background metadata that must not
+    # perturb optimistic-locking (If-Match) or the UI delta feed. On error it MAY
+    # emit the existing ``jira_sync_error`` audit event (the /events path — events
+    # are NOT the change-log delta feed). Identical behaviour on both backends.
+    def record_jira_sync(self, slug: str, task_ident: str, *,
+                         issue_key: str | None = None,
+                         error: str | None = None) -> None: ...                # NotFound (project or task)
 
     # --- ports (SPEC.md round-trip) ------------------------------------
     def import_spec(self, slug: str, parsed) -> dict: ...

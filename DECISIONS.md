@@ -537,3 +537,48 @@ read-then-write on both backends (identical, rare admin op). This matches prior 
 race is introduced. `updated_at` is bumped on every write on both backends (Postgres `onupdate`,
 Dynamo explicit). Project deletion removes the config on both backends (Postgres FK `ON DELETE
 CASCADE`; Dynamo `delete_project` wipes the whole `P#<slug>` partition, including the `JIRACFG` item).
+
+## 2026-07-24 — SLS-J4: jira_sync + jira_transitions on the storage port; record_jira_sync (D2)
+
+**Context.** `app/jira_sync.py` and `app/jira_transitions.py` operated on `db.session` + the
+`Task`/`JiraProjectConfig` ORM directly, so Jira sync only worked on Postgres. SLS-J3 moved the Jira
+*config* behind the storage port (`JiraConfigDTO` + `get/create/update_jira_config` +
+`set_jira_transitions`) and deferred the eager transition-cache warmup to this task.
+
+**Decision.** Refactor both modules onto `current_app.storage` + DTOs so sync is backend-neutral:
+- `sync_task_created(slug, task_dto)` / `sync_task_completed(slug, task_dto)` — read config via
+  `storage.get_jira_config(slug)` (None or not-enabled → no-op), decrypt the token **at the call
+  site only** (never handed to storage), call `JiraClient`, and write the result back via the new
+  `storage.record_jira_sync(...)`. The best-effort contract is preserved: these functions NEVER
+  raise; any failure is recorded on `jira_sync_error` and emitted as the existing `jira_sync_error`
+  audit event.
+- `jira_transitions.warm_transition_cache(config_dto, slug)` / `find_transition(config_dto, slug,
+  name)` take a DTO + slug and persist/refresh the cache through `storage.set_jira_transitions`;
+  `find_transition` re-reads the freshly persisted config after a refresh (the DTO is a frozen
+  snapshot). The eager warmup deferred by SLS-J3 is wired back into the `jira_config` blueprint
+  (`_maybe_warm_transition_cache`), best-effort so a warmup failure never blocks the config save; the
+  four `TestEndpointTriggersWarmup` tests are un-deferred in conftest.
+- New port method `record_jira_sync(slug, task_ident, *, issue_key=None, error=None)` on both
+  adapters: sets `jira_issue_key` (when `issue_key` given) and `jira_sync_error` (the new value —
+  a message on failure, cleared to None on success).
+
+**D2 (baked-in, enforced here).** `record_jira_sync` is best-effort background metadata: it must NOT
+bump `task.version` and must NOT write a change-log `Change`/delta entry. It MAY emit the existing
+`jira_sync_error` **event** (the `/events` audit path) — events are NOT the change-log delta feed.
+Rationale: optimistic-locking (`If-Match`/version) and the UI delta feed must stay unperturbed by
+background sync writes. Asserted cross-backend in `tests/test_record_jira_sync.py`: after
+`record_jira_sync`, `get_task` shows both fields, `task.version` is UNCHANGED, and `changes_head`
+is UNCHANGED, on Postgres AND DynamoDB.
+
+**Parity note — scoped write, not full-item replace.** Postgres issues a column-scoped `UPDATE`
+(only the two jira columns), so a concurrent `version` bump is preserved. To match (no lost-update)
+the DynamoDB twin uses a scoped `UpdateItem` (SET the two attrs, REMOVE `jira_sync_error` to clear
+on success) rather than a full-item `PutItem` — it touches only the two attributes and never
+clobbers a concurrent write. Values bind via `ExpressionAttributeValues`, never string-formatted.
+
+**Out of scope (SLS-J5).** Sync is NOT yet wired into the create/complete lifecycle blueprints, and
+the manual retry endpoint (`jira_sync_retry.py`) is left as-is (still ORM/Postgres-only). Because the
+shared sync signature changed, the retry endpoint's two call sites (`sync_task_created(task)` /
+`sync_task_completed(task)`) now mismatch the new `(slug, task_dto)` signature — a known temporary
+inconsistency handed to SLS-J5 (its tests mock the sync functions, so they stay green). SLS-J5 owns
+moving that endpoint to the storage port and fixing the call sites.

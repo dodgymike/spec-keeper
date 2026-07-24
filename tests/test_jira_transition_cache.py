@@ -17,6 +17,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from flask import current_app
 
 from app.extensions import db
 from app.jira_client import JiraClient, JiraClientError
@@ -115,7 +116,7 @@ class TestWarmTransitionCache:
                 "app.jira_transitions.JiraClient._request",
                 return_value=_mock_statuses_response(),
             ):
-                result = warm_transition_cache(config)
+                result = warm_transition_cache(config, "tcache-proj")
 
             # Should return deduplicated statuses
             assert len(result) == 4  # Open, In Progress, Done, In Review
@@ -140,7 +141,7 @@ class TestWarmTransitionCache:
                 "app.jira_transitions.JiraClient._request",
                 return_value=_mock_statuses_response(),
             ):
-                result = warm_transition_cache(config)
+                result = warm_transition_cache(config, "tcache-proj")
 
             # "Open" (id=1) and "Done" (id=5) appear in both Task and Bug
             ids = [s["id"] for s in result]
@@ -155,7 +156,7 @@ class TestWarmTransitionCache:
             db.session.commit()
 
             with pytest.raises(TransitionCacheError, match="no API token"):
-                warm_transition_cache(config)
+                warm_transition_cache(config, "tcache-proj")
 
     def test_transition_cache_error_on_jira_failure(self, app, jira_config):
         """warm_transition_cache raises TransitionCacheError on Jira API error."""
@@ -181,7 +182,7 @@ class TestWarmTransitionCache:
                 side_effect=JiraClientError(403, "Forbidden", "GET", "http://x"),
             ):
                 with pytest.raises(TransitionCacheError, match="HTTP 403"):
-                    warm_transition_cache(config)
+                    warm_transition_cache(config, "tcache-proj")
 
 
 class TestFindTransition:
@@ -201,7 +202,7 @@ class TestFindTransition:
             }
             db.session.commit()
 
-            result = find_transition(config, "Done")
+            result = find_transition(config, "tcache-proj", "Done")
             assert result == {"id": "5", "name": "Done"}
 
     def test_transition_cache_find_case_insensitive(self, app, jira_config):
@@ -214,10 +215,10 @@ class TestFindTransition:
             }
             db.session.commit()
 
-            result = find_transition(config, "done")
+            result = find_transition(config, "tcache-proj", "done")
             assert result == {"id": "5", "name": "Done"}
 
-            result2 = find_transition(config, "DONE")
+            result2 = find_transition(config, "tcache-proj", "DONE")
             assert result2 == {"id": "5", "name": "Done"}
 
     def test_transition_cache_refresh_on_miss(self, app, jira_config):
@@ -235,12 +236,13 @@ class TestFindTransition:
                     {"id": "5", "name": "Done"},
                 ],
             ):
-                result = find_transition(config, "Done")
+                result = find_transition(config, "tcache-proj", "Done")
 
             assert result == {"id": "5", "name": "Done"}
-            # Cache should now be populated
-            assert config.cached_transitions is not None
-            assert len(config.cached_transitions["statuses"]) == 2
+            # Cache should now be populated (persisted via set_jira_transitions)
+            refreshed = current_app.storage.get_jira_config("tcache-proj")
+            assert refreshed.cached_transitions is not None
+            assert len(refreshed.cached_transitions["statuses"]) == 2
 
     def test_transition_cache_not_found_after_refresh(self, app, jira_config):
         """find_transition raises TransitionNotFoundError if still missing after refresh."""
@@ -260,7 +262,7 @@ class TestFindTransition:
                     TransitionNotFoundError,
                     match="not found.*even after refresh",
                 ):
-                    find_transition(config, "Done")
+                    find_transition(config, "tcache-proj", "Done")
 
     def test_transition_cache_no_refresh_when_disabled(self, app, jira_config):
         """find_transition raises immediately if allow_refresh=False."""
@@ -273,7 +275,7 @@ class TestFindTransition:
             db.session.commit()
 
             with pytest.raises(TransitionNotFoundError, match="refresh disabled"):
-                find_transition(config, "Done", allow_refresh=False)
+                find_transition(config, "tcache-proj", "Done", allow_refresh=False)
 
     def test_transition_cache_refreshes_exactly_once(self, app, jira_config):
         """find_transition calls _fetch_project_statuses at most once."""
@@ -287,7 +289,7 @@ class TestFindTransition:
                 return_value=[{"id": "1", "name": "Open"}],
             ) as mock_fetch:
                 with pytest.raises(TransitionNotFoundError):
-                    find_transition(config, "NonExistent")
+                    find_transition(config, "tcache-proj", "NonExistent")
 
             # Only called once (the refresh), not retried
             mock_fetch.assert_called_once()

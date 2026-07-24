@@ -9,9 +9,11 @@ plaintext token NEVER enters the storage layer, is never persisted in the clear,
 and is never logged. Storage only ever sees / returns ciphertext, and responses
 expose only ``has_token`` — never the token or its ciphertext (``_config_to_out``).
 
-Transition-cache warmup on create/enable (the old JIRA-6 eager warmup) is deferred
-to SLS-J4 (the Jira sync wiring), where the ``set_jira_transitions`` storage method
-added here is used; the cache is otherwise populated lazily on first sync use.
+Transition-cache warmup on create/enable (the old JIRA-6 eager warmup) is wired
+here in SLS-J4 via ``warm_transition_cache``, which persists through the
+``set_jira_transitions`` storage port method so it works on BOTH backends. It is
+best-effort: a warmup failure NEVER blocks the config save (the cache is then
+populated lazily on first sync use via ``find_transition``'s refresh-once).
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from flask_smorest import Blueprint, abort
 
 from ..crypto import encrypt
 from ..helpers import require_api_key
+from ..jira_transitions import warm_transition_cache
 from ..schemas import JiraConfigIn, JiraConfigOut, JiraConfigUpdate
 
 blp = Blueprint(
@@ -42,6 +45,23 @@ def _config_to_out(config) -> dict:
         "has_token": config.api_token_encrypted is not None,
         "updated_at": config.updated_at,
     }
+
+
+def _maybe_warm_transition_cache(config, slug) -> None:
+    """Eagerly warm the transition cache when the config is enabled (SLS-J4).
+
+    Best-effort: warmup failures MUST NOT block the config save, so every error
+    (Jira unreachable, missing token, etc.) is swallowed and logged — the cache
+    is then populated lazily on first sync use."""
+    if not config.enabled:
+        return
+    try:
+        warm_transition_cache(config, slug)
+    except Exception:  # noqa: BLE001 - best-effort; never block the save
+        current_app.logger.warning(
+            "Jira transition-cache warmup failed for project %s; config saved, "
+            "cache will populate lazily on first sync.", slug
+        )
 
 
 @blp.route("/<slug>/jira-config")
@@ -70,6 +90,7 @@ class JiraConfigResource(MethodView):
         }
         # 404 if project absent, 409 if a config already exists.
         config = current_app.storage.create_jira_config(slug, stored)
+        _maybe_warm_transition_cache(config, slug)
         return _config_to_out(config)
 
     @blp.arguments(JiraConfigUpdate)
@@ -86,4 +107,5 @@ class JiraConfigResource(MethodView):
             stored["api_token_encrypted"] = encrypt(data["api_token"])
         # 404 if project or config absent.
         config = current_app.storage.update_jira_config(slug, stored)
+        _maybe_warm_transition_cache(config, slug)
         return _config_to_out(config)
