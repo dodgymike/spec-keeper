@@ -360,10 +360,12 @@ public_id>"}`) and `chain_step` (a step was upserted; `payload={"run": "<run pub
 "<step_name>", "status": "<status>"}`), alongside the existing `claimed`/`completed`/`reserved`/
 `note`/`decision` kinds.
 
-**Backend note:** `EventOut.task_id` is the internal integer id on Postgres, but is always `null`
-on the DynamoDB backend — DynamoDB has no integer surrogate key, so the task reference for a
-DynamoDB-backed event is carried in the event's `message`/`payload` instead. This is intentional;
-the `EventOut` shape itself is identical on both backends.
+**Task pointer:** `EventOut.task_pubid` is the related task's stable `public_id` (a string), or
+`null` for events that reference no task. It is populated IDENTICALLY on both backends — Postgres
+derives it from the task's `public_id` (not the internal integer surrogate), and DynamoDB surfaces
+the `task_pubid` stored on the event item. The old integer `task_id` field was removed: it was a
+Postgres-only surrogate that was always `null` on DynamoDB and was never a stable cross-backend
+pointer.
 
 ```bash
 # Free-form note:

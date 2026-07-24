@@ -115,7 +115,8 @@ export interface ProjectNoteListParams {
 export interface ProjectEvent {
   event_type: string;
   agent: string | null;
-  task_id: number | null;
+  // Stable, cross-backend pointer to the related task (its public_id), or null.
+  task_pubid: string | null;
   message: string | null;
   payload: Record<string, unknown>;
   created_at: string;

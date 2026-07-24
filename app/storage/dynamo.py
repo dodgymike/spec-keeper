@@ -1141,7 +1141,7 @@ class DynamoBackend:
 
     def _event_dto(self, it) -> EventDTO:
         return EventDTO(event_type=it["event_type"], agent=it.get("agent"),
-                        task_id=None, message=it.get("message"),
+                        task_pubid=it.get("task_pubid"), message=it.get("message"),
                         payload=_pyify(it.get("payload", {})),
                         created_at=_dt(it["created_at"]))
 

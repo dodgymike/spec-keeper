@@ -411,7 +411,10 @@ class EventIn(Schema):
 class EventOut(Schema):
     event_type = fields.Str()
     agent = fields.Str(allow_none=True)
-    task_id = fields.Int(allow_none=True)
+    # Stable, cross-backend pointer to the related task (its ``public_id``), or
+    # null for events with no task. Identical on both storage backends.
+    task_pubid = fields.Str(allow_none=True,
+                            metadata={"description": "public_id of the related task, or null."})
     message = fields.Str(allow_none=True)
     payload = fields.Dict()
     created_at = fields.DateTime(dump_only=True)

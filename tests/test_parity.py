@@ -276,3 +276,40 @@ def test_import_persists_task_tags_parity(app, project):
         assert counts3["tasks_updated"] == 1
         assert counts3["tasks_unchanged"] == 2
         assert set(st.get_task("demo", "TAG-1").tags) == {"urgent", "p0-blocker"}
+
+
+def test_event_task_pointer_parity(app, project):
+    """UI-DELTA-1: an event's task pointer (``EventOut.task_pubid``) is the task's
+    stable ``public_id`` and is populated IDENTICALLY on BOTH backends.
+
+    Before the fix, Postgres dumped the internal integer ``task_id`` while
+    DynamoDB hardcoded ``None`` — a hard-parity-rule violation, and the integer
+    was never a stable cross-backend pointer. Now, on either backend: an event
+    that references a task carries that task's ``public_id``; an event with no
+    task carries ``null``."""
+    c = app.test_client()
+
+    # A task to point at — capture its stable public_id.
+    created = c.post(BASE, json={"title": "pointer target", "key": "EV-1"})
+    assert created.status_code == 201, created.get_json()
+    public_id = created.get_json()["public_id"]
+    assert public_id  # non-empty uuid string
+
+    # An event that references the task -> pointer == that task's public_id.
+    ev = c.post(f"{PROJ}/events",
+                json={"event_type": "note", "agent": "impl",
+                      "message": "touching EV-1", "task_key": "EV-1"})
+    assert ev.status_code == 201, ev.get_json()
+    body = ev.get_json()
+    assert "task_id" not in body  # divergent integer id is gone from the response
+    assert body["task_pubid"] == public_id  # identical, non-null, == public_id
+
+    # An event with NO task -> pointer is null (identical on both backends).
+    ev_none = c.post(f"{PROJ}/events",
+                     json={"event_type": "note", "message": "project-wide"})
+    assert ev_none.status_code == 201, ev_none.get_json()
+    assert ev_none.get_json()["task_pubid"] is None
+
+    # The list/read path agrees with the write path on both backends.
+    listed = c.get(f"{PROJ}/events?task=EV-1").get_json()
+    assert [e["task_pubid"] for e in listed] == [public_id]

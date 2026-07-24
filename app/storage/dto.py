@@ -131,15 +131,15 @@ class CounterDTO:
 class EventDTO:
     event_type: str
     agent: str | None
-    # ``task_id`` is the Postgres-internal integer surrogate key of the related
-    # task (what ``EventOut.task_id`` dumps as an int). DynamoDB has no integer
-    # surrogate — tasks are addressed by ``public_id``/``key`` — so a Dynamo event
-    # leaves this ``None`` to keep the ``EventOut`` shape identical across backends
-    # (a uuid string cannot go through the ``fields.Int`` serializer). The task
-    # reference on DynamoDB events is carried on the item (``task_pubid``/
-    # ``task_key``) and echoed in the event ``message``/``payload`` so the activity
-    # timeline can still link an event to its task.
-    task_id: int | None
+    # ``task_pubid`` is the related task's stable, cross-backend ``public_id``
+    # (a uuid string), or ``None`` for events that reference no task. This is the
+    # single task pointer exposed by ``EventOut`` and it is populated IDENTICALLY
+    # on both backends (Postgres derives it from ``Event.task.public_id``; DynamoDB
+    # surfaces the ``task_pubid`` stored on the event item). The old integer
+    # ``task_id`` (a Postgres-only surrogate that was always ``None`` on DynamoDB)
+    # is deliberately not carried into the response — it was never a stable
+    # cross-backend pointer.
+    task_pubid: str | None
     message: str | None
     payload: dict
     created_at: datetime

@@ -141,7 +141,8 @@ def _counter_dto(c: Counter) -> CounterDTO:
 
 
 def _event_dto(e: Event) -> EventDTO:
-    return EventDTO(event_type=e.event_type, agent=e.agent, task_id=e.task_id,
+    return EventDTO(event_type=e.event_type, agent=e.agent,
+                    task_pubid=e.task.public_id if e.task else None,
                     message=e.message, payload=e.payload, created_at=e.created_at)
 
 

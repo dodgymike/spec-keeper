@@ -489,6 +489,11 @@ class Event(Base):
     payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
 
+    # Uni-directional link used only to derive the task's stable ``public_id``
+    # for the event DTO (the cross-backend task pointer). ``task_id`` may be
+    # NULL (ON DELETE SET NULL) or reference no task at all.
+    task: Mapped["Task | None"] = relationship(foreign_keys=[task_id])
+
 
 class Decision(Base):
     """ADR-style decision record (replaces DECISIONS.md)."""
