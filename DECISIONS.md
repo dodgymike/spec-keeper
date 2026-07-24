@@ -615,3 +615,23 @@ conditional put. This is safe because the forward item already exists durably; e
 independent and idempotent (`attribute_not_exists(PK) AND attribute_not_exists(SK)`), so a crash
 mid-run leaves a consistent partial state that a plain re-run completes without duplicates. No
 multi-item transaction is needed or used.
+
+**DECISION — `section` is a closed enum of the four board columns, enforced on tasks + the import
+boundary (SEC-FIX-7).** The allowed set is exactly `backlog` / `to_do` / `in_progress` / `completed`
+— the four the SPEC.md parser (`specmd._section_of`) resolves to, the four `EpicIn`/`EpicPatch`
+already gated, and the value the storage layer defaults to `backlog`. It was previously validated
+*nowhere* for tasks, so `TaskIn`/`TaskPatch`/`ExportTaskOut` accepted arbitrary strings. Gating the
+full-fidelity import (`ExportTaskOut`) means a re-import of a document that carries an out-of-set
+`section` now fails with 422 rather than silently persisting a junk column; this is the intended
+hardening (all first-class write paths already produce only the four values). Free-text caps
+(`title`≤512, prose bodies ≤16384) are deliberately generous — bounded well under the 8 MiB
+`MAX_CONTENT_LENGTH` to stop payload/storage bloat and log amplification without breaking real usage.
+
+**DECISION — the SEC-FIX-7/8 verification ran each storage backend in its own pytest process (or with
+`-p no:randomly`).** Running `TEST_BACKENDS=postgres,dynamodb` in a *single* process with the default
+`pytest-randomly` shuffle intermittently poisons the shared Flask-SQLAlchemy `db.session` across the
+two backend apps (a `[postgres]` test leaves an aborted transaction that cascades into later
+`[postgres]` teardown truncates). This is a pre-existing test-harness artifact — it reproduces on the
+untouched baseline and only ever hits tests unrelated to this change (relations/notes) — not a
+regression from the schema hardening, which passes cleanly on both backends when order is
+deterministic (80 passed) and in each single-backend run (41 each).

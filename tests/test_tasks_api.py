@@ -134,3 +134,55 @@ def test_delete_task_with_incoming_relation(client, project):
     assert rel.status_code == 201
     resp = client.delete(f"{BASE}/DST-2")
     assert resp.status_code == 204
+
+
+# --------------------------------------------------------------------------- #
+# SEC-FIX-7 / SEC-FIX-8: schema-hardening — section enum + free-text length caps
+# --------------------------------------------------------------------------- #
+MAX_TITLE_LEN = 512
+MAX_TEXT_LEN = 16384
+
+
+def test_create_rejects_bad_section(client, project):
+    """SEC-FIX-7: ``section`` on TaskIn is now gated by OneOf (was validated nowhere)."""
+    r = _make_task(client, key="SEC-1", section="nonsense")
+    assert r.status_code == 422, r.get_data(as_text=True)[:400]
+
+
+def test_create_accepts_valid_section(client, project):
+    r = _make_task(client, key="SEC-OK-1", section="in_progress")
+    assert r.status_code == 201, r.get_data(as_text=True)[:400]
+    assert r.get_json()["section"] == "in_progress"
+
+
+def test_patch_rejects_bad_section(client, project):
+    """SEC-FIX-7: ``section`` on TaskPatch is gated too."""
+    _make_task(client, key="SEC-2")
+    etag = client.get(f"{BASE}/SEC-2").headers["ETag"]
+    r = client.patch(f"{BASE}/SEC-2", json={"section": "nope"},
+                     headers={"If-Match": etag})
+    assert r.status_code == 422, r.get_data(as_text=True)[:400]
+
+
+def test_create_rejects_oversize_title(client, project):
+    """SEC-FIX-8: an over-cap title is a 422; an at-cap title is accepted."""
+    over = _make_task(client, key="LEN-1", title="x" * (MAX_TITLE_LEN + 1))
+    assert over.status_code == 422, over.get_data(as_text=True)[:400]
+    at_cap = _make_task(client, key="LEN-2", title="y" * MAX_TITLE_LEN)
+    assert at_cap.status_code == 201, at_cap.get_data(as_text=True)[:400]
+
+
+def test_create_rejects_oversize_description(client, project):
+    over = _make_task(client, key="LEN-3", description="d" * (MAX_TEXT_LEN + 1))
+    assert over.status_code == 422, over.get_data(as_text=True)[:400]
+    at_cap = _make_task(client, key="LEN-4", description="d" * MAX_TEXT_LEN)
+    assert at_cap.status_code == 201, at_cap.get_data(as_text=True)[:400]
+
+
+def test_note_rejects_oversize_body(client, project):
+    """SEC-FIX-8: a note body over the cap is rejected 422; at-cap is accepted."""
+    _make_task(client, key="LEN-5")
+    over = client.post(f"{BASE}/LEN-5/notes", json={"body": "n" * (MAX_TEXT_LEN + 1)})
+    assert over.status_code == 422, over.get_data(as_text=True)[:400]
+    at_cap = client.post(f"{BASE}/LEN-5/notes", json={"body": "n" * MAX_TEXT_LEN})
+    assert at_cap.status_code == 201, at_cap.get_data(as_text=True)[:400]

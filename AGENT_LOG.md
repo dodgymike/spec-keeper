@@ -1158,3 +1158,36 @@ to the server's `/events` endpoint.
   conditional-put idempotency proven by the re-run test; full `LastEvaluatedKey` pagination; dry-run
   read-only; a non-conditional `ClientError` fails loudly (a one-shot re-run resumes idempotently).
 - **Safe to run against prod:** dry-run default + read-only; `--apply` is idempotent conditional writes.
+
+## 2026-07-24 — SEC-FIX-7 + SEC-FIX-8 — schema-validation hardening (both in `app/schemas.py`)
+
+- **Task (restated):** harden the Marshmallow write schemas — (SEC-FIX-7) make the full-fidelity
+  JSON import boundary (`ExportTaskOut`) gate `status`/`priority`/`section` like `TaskIn`, and add a
+  `section` `OneOf` (which was validated nowhere) to `TaskIn`/`TaskPatch`; (SEC-FIX-8) add
+  `validate.Length(max=…)` caps to the large free-text fields.
+- **Change:** added `SECTION_VALUES = ["backlog","to_do","in_progress","completed"]` (the same four
+  the SPEC.md parser resolves and the storage layer persists) and `MAX_TITLE_LEN=512` /
+  `MAX_TEXT_LEN=16384` constants. Applied `OneOf(SECTION_VALUES)` to `TaskIn.section`,
+  `TaskPatch.section`, `ExportTaskOut.section` (and re-pointed the existing `EpicIn`/`EpicPatch`
+  literals at the constant); `OneOf(STATUS_VALUES)`/`OneOf(PRIORITY_VALUES)` to
+  `ExportTaskOut.status`/`priority`. Length caps: `title`≤512 and `description`/`status_note`≤16384 on
+  `TaskIn`/`TaskPatch`/`ExportTaskOut`; `NoteIn.body`≤16384; `StatusIn.note`≤16384 (writes
+  `status_note`); `DecisionIn.title`≤512 + `decision`/`context`/`consequences`≤16384. No storage or
+  route code changed — validation is backend-agnostic and identical on both adapters.
+- **Import semantics preserved:** an invalid enum / over-cap field in a JSON import fails the whole
+  `ExportDocOut().load()` → the existing `_import_json` handler returns a clean **422** (nothing
+  persisted). The per-row **207** path (structural faults caught in `import_doc`/`validate_doc_task`,
+  e.g. empty title) is untouched — verified both still hold.
+- **Test:** ran the affected suites against the Postgres test DB AND DynamoDB Local (deterministic
+  order to avoid the pre-existing pytest-randomly dual-backend shared-session flake, see DECISIONS):
+  `pytest tests/test_ports.py tests/test_tasks_api.py tests/test_notes.py -p no:randomly` →
+  **80 passed** (40 tests × 2 backends). `tests/test_changelog.py tests/test_log.py -p no:randomly`
+  → **44 passed**. New tests: JSON import rejects bad status/priority/section (422, not persisted) +
+  valid enums still import; `section` `OneOf` on create/patch; over-cap `title`/`description`/note
+  `body` → 422 with at-cap accepted.
+- **Chain:** implementer → test-engineer → reviewer → security, all embodied inline by feature-runner
+  (no subagent-spawn tool in this environment; justification recorded here per the skip rule).
+  Reviewer: exactly the two schema tasks, no scope creep, no runtime/storage code touched, both
+  backends green. Security: additive input hardening only — no secrets, no SQL, no injection surface;
+  `OneOf`/`Length` bounds are well under `MAX_CONTENT_LENGTH` (8 MiB); closes the crafted-import
+  enum-injection + oversized-payload vectors the tasks named.
