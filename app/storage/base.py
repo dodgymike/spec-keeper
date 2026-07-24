@@ -27,6 +27,7 @@ from .dto import (
     EpicDTO,
     EventDTO,
     IdempotentOutcome,
+    JiraConfigDTO,
     MemberDTO,
     NoteDTO,
     ProjectDTO,
@@ -141,6 +142,17 @@ class StorageBackend(Protocol):
     def update_chain_run(self, slug: str, run_pubid: str, status: str | None) -> ChainRunDTO: ...
     def upsert_chain_step(self, slug: str, run_pubid: str, step_name: str,
                           data: dict) -> ChainStepDTO: ...
+
+    # --- jira integration config (SLS-J3) ------------------------------
+    # A per-project singleton. The stored token is ALWAYS ciphertext
+    # (``api_token_encrypted``); the plaintext never crosses this port — the
+    # blueprint encrypts before calling and decrypts (only for outbound Jira
+    # calls) after reading. Create-once (Conflict) / update-existing (NotFound)
+    # semantics are identical on both backends.
+    def get_jira_config(self, slug: str) -> JiraConfigDTO | None: ...          # NotFound (project); None if unset
+    def create_jira_config(self, slug: str, data: dict) -> JiraConfigDTO: ...  # NotFound (project); Conflict if one exists
+    def update_jira_config(self, slug: str, data: dict) -> JiraConfigDTO: ...  # NotFound (project or config)
+    def set_jira_transitions(self, slug: str, transitions: dict) -> None: ...  # NotFound (project or config)
 
     # --- ports (SPEC.md round-trip) ------------------------------------
     def import_spec(self, slug: str, parsed) -> dict: ...

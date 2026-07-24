@@ -980,3 +980,33 @@ to the server's `/events` endpoint.
 - **Backlog:** task created on the deployed cloud Spec Server via `scripts/agent_token.py`
   (`spec-keeper` Cognito user) — `POST /api/v1/projects/spec-server/tasks` returned 201, id
   `e0e622db-a9d0-4a9d-abb7-9e281606efb9`. `complete` recorded at end of task with commit sha + summary.
+
+## 2026-07-24 — SLS-J3: JiraProjectConfig through the storage port on BOTH adapters (feature-runner)
+- **Task:** move the per-project Jira config (encrypted api token + cached_transitions) off direct
+  `db.session`/ORM in the `jira_config` blueprint and behind `current_app.storage`, with Postgres +
+  DynamoDB parity. Public id `af5f0f56-41ad-4754-9a1e-152f7e2bd780`, epic SLS, P2. Claimed via PATCH
+  (status=in_progress, owner=spec-keeper, If-Match v1 → v2) on the cloud Spec Server.
+- **Files:** `app/storage/dto.py` (+`JiraConfigDTO`, ciphertext-only), `app/storage/base.py` (+4 port
+  methods), `app/storage/keys.py` (+`jira_config_sk()` → `JIRACFG`), `app/storage/postgres.py` +
+  `app/storage/dynamo.py` (implement `get_/create_/update_jira_config` + `set_jira_transitions`
+  identically), `app/blueprints/jira_config.py` (rewritten onto the storage port; `encrypt()` stays
+  in the blueprint), `AGENTS_API.md`, `tests/conftest.py` (defer the 4 eager-warmup wiring tests to
+  SLS-J4), `tests/test_jiracfg_parity.py` (new cross-backend parity test), `DECISIONS.md`.
+- **Verification (in the running app container, both backends):**
+  `TEST_BACKENDS=postgres,dynamodb DYNAMODB_ENDPOINT_URL=http://dynamodb-local:8000` —
+  `pytest -q tests/test_jiracfg_parity.py` → **12 passed** (6 tests × 2 backends);
+  `pytest -q tests/test_jira_config_endpoint.py tests/test_jira_transition_cache.py
+  tests/test_jira_config_model.py tests/test_jiracfg_parity.py` → **38 passed, 31 skipped**; full
+  suite (excluding 2 pre-existing container-only collection errors: missing
+  `scripts/backfill_memberships.py`, missing `ratelimit` preload) → **513 passed, 90 skipped**.
+- **Chain:** implementer → test-engineer → reviewer → security → data-reviewer → reliability-reviewer
+  (feature-runner embodied these). Security: plaintext token never enters storage (encrypt() in the
+  blueprint), never persisted in the clear, never logged, never string-formatted into SQL/Dynamo
+  expressions (Dynamo binds via item attributes; only condition is static `attribute_not_exists(PK)`);
+  GET exposes only `has_token` — token/ciphertext never in any response (parity-tested on both
+  backends). Data/reliability: singleton item mirrors `UNIQUE(project_id)` via conditional put;
+  Conflict-on-create / NotFound-on-update identical on both backends; no new GSI/migration/counter;
+  cascade-on-project-delete parity preserved; update is last-writer-wins on both (matches prior
+  behaviour). Eager transition-cache warmup deferred to SLS-J4 (recorded in DECISIONS.md).
+- **Backlog:** claimed at start (PATCH), completed at end via `scripts/agent_token.py` (`spec-keeper`
+  Cognito user) with commit sha + test summary + proof_cmd.

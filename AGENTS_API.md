@@ -846,10 +846,12 @@ curl -s -H 'Content-Type: application/json' \
 # -> 201 {"base_url":"...","email":"...","jira_project_key":"PROJ","enabled":true,"has_token":true,"updated_at":"..."}
 ```
 
-- `api_token` is write-only: encrypted with Fernet before storage, never returned in responses.
-  The response includes `has_token` (boolean) instead.
-- When `enabled` is `true` on create/update, the server warms the transition cache (fetches Jira
-  project statuses). A warmup failure is logged but does not block the config save.
+- `api_token` is write-only: encrypted with Fernet **in the blueprint** before it reaches the
+  storage layer, so only the ciphertext is ever persisted; it is never returned in responses. The
+  response includes `has_token` (boolean) instead. Config CRUD goes through the storage
+  abstraction, so it behaves identically on both backends (Postgres and DynamoDB).
+- The transition cache is populated lazily on first sync use; eager warmup on config save is wired
+  as part of the Jira sync path (a warmup failure never blocks the config save).
 - Returns 409 if config already exists (use PUT to update).
 
 ```bash

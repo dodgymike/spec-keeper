@@ -33,6 +33,7 @@ from ..models import (
     Epic,
     EpicNote,
     Event,
+    JiraProjectConfig,
     LeaseState,
     Priority,
     Project,
@@ -68,6 +69,7 @@ from .dto import (
     EpicDTO,
     EventDTO,
     IdempotentOutcome,
+    JiraConfigDTO,
     MemberDTO,
     NoteDTO,
     ProjectDTO,
@@ -1113,6 +1115,64 @@ class PostgresBackend:
         counts = _import_doc_svc(project.id, doc)
         db.session.commit()
         return counts
+
+    # ----- jira integration config (SLS-J3) ----------------------------
+    @staticmethod
+    def _jira_config_dto(c: JiraProjectConfig) -> JiraConfigDTO:
+        return JiraConfigDTO(
+            base_url=c.base_url, email=c.email,
+            api_token_encrypted=c.api_token_encrypted,
+            jira_project_key=c.jira_project_key, enabled=c.enabled,
+            cached_transitions=c.cached_transitions, updated_at=c.updated_at,
+        )
+
+    def _jira_config_row(self, project_id: int) -> JiraProjectConfig | None:
+        return db.session.execute(
+            sa.select(JiraProjectConfig).where(
+                JiraProjectConfig.project_id == project_id
+            )
+        ).scalar_one_or_none()
+
+    def get_jira_config(self, slug: str) -> JiraConfigDTO | None:
+        project = self._project(slug)
+        config = self._jira_config_row(project.id)
+        return None if config is None else self._jira_config_dto(config)
+
+    def create_jira_config(self, slug: str, data: dict) -> JiraConfigDTO:
+        project = self._project(slug)
+        if self._jira_config_row(project.id) is not None:
+            raise Conflict("Jira config already exists for this project.")
+        config = JiraProjectConfig(
+            project_id=project.id,
+            base_url=data["base_url"],
+            email=data["email"],
+            api_token_encrypted=data.get("api_token_encrypted"),
+            jira_project_key=data["jira_project_key"],
+            enabled=data.get("enabled", False),
+        )
+        db.session.add(config)
+        db.session.commit()
+        return self._jira_config_dto(config)
+
+    def update_jira_config(self, slug: str, data: dict) -> JiraConfigDTO:
+        project = self._project(slug)
+        config = self._jira_config_row(project.id)
+        if config is None:
+            raise NotFound("Jira config not found for this project.")
+        for fld in ("base_url", "email", "api_token_encrypted",
+                    "jira_project_key", "enabled"):
+            if fld in data:
+                setattr(config, fld, data[fld])
+        db.session.commit()
+        return self._jira_config_dto(config)
+
+    def set_jira_transitions(self, slug: str, transitions: dict) -> None:
+        project = self._project(slug)
+        config = self._jira_config_row(project.id)
+        if config is None:
+            raise NotFound("Jira config not found for this project.")
+        config.cached_transitions = transitions
+        db.session.commit()
 
 
 class _RenderTask:

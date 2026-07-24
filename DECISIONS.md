@@ -499,3 +499,41 @@ DynamoDB adapter already 404s cleanly. `_task` now guards the `public_id` lookup
 `uuid.UUID(ident)` parse, so an unknown ident 404s on both backends
 (`test_get_relations_404_unknown_task` green on postgres + dynamodb). This restores backend parity
 for every task-by-ident endpoint, not just relations-GET.
+
+## 2026-07-24 — SLS-J3: JiraProjectConfig behind the storage port (both backends)
+
+**Given.** `JiraProjectConfig` (per-project singleton: base_url, email, encrypted api token,
+jira_project_key, enabled, cached_transitions) was read/written directly via `db.session`/ORM in the
+`jira_config` blueprint, so Jira config only worked on Postgres. Moved behind `current_app.storage`
+with full parity: new `JiraConfigDTO` (carries `api_token_encrypted` ciphertext + `cached_transitions`,
+NEVER plaintext), four port methods `get_jira_config` / `create_jira_config` (Conflict if one exists) /
+`update_jira_config` (NotFound if none) / `set_jira_transitions`, on both adapters. DynamoDB stores a
+singleton item under `P#<slug>` at SK `JIRACFG` (`keys.jira_config_sk()`); create-once uses a
+conditional `attribute_not_exists(PK)` put → Conflict, mirroring the Postgres `UNIQUE(project_id)`
+backstop. No new GSI, migration, or counter was needed (singleton read by exact key; the existing
+`jira_project_config` table already exists from JIRA-2), so nothing was reserved.
+
+**Crypto boundary stays in the blueprint (security).** `encrypt()` runs in the blueprint; the storage
+port only ever receives/returns the ciphertext (`api_token_encrypted`). The plaintext token never
+enters the storage layer, is never persisted in the clear, is never logged, and is never formatted
+into a SQL or DynamoDB expression (Dynamo binds values via item attributes; the only condition
+expression is the static `attribute_not_exists(PK)`). GET responses expose only `has_token`
+(`_config_to_out`), never the token or its ciphertext — asserted on BOTH backends by the new
+`tests/test_jiracfg_parity.py` (SECRET_TOKEN and the Fernet `gAAAAA` prefix never appear in any body).
+
+**Eager transition-cache warmup deferred to SLS-J4.** The old JIRA-6 eager warmup on POST/PUT called
+`warm_transition_cache(config)`, which mutates the ORM row and calls `db.session.commit()` — ORM-coupled
+and impossible to run with parity on DynamoDB without refactoring `jira_transitions.py` (explicitly
+out of scope: SLS-J4 owns the Jira sync wiring). So the eager warmup is removed from the config
+endpoint and deferred to SLS-J4, which will use the new `set_jira_transitions` port method; the cache
+is meanwhile populated lazily on first sync use (`find_transition`'s refresh-once). The four
+`test_jira_transition_cache.py::TestEndpointTriggersWarmup` tests that asserted that eager wiring are
+skipped via the conftest collection hook (co-located with the existing auto-sync deferrals), with a
+reason pointing at SLS-J4. `jira_transitions.py` / `jira_sync.py` are untouched.
+
+**Update is last-writer-wins (no regression).** Neither the old ORM path nor the new port carries an
+optimistic-lock version on the config singleton; `update_jira_config` / `set_jira_transitions` are
+read-then-write on both backends (identical, rare admin op). This matches prior behaviour — no new
+race is introduced. `updated_at` is bumped on every write on both backends (Postgres `onupdate`,
+Dynamo explicit). Project deletion removes the config on both backends (Postgres FK `ON DELETE
+CASCADE`; Dynamo `delete_project` wipes the whole `P#<slug>` partition, including the `JIRACFG` item).

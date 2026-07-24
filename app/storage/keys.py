@@ -116,6 +116,16 @@ def relation_in_prefix(pubid: str) -> str:
     return f"TASK#{pubid}#RELIN#"
 
 
+def jira_config_sk() -> str:
+    """Singleton SK for a project's Jira integration config (SLS-J3).
+
+    Exactly one config item per project lives under ``P#<slug>`` at this fixed
+    SK, mirroring the Postgres ``UNIQUE(project_id)`` on ``jira_project_config``.
+    A conditional put on ``attribute_not_exists(PK)`` enforces create-once
+    (Conflict), matching the Postgres uniqueness backstop."""
+    return "JIRACFG"
+
+
 def counter_sk(namespace: str) -> str:
     return f"COUNTER#{namespace}"
 

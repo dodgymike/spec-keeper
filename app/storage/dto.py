@@ -196,6 +196,26 @@ class ChainRunDTO:
 
 
 @dataclass(frozen=True)
+class JiraConfigDTO:
+    """Per-project Jira integration config (SLS-J3).
+
+    Carries ONLY the ENCRYPTED token ciphertext (``api_token_encrypted``) — it
+    must NEVER hold the plaintext token. The crypto boundary (``encrypt``/
+    ``decrypt``) stays in the ``jira_config`` blueprint, so storage only ever
+    persists/returns ciphertext and the plaintext never enters the storage layer.
+    ``has_token`` is derived downstream from ``api_token_encrypted is not None``;
+    the raw ciphertext is never dumped to API responses (see ``_config_to_out``).
+    """
+    base_url: str
+    email: str
+    api_token_encrypted: str | None
+    jira_project_key: str
+    enabled: bool
+    cached_transitions: dict | None
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class IdempotentOutcome:
     """Result of an idempotency-guarded operation (claim-next / reserve).
 

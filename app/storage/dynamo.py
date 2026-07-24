@@ -58,6 +58,7 @@ from .dto import (
     EpicDTO,
     EventDTO,
     IdempotentOutcome,
+    JiraConfigDTO,
     MemberDTO,
     NoteDTO,
     ProjectDTO,
@@ -2028,6 +2029,71 @@ class DynamoBackend:
             and _pyify(existing.get("position", 1000.0)) == position
             and set(existing.get("tags") or []) == set(desired_tags)
         )
+
+    # ----- jira integration config (SLS-J3) ---------------------------- #
+    def _jira_config_dto(self, it) -> JiraConfigDTO:
+        ct = it.get("cached_transitions")
+        return JiraConfigDTO(
+            base_url=it["base_url"], email=it["email"],
+            api_token_encrypted=it.get("api_token_encrypted"),
+            jira_project_key=it["jira_project_key"],
+            enabled=bool(it.get("enabled", False)),
+            cached_transitions=_pyify(ct) if ct is not None else None,
+            updated_at=_dt(it.get("updated_at")),
+        )
+
+    def get_jira_config(self, slug: str) -> JiraConfigDTO | None:
+        self._project_item(slug)  # NotFound (project)
+        it = self._get(K.pk(slug), K.jira_config_sk())
+        return None if it is None else self._jira_config_dto(it)
+
+    def create_jira_config(self, slug: str, data: dict) -> JiraConfigDTO:
+        self._project_item(slug)
+        item = {
+            "PK": K.pk(slug), "SK": K.jira_config_sk(), "type": "jira_config",
+            "base_url": data["base_url"], "email": data["email"],
+            # Only the ciphertext is ever stored; plaintext never reaches here.
+            "api_token_encrypted": data.get("api_token_encrypted"),
+            "jira_project_key": data["jira_project_key"],
+            "enabled": data.get("enabled", False),
+            "cached_transitions": None,
+            "updated_at": _now_iso(),
+        }
+        # Singleton create-once: attribute_not_exists(PK) on this (PK, JIRACFG)
+        # key fails when a config already exists -> Conflict, matching Postgres'
+        # UNIQUE(project_id) backstop. Values bind via the item, never a
+        # string-formatted expression.
+        try:
+            self._put(item, condition=Attr("PK").not_exists())
+        except ClientError as exc:
+            if _is_conditional(exc):
+                raise Conflict(
+                    "Jira config already exists for this project."
+                ) from exc
+            raise BackendUnavailable(str(exc)) from exc  # pragma: no cover
+        return self._jira_config_dto(item)
+
+    def update_jira_config(self, slug: str, data: dict) -> JiraConfigDTO:
+        self._project_item(slug)
+        it = self._get(K.pk(slug), K.jira_config_sk())
+        if it is None:
+            raise NotFound("Jira config not found for this project.")
+        for fld in ("base_url", "email", "api_token_encrypted",
+                    "jira_project_key", "enabled"):
+            if fld in data:
+                it[fld] = data[fld]
+        it["updated_at"] = _now_iso()
+        self._put(it)
+        return self._jira_config_dto(it)
+
+    def set_jira_transitions(self, slug: str, transitions: dict) -> None:
+        self._project_item(slug)
+        it = self._get(K.pk(slug), K.jira_config_sk())
+        if it is None:
+            raise NotFound("Jira config not found for this project.")
+        it["cached_transitions"] = transitions
+        it["updated_at"] = _now_iso()
+        self._put(it)
 
 
 # --------------------------------------------------------------------------- #

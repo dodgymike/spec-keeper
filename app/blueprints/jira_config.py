@@ -1,25 +1,27 @@
-"""Per-project Jira integration config CRUD (JIRA-5).
+"""Per-project Jira integration config CRUD (JIRA-5), via the storage port.
 
-Transition cache warmup (JIRA-6): when config is created with enabled=True or
-updated to enabled=True, the Jira project statuses are fetched and cached.
-Failures are logged but do not block the config save (best-effort warmup).
+SLS-J3: all reads/writes go through ``current_app.storage`` so Jira config works
+on BOTH backends (Postgres + DynamoDB) with identical observable behaviour.
+
+Crypto boundary (single place): the blueprint ``encrypt()``s the plaintext token
+before handing the storage layer the ciphertext (``api_token_encrypted``). The
+plaintext token NEVER enters the storage layer, is never persisted in the clear,
+and is never logged. Storage only ever sees / returns ciphertext, and responses
+expose only ``has_token`` — never the token or its ciphertext (``_config_to_out``).
+
+Transition-cache warmup on create/enable (the old JIRA-6 eager warmup) is deferred
+to SLS-J4 (the Jira sync wiring), where the ``set_jira_transitions`` storage method
+added here is used; the cache is otherwise populated lazily on first sync use.
 """
 from __future__ import annotations
 
-import logging
-
-import sqlalchemy as sa
+from flask import current_app
 from flask.views import MethodView
 from flask_smorest import Blueprint, abort
 
-from ..crypto import DecryptionError, encrypt
-from ..extensions import db
-from ..helpers import get_project_or_404, require_api_key
-from ..jira_transitions import TransitionCacheError, warm_transition_cache
-from ..models import JiraProjectConfig
+from ..crypto import encrypt
+from ..helpers import require_api_key
 from ..schemas import JiraConfigIn, JiraConfigOut, JiraConfigUpdate
-
-logger = logging.getLogger(__name__)
 
 blp = Blueprint(
     "jira_config", __name__, url_prefix="/api/v1/projects",
@@ -27,19 +29,11 @@ blp = Blueprint(
 )
 
 
-def _get_config_or_404(project_id: int) -> JiraProjectConfig:
-    config = db.session.execute(
-        sa.select(JiraProjectConfig).where(
-            JiraProjectConfig.project_id == project_id
-        )
-    ).scalar_one_or_none()
-    if config is None:
-        abort(404, message="Jira config not found for this project.")
-    return config
+def _config_to_out(config) -> dict:
+    """Build the output dict — never includes the token or its ciphertext.
 
-
-def _config_to_out(config: JiraProjectConfig) -> dict:
-    """Build the output dict — never includes the encrypted token."""
+    ``config`` is a backend-neutral ``JiraConfigDTO``; ``has_token`` is derived
+    from the presence of the ciphertext, which itself is never surfaced."""
     return {
         "base_url": config.base_url,
         "email": config.email,
@@ -50,33 +44,15 @@ def _config_to_out(config: JiraProjectConfig) -> dict:
     }
 
 
-def _try_warm_cache(config: JiraProjectConfig) -> None:
-    """Best-effort transition cache warmup — logs failures, never raises.
-
-    Called after POST/PUT when the config is enabled. A failure here does not
-    block the config save; the cache will be populated lazily on first sync use
-    via find_transition()'s refresh-once logic.
-    """
-    try:
-        warm_transition_cache(config)
-    except (TransitionCacheError, DecryptionError):
-        # Already logged inside warm_transition_cache (or the token is corrupt);
-        # either way, do not block the config save.
-        logger.debug(
-            "Transition cache warmup failed for project_key=%s; "
-            "will retry lazily on first sync use.",
-            config.jira_project_key,
-        )
-
-
 @blp.route("/<slug>/jira-config")
 class JiraConfigResource(MethodView):
     @blp.response(200, JiraConfigOut)
     def get(self, slug):
         """Get the Jira integration config for a project."""
         require_api_key()
-        project = get_project_or_404(slug)
-        config = _get_config_or_404(project.id)
+        config = current_app.storage.get_jira_config(slug)  # 404 if project absent
+        if config is None:
+            abort(404, message="Jira config not found for this project.")
         return _config_to_out(config)
 
     @blp.arguments(JiraConfigIn)
@@ -84,33 +60,16 @@ class JiraConfigResource(MethodView):
     def post(self, data, slug):
         """Create Jira integration config for a project."""
         require_api_key()
-        project = get_project_or_404(slug)
-
-        # Check for existing config
-        existing = db.session.execute(
-            sa.select(JiraProjectConfig).where(
-                JiraProjectConfig.project_id == project.id
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            abort(409, message="Jira config already exists for this project. Use PUT to update.")
-
-        encrypted_token = encrypt(data["api_token"])
-        config = JiraProjectConfig(
-            project_id=project.id,
-            base_url=data["base_url"],
-            email=data["email"],
-            api_token_encrypted=encrypted_token,
-            jira_project_key=data["jira_project_key"],
-            enabled=data.get("enabled", False),
-        )
-        db.session.add(config)
-        db.session.commit()
-
-        # JIRA-6: warm transition cache on create if enabled
-        if config.enabled:
-            _try_warm_cache(config)
-
+        # Encrypt HERE so storage only ever receives ciphertext.
+        stored = {
+            "base_url": data["base_url"],
+            "email": data["email"],
+            "api_token_encrypted": encrypt(data["api_token"]),
+            "jira_project_key": data["jira_project_key"],
+            "enabled": data.get("enabled", False),
+        }
+        # 404 if project absent, 409 if a config already exists.
+        config = current_app.storage.create_jira_config(slug, stored)
         return _config_to_out(config)
 
     @blp.arguments(JiraConfigUpdate)
@@ -118,24 +77,13 @@ class JiraConfigResource(MethodView):
     def put(self, data, slug):
         """Update Jira integration config for a project."""
         require_api_key()
-        project = get_project_or_404(slug)
-        config = _get_config_or_404(project.id)
-
-        if "base_url" in data:
-            config.base_url = data["base_url"]
-        if "email" in data:
-            config.email = data["email"]
+        stored: dict = {}
+        for fld in ("base_url", "email", "jira_project_key", "enabled"):
+            if fld in data:
+                stored[fld] = data[fld]
         if "api_token" in data:
-            config.api_token_encrypted = encrypt(data["api_token"])
-        if "jira_project_key" in data:
-            config.jira_project_key = data["jira_project_key"]
-        if "enabled" in data:
-            config.enabled = data["enabled"]
-
-        db.session.commit()
-
-        # JIRA-6: warm transition cache when enabled via PUT
-        if config.enabled:
-            _try_warm_cache(config)
-
+            # Re-encrypt HERE; the storage layer never sees the plaintext.
+            stored["api_token_encrypted"] = encrypt(data["api_token"])
+        # 404 if project or config absent.
+        config = current_app.storage.update_jira_config(slug, stored)
         return _config_to_out(config)
