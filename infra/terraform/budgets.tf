@@ -65,6 +65,14 @@ resource "aws_budgets_budget" "monthly" {
   limit_unit   = "USD"
   time_unit    = "MONTHLY"
 
+  # Scope the budget to spec-server spend ONLY, not the whole shared account.
+  # `project` is an Active cost-allocation tag account-wide, so no extra Billing
+  # activation is needed. Format is "user:<tagkey>$<tagvalue>".
+  cost_filter {
+    name   = "TagKeyValue"
+    values = ["user:project$spec-server"]
+  }
+
   # Alert at 80% of the FORECAST for the month.
   notification {
     comparison_operator        = "GREATER_THAN"
