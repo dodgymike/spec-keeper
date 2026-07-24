@@ -956,3 +956,27 @@ to the server's `/events` endpoint.
   edge + its mirror are written in ONE `TransactWriteItems` (all-or-nothing — never a half-written
   edge), so the two adapters stay consistent; no lease/version/atomicity path changed.
 - **NOT deployed** — source-only change. No new GSI, no `infra/terraform` change (D1 is mirror-item).
+
+## 2026-07-24 — UI: Remember my email on login (opt-in) — task `e0e622db-a9d0-4a9d-abb7-9e281606efb9` (epic UI, P2)
+- **What:** Added an opt-in "Remember my email on this device" checkbox (default OFF) to
+  `ui/src/pages/LoginPage.tsx`. When ticked and the user proceeds, the entered email is persisted to
+  `localStorage` (`spec.login.email`) via a new guarded helper `ui/src/lib/rememberedEmail.ts`
+  (`getRememberedEmail`/`setRememberedEmail`/`clearRememberedEmail`, mirroring `deltaCache.ts`'s
+  try/catch checkpoint helpers — private-mode-safe, never throws). On a return visit the passkey step
+  collapses to a read-only "Signing in as &lt;email&gt;" line + the passkey button alone (NO
+  auto-submit — the user still clicks), with the email input, checkbox, and OTP link hidden. A "Change
+  email" button calls `clearRememberedEmail()` and returns to the full entry state (input + checkbox +
+  fallback link). No change to the auth ceremony (`session.ts`/`cognito.ts`).
+- **Files:** `ui/src/lib/rememberedEmail.ts` (new), `ui/src/lib/rememberedEmail.test.ts` (new, 7 tests),
+  `ui/src/pages/LoginPage.tsx`, `ui/src/pages/LoginPage.css`, `ui/README.md`.
+- **Verification (node:20 container, `npm ci`):** `npx vitest run` → **4 files, 48 tests passed** (incl.
+  the 7 new `rememberedEmail.test.ts`); `npx tsc --noEmit` → **clean**; `npx vite build` → **built OK**.
+- **Chain:** implementer → test-engineer → reviewer → security → ui-reviewer (feature-runner embodied
+  these). Security: stores the operator's OWN email ONLY — no token/password/PII beyond the opt-in
+  email; default OFF; "Change email" fully `removeItem`s it so a shared device can't leak cross-user;
+  React escapes the rendered email (no XSS); no secrets, no SQL, no new route. UI: labelled checkbox
+  (`htmlFor`), buttons with text names, keyboard-navigable, `aria-live` on the state-change region,
+  CSP-clean (all styling via `LoginPage.css` classes — no inline styles).
+- **Backlog:** task created on the deployed cloud Spec Server via `scripts/agent_token.py`
+  (`spec-keeper` Cognito user) — `POST /api/v1/projects/spec-server/tasks` returned 201, id
+  `e0e622db-a9d0-4a9d-abb7-9e281606efb9`. `complete` recorded at end of task with commit sha + summary.

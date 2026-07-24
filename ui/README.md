@@ -62,7 +62,15 @@ OAuth/PKCE redirect. The auth code lives in `src/auth/`:
   for the header user chip and the auth pages.
 - `src/pages/LoginPage.tsx` - native passkey sign-in (`USER_AUTH` +
   `WEB_AUTHN`) with an "email me a code instead" recovery path
-  (`CUSTOM_AUTH` email one-time-code).
+  (`CUSTOM_AUTH` email one-time-code). An opt-in "Remember my email on this
+  device" checkbox (default OFF) persists just the entered email via
+  `src/lib/rememberedEmail.ts`; on a return visit that collapses the screen to
+  a "Signing in as &lt;email&gt;" line + the passkey button alone (no
+  auto-submit - the user still clicks), and a "Change email" button fully
+  clears it and restores the normal input + checkbox and fallback paths.
+- `src/lib/rememberedEmail.ts` - the guarded (`try/catch`, private-mode-safe)
+  `localStorage` store for that opt-in email (`spec.login.email`); stores email
+  ONLY, never a token/password.
 - `src/pages/JoinPage.tsx` - invite-only onboarding at `/join?code=...`:
   `SignUp` with the invite code passed via `clientMetadata`, followed by
   email-OTP verification and passkey enrolment.
