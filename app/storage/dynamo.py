@@ -46,10 +46,12 @@ from ..models import (
     TaskStatus,
 )
 from . import keys as K
+from .changelog import CHANGELOG_NAMESPACE, epic_snapshot, task_snapshot
 from .dto import (
     AgentDTO,
     ChainRunDTO,
     ChainStepDTO,
+    ChangeDTO,
     CommitRefDTO,
     CounterDTO,
     DecisionDTO,
@@ -245,6 +247,15 @@ class DynamoBackend:
                     k: _ser.serialize(_ddbify(v)) for k, v in values.items()
                 }
             actions.append({"Put": put})
+        self._transact_raw(actions)
+
+    def _transact_raw(self, actions):
+        """``TransactWriteItems`` of pre-built action dicts (Put/Update/Delete).
+
+        Used by the change-log write path (UI-DELTA) to bundle an entity Update or
+        Delete with the change-entry Put so the two are all-or-nothing. Maps a
+        cancelled transaction (a failed ConditionExpression) to the neutral
+        ``Conflict`` the callers translate (VersionConflict / dedupe / claim retry)."""
         try:
             self._client.transact_write_items(TransactItems=actions)
         except ClientError as exc:
@@ -463,12 +474,16 @@ class DynamoBackend:
             "position": data.get("position", 1000.0),
             "created_at": now, "updated_at": now,
         }
+        seq = self._next_change_seq(slug)
+        change = self._change_item(slug, seq, "epic", item["public_id"], "upsert",
+                                   None, epic_snapshot(self._epic_dto(item)))
         try:
-            self._put(item, condition=Attr("PK").not_exists())
-        except ClientError as exc:
-            if _is_conditional(exc):
-                raise Conflict(f"Epic '{data['key']}' already exists.") from exc
-            raise BackendUnavailable(str(exc)) from exc  # pragma: no cover
+            self._transact([
+                (item, "attribute_not_exists(PK)", None, None),
+                (change, None, None, None),
+            ])
+        except Conflict as exc:
+            raise Conflict(f"Epic '{data['key']}' already exists.") from exc
         return self._epic_dto(item)
 
     def get_epic(self, slug: str, key: str) -> EpicDTO:
@@ -481,7 +496,10 @@ class DynamoBackend:
         for k, v in patch.items():
             item[k] = v
         item["updated_at"] = _now_iso()
-        self._put(item)
+        seq = self._next_change_seq(slug)
+        change = self._change_item(slug, seq, "epic", item["public_id"], "upsert",
+                                   None, epic_snapshot(self._epic_dto(item)))
+        self._transact([(item, None, None, None), (change, None, None, None)])
         return self._epic_dto(item)
 
     def list_epic_notes(self, slug: str, key: str) -> list[NoteDTO]:
@@ -495,22 +513,27 @@ class DynamoBackend:
 
     def append_epic_note(self, slug: str, key: str, data: dict) -> NoteDTO:
         self._project_item(slug)
-        self._epic_item(slug, key)
-        note = self._write_note(slug, kind="epic", ref_key=key,
-                                epic_key=key, data=data)
+        epic = self._epic_item(slug, key)
+        note_item = self._build_note_item(slug, kind="epic", ref_key=key,
+                                          epic_key=key, data=data)
+        seq = self._next_change_seq(slug)
+        change = self._change_item(slug, seq, "epic", epic["public_id"], "upsert",
+                                   None, epic_snapshot(self._epic_dto(epic)))
+        self._transact([(note_item, None, None, None), (change, None, None, None)])
         self._emit_event(slug, "note", agent=data.get("author"),
                          message=f"note on epic {key}: {data['body'][:120]}")
-        return note
+        return self._note_dto(note_item)
 
     # ----- notes (shared) ---------------------------------------------- #
     def _note_dto(self, it) -> NoteDTO:
         return NoteDTO(author=it.get("author"), body=it["body"],
                        created_at=_dt(it["created_at"]))
 
-    def _write_note(self, slug, *, kind, ref_key, data,
-                    task_display=None, epic_key=None):
-        now = _now()
-        ts = now.isoformat()
+    def _build_note_item(self, slug, *, kind, ref_key, data,
+                         task_display=None, epic_key=None):
+        """Build (do not write) a note item; the caller writes it together with its
+        parent-entity change entry in one TransactWriteItems (UI-DELTA atomicity)."""
+        ts = _now().isoformat()
         uid = _uuid()
         if kind == "task":
             sk = K.task_note_sk(ref_key, ts, uid)
@@ -520,7 +543,7 @@ class DynamoBackend:
             sk = K.epic_note_sk(ref_key, ts, uid)
             feed = K.FEED_EPIC_NOTE
             ntype = "epic_note"
-        item = {
+        return {
             "PK": K.pk(slug), "SK": sk, "type": ntype,
             "author": data.get("author"), "body": data["body"],
             "created_at": ts,
@@ -528,8 +551,6 @@ class DynamoBackend:
             "task": task_display, "epic": epic_key,
             "GSI4PK": K.gsi4_feed_pk(slug, feed), "GSI4SK": K.gsi4_sk(ts, uid),
         }
-        self._put(item)
-        return self._note_dto(item)
 
     # ----- tasks: item build / dto ------------------------------------- #
     def _priority_rank(self, priority):
@@ -725,7 +746,17 @@ class DynamoBackend:
             "created_at": now, "updated_at": now, "completed_at": None,
         }
         self._apply_task_gsi(item)
-        self._put(item, condition=Attr("PK").not_exists())
+        # Write the task and its change entry all-or-nothing (UI-DELTA). The
+        # attribute_not_exists(PK) guard still trips on a (near-impossible) pubid
+        # collision; duplicate human keys are already rejected above before any
+        # seq is allocated, so the seq stays gap-free.
+        seq = self._next_change_seq(slug)
+        change = self._change_item(slug, seq, "task", pubid, "upsert", 1,
+                                   task_snapshot(self._task_dto(item)))
+        self._transact([
+            (item, "attribute_not_exists(PK)", None, None),
+            (change, None, None, None),
+        ])
         return self._task_dto(item)
 
     def get_task(self, slug: str, ident: str) -> TaskDTO:
@@ -750,13 +781,26 @@ class DynamoBackend:
         base["version"] = cur_v + 1
         base["updated_at"] = _now_iso()
         self._apply_task_gsi(base)
-        self._put_task_versioned(base, cur_v)
+        self._put_task_versioned_with_change(slug, base, cur_v)
         return self._dto_for(slug, base, consistent=True)
 
     def delete_task(self, slug: str, ident: str) -> None:
         self._project_item(slug)
         base = self._get_task_base(slug, ident)
         pubid = base["public_id"]
+        # Atomically remove the base task item AND write the delete tombstone
+        # (UI-DELTA) so a delta client can never miss the eviction. The task's
+        # child items (commits/notes/relations) are cleaned up best-effort after —
+        # once the base row is gone they never surface as a task.
+        seq = self._next_change_seq(slug)
+        change = self._change_item(slug, seq, "task", pubid, "delete")
+        self._transact_raw([
+            {"Delete": {"TableName": self.table_name,
+                        "Key": {"PK": _ser.serialize(K.pk(slug)),
+                                "SK": _ser.serialize(K.task_sk(pubid))}}},
+            {"Put": {"TableName": self.table_name,
+                     "Item": _serialize_for_txn(change)}},
+        ])
         rows = self._query(
             KeyConditionExpression=Key("PK").eq(K.pk(slug))
             & Key("SK").begins_with(K.task_prefix(pubid))
@@ -765,14 +809,23 @@ class DynamoBackend:
             for r in rows:
                 bw.delete_item(Key={"PK": r["PK"], "SK": r["SK"]})
 
-    def _put_task_versioned(self, item: dict, expected: int):
-        """PutItem guarded on the version we read (optimistic concurrency)."""
+    def _put_task_versioned_with_change(self, slug: str, item: dict, expected: int):
+        """Version-guarded task Put + its change entry in ONE TransactWriteItems
+        (UI-DELTA), so the mutation and the change commit all-or-nothing. ``item``
+        already carries the bumped version; a lost update (someone else bumped
+        first) cancels the whole transaction -> VersionConflict, and NO change is
+        written."""
+        seq = self._next_change_seq(slug)
+        change = self._change_item(
+            slug, seq, "task", item["public_id"], "upsert",
+            int(_pyify(item["version"])), task_snapshot(self._task_dto(item)))
         try:
-            self._put(item, condition=Attr("version").eq(expected))
-        except ClientError as exc:
-            if _is_conditional(exc):
-                raise VersionConflict("Version conflict: re-read and retry.") from exc
-            raise BackendUnavailable(str(exc)) from exc  # pragma: no cover
+            self._transact([
+                (item, "#v = :expected", {"#v": "version"}, {":expected": expected}),
+                (change, None, None, None),
+            ])
+        except Conflict as exc:
+            raise VersionConflict("Version conflict: re-read and retry.") from exc
 
     # ----- tasks: atomic guarantees + lifecycle ------------------------ #
     def claim_next(self, slug: str, agent: str, *, epic=None, priority_max=None,
@@ -871,20 +924,40 @@ class DynamoBackend:
             vals[":g1pk"] = K.gsi1_status_pk(slug, "in_progress")
             vals[":g2pk"] = K.gsi2_owner_pk(slug, agent)
             vals[":g2sk"] = K.gsi2_sk(pubid)
+            # Claim the candidate AND write its change entry all-or-nothing
+            # (UI-DELTA): the conditional Update (exactly-one-winner) rides a
+            # TransactWriteItems with the change Put, so a claim that loses the
+            # race cancels the transaction and writes NO change (the just-allocated
+            # seq is skipped — a rare, harmless gap, never a duplicate). The
+            # winner's change carries the post-claim state (in_progress, owner,
+            # bumped version) reconstructed from the candidate + the SET values.
+            seq = self._next_change_seq(slug)
+            won_base = dict(cand)
+            won_base["status"] = "in_progress"
+            won_base["owner"] = agent
+            won_base["lease_expires_at"] = exp_iso
+            won_base["updated_at"] = vals[":now2"]
+            won_base["version"] = int(_pyify(cand["version"])) + 1
+            change = self._change_item(
+                slug, seq, "task", pubid, "upsert", won_base["version"],
+                task_snapshot(self._task_dto(won_base)))
+            update_action = {"Update": {
+                "TableName": self.table_name,
+                "Key": {"PK": _ser.serialize(K.pk(slug)),
+                        "SK": _ser.serialize(K.task_sk(pubid))},
+                "UpdateExpression": upd,
+                "ConditionExpression": condition,
+                "ExpressionAttributeNames": names,
+                "ExpressionAttributeValues": {
+                    k: _ser.serialize(_ddbify(v)) for k, v in vals.items()},
+            }}
+            put_action = {"Put": {"TableName": self.table_name,
+                                  "Item": _serialize_for_txn(change)}}
             try:
-                resp = self.table.update_item(
-                    Key={"PK": K.pk(slug), "SK": K.task_sk(pubid)},
-                    UpdateExpression=upd,
-                    ConditionExpression=condition,
-                    ExpressionAttributeNames=names,
-                    ExpressionAttributeValues=_ddbify(vals),
-                    ReturnValues="ALL_NEW",
-                )
-                return resp["Attributes"]
-            except ClientError as exc:
-                if _is_conditional(exc):
-                    continue  # someone else won this one -> try next candidate
-                raise BackendUnavailable(str(exc)) from exc  # pragma: no cover
+                self._transact_raw([update_action, put_action])
+                return won_base
+            except Conflict:
+                continue  # someone else won this one -> try next candidate
         return None
 
     def complete_task(self, slug: str, ident: str, data: dict,
@@ -923,6 +996,13 @@ class DynamoBackend:
                              task_key=base.get("key")),
             None, None, None,
         ))
+        seq = self._next_change_seq(slug)
+        puts.append((
+            self._change_item(slug, seq, "task", pubid, "upsert",
+                              int(_pyify(base["version"])),
+                              task_snapshot(self._task_dto(base))),
+            None, None, None,
+        ))
         try:
             self._transact(puts)
         except Conflict as exc:
@@ -939,7 +1019,7 @@ class DynamoBackend:
         base["version"] = cur_v + 1
         base["updated_at"] = _now_iso()
         self._apply_task_gsi(base)
-        self._put_task_versioned(base, cur_v)
+        self._put_task_versioned_with_change(slug, base, cur_v)
         return self._dto_for(slug, base, consistent=True)
 
     def set_status(self, slug: str, ident: str, status: str, note, has_note: bool,
@@ -956,7 +1036,7 @@ class DynamoBackend:
         base["version"] = cur_v + 1
         base["updated_at"] = _now_iso()
         self._apply_task_gsi(base)
-        self._put_task_versioned(base, cur_v)
+        self._put_task_versioned_with_change(slug, base, cur_v)
         return self._dto_for(slug, base, consistent=True)
 
     def add_commit(self, slug: str, ident: str, data: dict) -> TaskDTO:
@@ -968,12 +1048,23 @@ class DynamoBackend:
             "type": "commit", "sha": data["sha"], "repo": data.get("repo"),
             "test_summary": data.get("test_summary"), "created_at": _now_iso(),
         }
-        try:
-            self._put(item, condition=Attr("SK").not_exists())
-        except ClientError as exc:
-            if not _is_conditional(exc):
-                raise BackendUnavailable(str(exc)) from exc  # pragma: no cover
-            # duplicate (task, sha) -> dedupe silently (parity with Postgres)
+        # A duplicate (task, sha) is a genuine no-op (dedupe) — pre-check so a
+        # duplicate allocates no seq (gap-free, parity with Postgres). A new commit
+        # writes the commit row + a task upsert change all-or-nothing.
+        if self._get(K.pk(slug), K.commit_sk(pubid, data["sha"])) is None:
+            seq = self._next_change_seq(slug)
+            change = self._change_item(
+                slug, seq, "task", pubid, "upsert",
+                int(_pyify(base["version"])), task_snapshot(self._task_dto(base)))
+            try:
+                self._transact([
+                    (item, "attribute_not_exists(SK)", None, None),
+                    (change, None, None, None),
+                ])
+            except Conflict:
+                # A concurrent identical commit won the SK race -> dedupe silently
+                # (a rare, harmless seq gap — never a duplicate value).
+                pass
         return self._dto_for(slug, base, consistent=True)
 
     def list_task_notes(self, slug: str, ident: str) -> list[NoteDTO]:
@@ -989,12 +1080,18 @@ class DynamoBackend:
         self._project_item(slug)
         base = self._get_task_base(slug, ident)
         display = base.get("key") or base["public_id"]
-        note = self._write_note(slug, kind="task", ref_key=base["public_id"],
-                                data=data, task_display=display)
+        note_item = self._build_note_item(slug, kind="task",
+                                          ref_key=base["public_id"], data=data,
+                                          task_display=display)
+        seq = self._next_change_seq(slug)
+        change = self._change_item(slug, seq, "task", base["public_id"], "upsert",
+                                   int(_pyify(base["version"])),
+                                   task_snapshot(self._task_dto(base)))
+        self._transact([(note_item, None, None, None), (change, None, None, None)])
         self._emit_event(slug, "note", agent=data.get("author"),
                          task_pubid=base["public_id"], task_key=base.get("key"),
                          message=f"note on {display}: {data['body'][:120]}")
-        return note
+        return self._note_dto(note_item)
 
     def add_relation(self, slug: str, ident: str, target: str, kind: str) -> str:
         self._project_item(slug)
@@ -1010,6 +1107,12 @@ class DynamoBackend:
         }
         src_disp = src.get("key") or src["public_id"]
         dst_disp = dst.get("key") or dst["public_id"]
+        # One change for the relation's subject (source) task, written in the same
+        # TransactWriteItems as the relation (and the dst flip, for supersedes).
+        seq = self._next_change_seq(slug)
+        change = self._change_item(
+            slug, seq, "task", src["public_id"], "upsert",
+            int(_pyify(src["version"])), task_snapshot(self._task_dto(src)))
         if kind_enum == RelationKind.supersedes:
             cur_v = int(_pyify(dst["version"]))
             dst["status"] = TaskStatus.superseded.value
@@ -1022,9 +1125,13 @@ class DynamoBackend:
             self._transact([
                 (rel, None, None, None),
                 (dst, "#v = :expected", {"#v": "version"}, {":expected": cur_v}),
+                (change, None, None, None),
             ])
         else:
-            self._put(rel)
+            self._transact([
+                (rel, None, None, None),
+                (change, None, None, None),
+            ])
         return f"{src_disp} {kind_enum.value} {dst_disp}"
 
     # ----- reservations / counters ------------------------------------- #
@@ -1119,6 +1226,73 @@ class DynamoBackend:
                for r in rows]
         out.sort(key=lambda c: c.namespace)
         return out
+
+    # ----- change-log (UI-DELTA) --------------------------------------- #
+    def _next_change_seq(self, slug: str) -> int:
+        """Allocate the next per-project change ``seq`` via the SAME atomic counter
+        ``ADD`` that backs collision-proof reservation (namespace ``changelog``).
+        The per-item ADD is serialised by DynamoDB, so every caller reads back a
+        distinct, strictly increasing integer — never read-max-plus-one, and the
+        same cursor semantics as the Postgres counter."""
+        try:
+            resp = self.table.update_item(
+                Key={"PK": K.pk(slug), "SK": K.counter_sk(CHANGELOG_NAMESPACE)},
+                UpdateExpression="ADD current_value :one",
+                ExpressionAttributeValues=_ddbify({":one": 1}),
+                ReturnValues="UPDATED_NEW",
+            )
+        except (ClientError, BotoCoreError) as exc:  # pragma: no cover - infra
+            raise BackendUnavailable(str(exc)) from exc
+        return int(_pyify(resp["Attributes"]["current_value"]))
+
+    def _change_item(self, slug, seq, entity_type, entity_pubid, op,
+                     version=None, snapshot=None):
+        """Build a change item: base SK CHANGE#<padded seq> (numeric range read) +
+        GSI7 keys (ascending seq feed). ``snapshot`` is the lean upsert DTO or None
+        for a delete tombstone."""
+        return {
+            "PK": K.pk(slug), "SK": K.change_sk(seq), "type": "change",
+            "seq": seq, "entity_type": entity_type, "entity_pubid": entity_pubid,
+            "op": op, "version": version, "occurred_at": _now_iso(),
+            "snapshot": snapshot,
+            "GSI7PK": K.gsi7_changes_pk(slug), "GSI7SK": K.gsi7_sk(seq),
+        }
+
+    def _change_dto(self, it) -> ChangeDTO:
+        v = it.get("version")
+        snap = it.get("snapshot")
+        return ChangeDTO(
+            seq=int(_pyify(it["seq"])), entity_type=it["entity_type"],
+            entity_pubid=it["entity_pubid"], op=it["op"],
+            version=int(_pyify(v)) if v is not None else None,
+            occurred_at=_dt(it["occurred_at"]),
+            snapshot=_pyify(snap) if snap is not None else None,
+        )
+
+    def changes_head(self, slug: str) -> int:
+        """Highest change ``seq`` for the project (0 when none). One descending
+        base-table range read (CHANGE# is already in numeric seq order)."""
+        self._project_item(slug)
+        rows = self._query_first(
+            1,
+            KeyConditionExpression=Key("PK").eq(K.pk(slug))
+            & Key("SK").begins_with(K.change_prefix()),
+            ScanIndexForward=False,
+        )
+        return int(_pyify(rows[0]["seq"])) if rows else 0
+
+    def list_changes(self, slug: str, since: int, limit: int) -> list[ChangeDTO]:
+        """Change entries with ``seq > since`` ascending, via GSI7 (its HTTP
+        endpoint lands in UI-DELTA-5). Zero-padded GSI7SK == numeric seq order."""
+        self._project_item(slug)
+        rows = self._query_first(
+            limit,
+            IndexName=K.GSI7,
+            KeyConditionExpression=Key("GSI7PK").eq(K.gsi7_changes_pk(slug))
+            & Key("GSI7SK").gt(K.gsi7_sk(since)),
+            ScanIndexForward=True,
+        )
+        return [self._change_dto(r) for r in rows]
 
     # ----- events / notes-feed / decisions ----------------------------- #
     def _event_item(self, slug, event_type, ts, uid, *, agent=None, message=None,

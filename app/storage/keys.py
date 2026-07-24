@@ -28,6 +28,7 @@ GSI3 = "GSI3"   # task-key (sparse)
 GSI4 = "GSI4"   # feed: events / notes
 GSI5 = "GSI5"   # all-projects
 GSI6 = "GSI6"   # project membership: list a principal's projects (ISO-1)
+GSI7 = "GSI7"   # change-log: per-project ascending seq feed (UI-DELTA)
 
 # Feed "kind" discriminators for GSI4.
 FEED_EVENT = "EVT"
@@ -187,3 +188,25 @@ def gsi6_member_pk(sub: str) -> str:
 
 def gsi6_sk(slug: str) -> str:
     return slug
+
+
+# --- change-log (UI-DELTA) ------------------------------------------------ #
+# The change item lives on the base partition under SK CHANGE#<zero-padded seq>
+# so a base-table range read is already in numeric seq order. GSI7 (reserved
+# index number 7, namespace "dynamo-gsi") gives an ascending "seq > cursor"
+# delta query: PK=P#<slug>#CHANGES, SK=<zero-padded seq>. Zero-padding makes the
+# lexicographic string order identical to the numeric seq order.
+def change_sk(seq: int) -> str:
+    return f"CHANGE#{seq:020d}"
+
+
+def change_prefix() -> str:
+    return "CHANGE#"
+
+
+def gsi7_changes_pk(slug: str) -> str:
+    return f"P#{slug}#CHANGES"
+
+
+def gsi7_sk(seq: int) -> str:
+    return f"{seq:020d}"

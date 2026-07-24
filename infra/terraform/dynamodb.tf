@@ -29,6 +29,7 @@
 #   value 4 -> GSI4  (feed: events / notes)
 #   value 5 -> GSI5  (all-projects)
 #   value 6 -> GSI6  (project membership: list a principal's projects, ISO-1/2)
+#   value 7 -> GSI7  (change-log: per-project ascending seq delta feed, UI-DELTA)
 # The reservation is monotonic + collision-proof, so these names are stable and
 # were not hand-picked by reading max+1.
 # =============================================================================
@@ -110,6 +111,16 @@ resource "aws_dynamodb_table" "app" {
     type = "S"
   }
 
+  # GSI7 change-log (sparse): PK P#<slug>#CHANGES, SK <zero-padded seq> (UI-DELTA)
+  attribute {
+    name = "GSI7PK"
+    type = "S"
+  }
+  attribute {
+    name = "GSI7SK"
+    type = "S"
+  }
+
   # --- GSI1: claim-next candidate query + list_tasks?status= (ordered by
   # priority_rank#position). Serves the hot claim path and the primary
   # status-filtered task listing that returns full task cards -> ALL. ---
@@ -172,6 +183,17 @@ resource "aws_dynamodb_table" "app" {
     projection_type = "ALL"
   }
 
+  # --- GSI7: per-project change-log delta feed (list_changes, UI-DELTA). Sparse —
+  # GSI7PK/GSI7SK are written only on CHANGE#<seq> items. The delta query reads
+  # "seq > cursor" ascending and returns the change entry (incl. the lean snapshot)
+  # straight off the index with NO follow-up GetItem -> project ALL. ---
+  global_secondary_index {
+    name            = "GSI7"
+    hash_key        = "GSI7PK"
+    range_key       = "GSI7SK"
+    projection_type = "ALL"
+  }
+
   # TTL: garbage-collects expired lease-history items (`...#LEASE#<ts>`). NOTE:
   # per SLS-1 §3.3, TTL is GC-only — lease *reclaim* is done inline by the
   # claim's conditional write, never by TTL (TTL deletion can lag up to ~48h).
@@ -226,6 +248,6 @@ output "dynamodb_table_index_arn_pattern" {
 }
 
 output "dynamodb_gsi_names" {
-  description = "GSI names in reserved order: GSI1 claim/status, GSI2 owner, GSI3 task-key, GSI4 feed, GSI5 all-projects, GSI6 project-membership."
-  value       = ["GSI1", "GSI2", "GSI3", "GSI4", "GSI5", "GSI6"]
+  description = "GSI names in reserved order: GSI1 claim/status, GSI2 owner, GSI3 task-key, GSI4 feed, GSI5 all-projects, GSI6 project-membership, GSI7 change-log."
+  value       = ["GSI1", "GSI2", "GSI3", "GSI4", "GSI5", "GSI6", "GSI7"]
 }

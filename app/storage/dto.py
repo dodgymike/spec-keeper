@@ -146,6 +146,22 @@ class EventDTO:
 
 
 @dataclass(frozen=True)
+class ChangeDTO:
+    """One entry in a project's change-log (UI-DELTA). ``seq`` is the per-project
+    monotonic cursor; ``entity_pubid`` is the stable cross-backend ``public_id`` of
+    the changed entity; ``snapshot`` is the entity's current lean DTO for
+    ``op=upsert`` and ``None`` for ``op=delete`` (a tombstone). Built identically by
+    both adapters, so the delta feed is byte-for-byte parity across backends."""
+    seq: int
+    entity_type: str
+    entity_pubid: str
+    op: str                       # "upsert" | "delete"
+    version: int | None
+    occurred_at: datetime
+    snapshot: dict | None
+
+
+@dataclass(frozen=True)
 class DecisionDTO:
     public_id: str
     key: str | None

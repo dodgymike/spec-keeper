@@ -358,3 +358,52 @@ migration needed (ORM-only, no new columns/tables).
 being write-only. No new project-wide "list all relations" endpoint was added — only per-task,
 matching the existing per-task shape of notes/commits. If a project-wide relations view is needed
 later, add it then rather than speculatively now.
+
+## DEC-10 — 2026-07-24 — Change-log cursor via the atomic counter (UI-DELTA)
+
+**Context.** The dashboard refetches the whole backlog every poll (see
+`UI_DATA_LOADING_DEEPDIVE.md`). To serve *deltas* the server needs a monotonic, total-ordered,
+per-project cursor that behaves IDENTICALLY on both storage backends. The existing event log is
+unfit: no exposed cursor, most task mutations emit nothing, no deletion tombstones, and its
+DynamoDB `ts#uuid` tiebreak differs in shape from the Postgres serial id (deep-dive §2/§4).
+
+**Decision.** Introduce a per-project **change-log**. Each entry is
+`{seq, entity_type, entity_pubid, op ∈ {upsert,delete}, version, occurred_at, snapshot}` where:
+
+- **`seq` is allocated by the already-proven atomic counter** (`reserve_number` primitive) under a
+  per-project namespace `changelog` — Postgres `INSERT … ON CONFLICT DO UPDATE … RETURNING`,
+  DynamoDB per-item `ADD current_value :1`. Never read-max-plus-one. The cursor is a plain
+  per-project integer with identical semantics on both backends → parity by construction.
+- **Storage.** Postgres: a `changes` table, `UNIQUE(project_id, seq)` + index `(project_id, seq)`
+  (migration `g1changes`). DynamoDB: a change item `PK=P#<slug>`, `SK=CHANGE#<seq %020d>` (zero-
+  padded so lexical order == numeric order) plus **GSI7** (`GSI7PK=P#<slug>#CHANGES`,
+  `GSI7SK=<seq %020d>`, projection ALL) for the ascending `seq > cursor` range query. GSI7 is the
+  reserved index number 7 (namespace `dynamo-gsi`), mirroring the GSI1-6 pattern.
+- **Pointer = `public_id`** (stable, cross-backend), standardising on UI-DELTA-1's event fix.
+- **Snapshot.** `op=upsert` embeds the entity's current DTO; for tasks it is a **lean** snapshot
+  (§6.9) — the scalar `TaskOut` fields + `tags`, OMITTING the nested `notes[]`/`commits[]` to bound
+  feed size. `op=delete` is a **tombstone** carrying only `entity_type + entity_pubid` (snapshot
+  and version null) so a client can evict.
+- **Atomicity (hard requirement).** The change entry is written in the SAME transaction (Postgres)
+  / `TransactWriteItems` (DynamoDB) as the entity mutation, so the two are all-or-nothing. A change
+  written after a separate commit could be lost on failure → a silent feed gap the client never
+  recovers from; that is unacceptable. On DynamoDB the previously single-`PutItem` mutations
+  (create/update/set_status/release/add_commit/create_epic/update_epic/notes) and the conditional
+  claim `UpdateItem` are folded into a `TransactWriteItems` with the change Put; `complete`/
+  `supersedes` (already transactional) simply gain the extra Put.
+- **Coverage.** Fills every §2.2 gap — `create_task`, `update_task`, `set_status`, `release_task`,
+  `delete_task` (tombstone), `add_commit`, `add_relation` (records the source task), `create_epic`,
+  `update_epic` — AND the mutations that already emit events (`claim`, `complete`, task/epic
+  `note`). Commits, relations and notes ride an **upsert of their parent task/epic** (the entity the
+  UI cache is keyed by) rather than a distinct entry, since notes/commits/relations have no stable
+  cross-backend `public_id`; a duplicate commit is a genuine no-op and records nothing (so the
+  sequential `seq` stays gap-free).
+
+**Consequences.** The cursor is monotonic, total-ordered and gap-free under sequential mutation on
+both backends (concurrent conditional-write losers may skip a `seq` — a harmless contiguity gap,
+never a duplicate, exactly as the reservation allocator already accepts). The write path is
+**additive and inert**: nothing reads the change-log yet, so existing task/epic/event responses are
+unchanged (the only new observable is a `changelog` counter appearing in `list_counters`). The
+delta/head HTTP endpoints, retained-window/`full_resync_required` semantics and the client cache are
+UI-DELTA-5+; this task lands only the write path plus a `changes_head(slug)` cursor read and a
+`list_changes(slug, since, limit)` storage method (GSI7 on DynamoDB) used to verify it.

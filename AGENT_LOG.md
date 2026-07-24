@@ -629,3 +629,44 @@ to the server's `/events` endpoint.
 - **Branch:** feat/jira-13-docs (based on feat/jira-epic-integration)
 - **Task status:** done (version 3, completed via POST /complete with If-Match v2, verified via
   follow-up GET: status=done, completed_at=2026-07-02T21:28:43.477967).
+
+## 2026-07-24 — UI-DELTA change-log WRITE PATH (UI-DELTA-2 ADR + UI-DELTA-3 Postgres + UI-DELTA-4 DynamoDB)
+
+- **Task:** Add a per-project monotonic change-log (`{seq, entity_type, entity_pubid, op, version,
+  occurred_at, snapshot}`), written in the SAME transaction / `TransactWriteItems` as every
+  UI-relevant mutation, on BOTH storage backends. Additive + inert (nothing reads it yet).
+- **Chain:** implementer → test-engineer → reviewer → security → data-reviewer (parity) →
+  reliability-reviewer (atomicity/failure). CODE ONLY — no deploy, no backlog mutation, no commit.
+- **Files changed:**
+  - `app/models.py` — new `Change` model (`changes` table: UNIQUE(project_id, seq), index).
+  - `app/storage/changelog.py` (new) — `CHANGELOG_NAMESPACE` + shared `task_snapshot` (lean, §6.9)
+    / `epic_snapshot` builders (JSON-friendly, identical on both backends).
+  - `app/storage/dto.py` — `ChangeDTO`.
+  - `app/storage/base.py` — `changes_head` / `list_changes` on the protocol.
+  - `app/services.py` — `record_change` + `_next_change_seq` (atomic counter, namespace changelog),
+    inside the caller's transaction.
+  - `app/storage/postgres.py` — `record_change` on create/update/set_status/release/delete
+    (tombstone)/add_commit/add_relation/claim/complete task, create/update epic, task/epic note;
+    `changes_head` + `list_changes`.
+  - `app/storage/dynamo.py` — same coverage via `TransactWriteItems` (folded the single-PutItem
+    mutations + the conditional claim UpdateItem into transacts with the change Put); `seq` from an
+    atomic `ADD` counter; `_change_item`/`_change_dto`; `changes_head` (base-table) + `list_changes`
+    (GSI7).
+  - `app/storage/keys.py` — `GSI7`, `change_sk` (CHANGE#<seq %020d>), `gsi7_changes_pk`/`gsi7_sk`.
+  - `tests/conftest.py` — GSI7 added to the DynamoDB-Local table.
+  - `infra/terraform/dynamodb.tf` — GSI7 attributes + index (projection ALL) + gsi_names output +
+    reservation comment (WRITTEN only; NOT applied — deploy is separate).
+  - `migrations/versions/g1changes_change_log.py` (new) — `changes` table, chained from
+    `f0mergeheads` (verified single head `g1changes`).
+  - `tests/test_changelog.py` (new) — parity suite (both backends).
+  - `DECISIONS.md` — DEC-10 (the ADR, UI-DELTA-2).
+- **Verification (both backends, in-container):**
+  - `pytest tests/test_changelog.py` → 36 passed (18 × postgres + dynamodb).
+  - `pytest -k "change or delta or parity"` → 66 passed, 493 deselected.
+  - Full suite → 463 passed, 96 skipped, 0 failed (both backends). Two pre-existing collection
+    errors (`test_backfill_memberships.py`, `test_customauth_ratelimit.py`) excluded — they need
+    `/app/scripts`, which is not baked into the container image (environmental, unrelated).
+- **Notes:** `add_relation` records the operation's SOURCE task (one entry, literal "upsert task").
+  Duplicate commits are no-ops (no entry → gap-free). Rejected mutations (stale If-Match → 412)
+  write no change (atomicity, asserted). Concurrent conditional-write losers may skip a `seq`
+  (harmless contiguity gap, never a duplicate — matches the reservation allocator).

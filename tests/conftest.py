@@ -56,13 +56,16 @@ _GSI_PROJECTIONS = {
     # GSI6 (ISO-1): list a principal's projects; member items carry the full DTO
     # so list_projects_for_principal returns without a follow-up read -> ALL.
     "GSI6": "ALL",
+    # GSI7 (UI-DELTA): per-project ascending change-log feed; the delta query
+    # reads the whole change entry (snapshot) straight off the index -> ALL.
+    "GSI7": "ALL",
 }
 
 
 def _create_dynamo_table(client, table_name):
     attrs = [("PK", "S"), ("SK", "S")]
     gsis = []
-    for i in range(1, 7):
+    for i in range(1, 8):
         attrs += [(f"GSI{i}PK", "S"), (f"GSI{i}SK", "S")]
         gsis.append({
             "IndexName": f"GSI{i}",

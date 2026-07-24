@@ -495,6 +495,37 @@ class Event(Base):
     task: Mapped["Task | None"] = relationship(foreign_keys=[task_id])
 
 
+class Change(Base):
+    """Append-only per-project change-log (UI-DELTA). Every UI-relevant mutation
+    emits one entry inside the SAME transaction as the mutation, so the entity
+    write and its change entry are all-or-nothing (no silent feed gap).
+
+    ``seq`` is a per-project monotonic cursor allocated by the atomic ``counters``
+    upsert under namespace ``changelog`` (never read-max-plus-one), so the two
+    storage backends share identical integer cursor semantics. ``snapshot`` carries
+    the entity's current (lean) DTO for ``op=upsert`` and is NULL for ``op=delete``
+    (a tombstone the UI uses to evict). The entity pointer is the stable, cross-
+    backend ``public_id``."""
+
+    __tablename__ = "changes"
+    __table_args__ = (
+        UniqueConstraint("project_id", "seq", name="uq_change_project_seq"),
+        Index("ix_changes_project_seq", "project_id", "seq"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    seq: Mapped[int] = mapped_column(sa.BigInteger, nullable=False)
+    entity_type: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    entity_pubid: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    op: Mapped[str] = mapped_column(sa.Text, nullable=False)  # upsert | delete
+    version: Mapped[int | None] = mapped_column(sa.Integer)
+    occurred_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
+    snapshot: Mapped[dict | None] = mapped_column(JSONB)
+
+
 class Decision(Base):
     """ADR-style decision record (replaces DECISIONS.md)."""
 

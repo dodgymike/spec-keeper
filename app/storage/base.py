@@ -21,6 +21,7 @@ from .dto import (
     AgentDTO,
     ChainRunDTO,
     ChainStepDTO,
+    ChangeDTO,
     CounterDTO,
     DecisionDTO,
     EpicDTO,
@@ -111,6 +112,14 @@ class StorageBackend(Protocol):
     def list_project_notes(self, slug: str, flt: dict) -> list[ProjectNoteDTO]: ...
     def list_decisions(self, slug: str) -> list[DecisionDTO]: ...
     def create_decision(self, slug: str, data: dict) -> DecisionDTO: ...
+
+    # --- change-log (UI-DELTA) -----------------------------------------
+    # Every UI-relevant mutation writes a change entry in the SAME transaction /
+    # TransactWriteItems as the entity write (no lost-write gap). ``changes_head``
+    # is the cheap cursor read; ``list_changes`` is the ascending delta query
+    # (its HTTP endpoint lands in UI-DELTA-5).
+    def changes_head(self, slug: str) -> int: ...                             # NotFound
+    def list_changes(self, slug: str, since: int, limit: int) -> list[ChangeDTO]: ...  # NotFound
 
     # --- chains ---------------------------------------------------------
     def create_chain_run(self, slug: str, ident: str, started_by: str | None) -> ChainRunDTO: ...

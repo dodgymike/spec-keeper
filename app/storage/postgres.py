@@ -24,6 +24,7 @@ from ..models import (
     Agent,
     ChainRun,
     ChainStep,
+    Change,
     CommitRef,
     Counter,
     Decision,
@@ -49,13 +50,16 @@ from ..services import (
     import_doc as _import_doc_svc,
     import_spec as _import_spec_svc,
     log_event,
+    record_change,
     reserve_number as _reserve_number_svc,
 )
 from ..specmd import render_spec
+from .changelog import epic_snapshot, task_snapshot
 from .dto import (
     AgentDTO,
     ChainRunDTO,
     ChainStepDTO,
+    ChangeDTO,
     CommitRefDTO,
     CounterDTO,
     DecisionDTO,
@@ -144,6 +148,12 @@ def _event_dto(e: Event) -> EventDTO:
     return EventDTO(event_type=e.event_type, agent=e.agent,
                     task_pubid=e.task.public_id if e.task else None,
                     message=e.message, payload=e.payload, created_at=e.created_at)
+
+
+def _change_dto(c: Change) -> ChangeDTO:
+    return ChangeDTO(seq=c.seq, entity_type=c.entity_type,
+                     entity_pubid=c.entity_pubid, op=c.op, version=c.version,
+                     occurred_at=c.occurred_at, snapshot=c.snapshot)
 
 
 def _decision_dto(d: Decision) -> DecisionDTO:
@@ -406,6 +416,8 @@ class PostgresBackend:
         db.session.add(epic)
         db.session.flush()
         dto = _epic_dto(epic)
+        record_change(project.id, "epic", epic.public_id, "upsert",
+                      snapshot=epic_snapshot(dto))
         db.session.commit()
         return dto
 
@@ -420,6 +432,8 @@ class PostgresBackend:
             setattr(epic, k, v)
         db.session.flush()
         dto = _epic_dto(epic)
+        record_change(project.id, "epic", epic.public_id, "upsert",
+                      snapshot=epic_snapshot(dto))
         db.session.commit()
         return dto
 
@@ -437,6 +451,8 @@ class PostgresBackend:
                   message=f"note on epic {epic.key}: {data['body'][:120]}")
         db.session.flush()
         dto = _note_dto(note)
+        record_change(project.id, "epic", epic.public_id, "upsert",
+                      snapshot=epic_snapshot(_epic_dto(epic)))
         db.session.commit()
         return dto
 
@@ -493,6 +509,8 @@ class PostgresBackend:
         db.session.add(task)
         db.session.flush()
         dto = _task_dto(task)
+        record_change(project.id, "task", task.public_id, "upsert",
+                      version=task.version, snapshot=task_snapshot(dto))
         db.session.commit()
         return dto
 
@@ -518,13 +536,19 @@ class PostgresBackend:
         task.version += 1
         db.session.flush()
         dto = _task_dto(task)
+        record_change(project.id, "task", task.public_id, "upsert",
+                      version=task.version, snapshot=task_snapshot(dto))
         db.session.commit()
         return dto
 
     def delete_task(self, slug: str, ident: str) -> None:
         project = self._project(slug)
         task = self._task(project.id, ident)
+        pubid = task.public_id
         db.session.delete(task)
+        # Tombstone the deletion in the SAME transaction so a delta client can
+        # evict the task; ``op=delete`` carries no snapshot.
+        record_change(project.id, "task", pubid, "delete")
         db.session.commit()
 
     # ----- tasks: atomic guarantees + lifecycle ------------------------
@@ -549,6 +573,8 @@ class PostgresBackend:
             db.session.commit()
             return IdempotentOutcome()
         dto = _task_dto(task)
+        record_change(project.id, "task", task.public_id, "upsert",
+                      version=task.version, snapshot=task_snapshot(dto))
         if idempotency_key and serialize is not None:
             store_idempotent(project.id, "claim-next", idempotency_key,
                              serialize(dto), 200)
@@ -578,6 +604,8 @@ class PostgresBackend:
                   payload={k: v for k, v in data.items() if v})
         db.session.flush()
         dto = _task_dto(task)
+        record_change(project.id, "task", task.public_id, "upsert",
+                      version=task.version, snapshot=task_snapshot(dto))
         db.session.commit()
         return dto
 
@@ -591,6 +619,8 @@ class PostgresBackend:
         close_active_lease(task.id, LeaseState.released)
         db.session.flush()
         dto = _task_dto(task)
+        record_change(project.id, "task", task.public_id, "upsert",
+                      version=task.version, snapshot=task_snapshot(dto))
         db.session.commit()
         return dto
 
@@ -607,6 +637,8 @@ class PostgresBackend:
         task.version += 1
         db.session.flush()
         dto = _task_dto(task)
+        record_change(project.id, "task", task.public_id, "upsert",
+                      version=task.version, snapshot=task_snapshot(dto))
         db.session.commit()
         return dto
 
@@ -618,10 +650,16 @@ class PostgresBackend:
                 CommitRef.task_id == task.id, CommitRef.sha == data["sha"]
             )
         ).scalar_one_or_none()
-        if exists is None:
+        added = exists is None
+        if added:
             db.session.add(CommitRef(task_id=task.id, **data))
         db.session.flush()
         dto = _task_dto(task)
+        # A duplicate (task, sha) is a genuine no-op (dedupe) -> no change entry,
+        # so the seq stays gap-free; a new commit records one task upsert.
+        if added:
+            record_change(project.id, "task", task.public_id, "upsert",
+                          version=task.version, snapshot=task_snapshot(dto))
         db.session.commit()
         return dto
 
@@ -639,6 +677,11 @@ class PostgresBackend:
                   message=f"note on {task.display_id}: {data['body'][:120]}")
         db.session.flush()
         dto = _note_dto(note)
+        # A note is part of the task aggregate: record it as a task upsert so the
+        # delta client refetches the task detail (notes are omitted from the lean
+        # snapshot). Same transaction -> atomic with the note write.
+        record_change(project.id, "task", task.public_id, "upsert",
+                      version=task.version, snapshot=task_snapshot(_task_dto(task)))
         db.session.commit()
         return dto
 
@@ -662,6 +705,11 @@ class PostgresBackend:
                 dst.status = TaskStatus.superseded
                 dst.superseded_by_task_id = src.id
         message = f"{src.display_id} {kind_enum.value} {dst.display_id}"
+        db.session.flush()
+        # Record one change for the relation's subject (source) task, in the same
+        # transaction as the relation write.
+        record_change(project.id, "task", src.public_id, "upsert",
+                      version=src.version, snapshot=task_snapshot(_task_dto(src)))
         db.session.commit()
         return message
 
@@ -815,6 +863,31 @@ class PostgresBackend:
         dto = _decision_dto(decision)
         db.session.commit()
         return dto
+
+    # ----- change-log (UI-DELTA) ---------------------------------------
+    def changes_head(self, slug: str) -> int:
+        """Highest committed change ``seq`` for the project (0 when none). Cheap
+        cursor read for the delta poll (max over the project's change rows — not
+        the raw counter, which can lead the committed tail after a rolled-back
+        allocation)."""
+        project = self._project(slug)
+        val = db.session.execute(
+            sa.select(sa.func.coalesce(sa.func.max(Change.seq), 0))
+            .where(Change.project_id == project.id)
+        ).scalar_one()
+        return int(val)
+
+    def list_changes(self, slug: str, since: int, limit: int) -> list[ChangeDTO]:
+        """Change entries with ``seq > since`` in ascending ``seq`` order (the delta
+        feed; its HTTP endpoint lands in UI-DELTA-5)."""
+        project = self._project(slug)
+        rows = db.session.execute(
+            sa.select(Change)
+            .where(Change.project_id == project.id, Change.seq > since)
+            .order_by(Change.seq)
+            .limit(limit)
+        ).scalars().all()
+        return [_change_dto(c) for c in rows]
 
     # ----- chains ------------------------------------------------------
     def _chain_run(self, project_id: int, run_pubid: str) -> ChainRun:

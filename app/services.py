@@ -22,6 +22,7 @@ from sqlalchemy.orm import selectinload
 from .extensions import db
 from .models import (
     CLAIMABLE_STATUSES,
+    Change,
     Epic,
     Event,
     Lease,
@@ -35,6 +36,7 @@ from .models import (
     utcnow,
 )
 from .specmd import ParsedSpec, validate_doc_task, validate_parsed_task
+from .storage.changelog import CHANGELOG_NAMESPACE
 
 
 def log_event(project_id: int, event_type: str, agent=None, task_id=None,
@@ -46,6 +48,44 @@ def log_event(project_id: int, event_type: str, agent=None, task_id=None,
     )
     db.session.add(event)
     return event
+
+def _next_change_seq(project_id: int) -> int:
+    """Allocate the next per-project change-log ``seq`` via the SAME atomic counter
+    upsert that backs collision-proof reservation (namespace ``changelog``). Runs in
+    the caller's transaction, so the seq bump and the change row commit/roll back
+    together — never read-max-plus-one."""
+    stmt = (
+        sa.text(
+            """
+            INSERT INTO counters (project_id, namespace, current_value)
+            VALUES (:pid, :ns, 1)
+            ON CONFLICT (project_id, namespace)
+            DO UPDATE SET current_value = counters.current_value + 1
+            RETURNING current_value
+            """
+        )
+        .bindparams(pid=project_id, ns=CHANGELOG_NAMESPACE)
+    )
+    return int(db.session.execute(stmt).scalar_one())
+
+
+def record_change(project_id: int, entity_type: str, entity_pubid: str, op: str,
+                  *, version: int | None = None, snapshot: dict | None = None) -> Change:
+    """Append one change-log entry (UI-DELTA) inside the current transaction.
+
+    The entry is NOT committed here — the caller's mutation owns the transaction, so
+    the change entry and the entity write are atomic (a rollback drops both). ``seq``
+    is the monotonic per-project cursor; ``snapshot`` is the entity's lean DTO for
+    ``op=upsert`` and ``None`` for ``op=delete`` (a tombstone)."""
+    seq = _next_change_seq(project_id)
+    change = Change(
+        project_id=project_id, seq=seq, entity_type=entity_type,
+        entity_pubid=entity_pubid, op=op, version=version, snapshot=snapshot,
+        occurred_at=utcnow(),
+    )
+    db.session.add(change)
+    return change
+
 
 # Lower index == higher priority. Tasks with no priority sort last.
 _PRIORITY_ORDER = {Priority.P0: 0, Priority.P1: 1, Priority.P2: 2, Priority.P3: 3}
