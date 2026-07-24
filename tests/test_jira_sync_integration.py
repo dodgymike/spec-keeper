@@ -463,21 +463,23 @@ class TestIdempotentReCreate:
             assert resp.status_code == 201
             assert mock_create.call_count == 1
 
-        # Manually invoke sync_task_created again (simulating a re-delivery)
+        # Manually invoke sync_task_created again (simulating a re-delivery). The
+        # SLS-J4 signature is ``(slug, task_dto)``, so fetch the backend-neutral
+        # DTO through the storage port rather than passing an ORM row.
         from app.jira_sync import sync_task_created
 
         with app.app_context():
-            task = db.session.execute(
-                db.select(Task).where(Task.key == "IDEM-2")
-            ).scalar_one()
-            assert task.jira_issue_key == "INT-21"
+            task_dto = app.storage.get_task("integ-proj", "IDEM-2")
+            assert task_dto.jira_issue_key == "INT-21"
 
             with patch(
                 "app.jira_sync.JiraClient.create_issue",
             ) as mock_create_2:
-                sync_task_created(task)
+                sync_task_created("integ-proj", task_dto)
                 # Must NOT call create again because jira_issue_key is already set
                 mock_create_2.assert_not_called()
 
-            db.session.refresh(task)
-            assert task.jira_issue_key == "INT-21"
+            # Unchanged after the idempotent no-op.
+            assert app.storage.get_task(
+                "integ-proj", "IDEM-2"
+            ).jira_issue_key == "INT-21"

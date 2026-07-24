@@ -1045,3 +1045,49 @@ to the server's `/events` endpoint.
   mismatch the new signature (tests mock the sync fns; a documented handoff to J5).
 - **Backlog:** claimed at start (PATCH → in_progress/owner spec-keeper), completed at end via
   `scripts/agent_token.py` (`spec-keeper` Cognito user) with commit sha + test summary + proof_cmd.
+
+## SLS-J5 — wire Jira auto-sync into create/complete lifecycle (both backends) + retry rewrite + final conftest sweep
+
+- **Task:** `f7814dd8-16cd-4c48-9d92-3dd34b765b9b` (epic SLS, P2). Fire best-effort Jira auto-sync
+  through the storage-backed create/complete lifecycle on BOTH backends; rewrite the retry endpoint
+  off the ORM; retire the last `deferred` conftest skips; add cross-backend parity tests.
+- **Change:**
+  - `app/blueprints/tasks.py`: after `create_task` → `sync_task_created(slug, task)`; after
+    `complete_task` → `sync_task_completed(slug, task)`. Each re-reads the task so the RESPONSE
+    reflects the `jira_issue_key`/`jira_sync_error` write-back (version/ETag unchanged — D2).
+    Best-effort: `jira_sync` never raises; no outbound call and negligible latency when Jira is
+    unconfigured/disabled (a single `get_jira_config` no-op read).
+  - `app/blueprints/jira_sync_retry.py`: rewritten onto the storage port — `list_tasks` (paged) +
+    in-memory filter (`jira_sync_error is not None or jira_issue_key is None`), re-sync via the new
+    `(slug, task_dto)` signature, stale-error clear via `record_jira_sync`, outcome by re-read. No
+    `db.session`/ORM, no new GSI. Auth upgraded `require_api_key()` → `require_project_perm(slug,
+    "write")` (consistent with every other task-mutating route; strengthens, never weakens).
+  - `tests/conftest.py`: removed the `test_jira_sync_integration`/`test_jira_sync_hook` deferral
+    branch. The ONLY remaining skip rule is the `postgres_only` fall-through for ORM-internal
+    `test_jira_*` tests (the merge-era `deferred` hook is fully retired).
+  - `tests/test_parity.py` (NEW cross-backend cases, named without a `test_jira_` prefix so they run
+    on BOTH backends): (a) create → response carries `jira_issue_key`; (b) complete → `transition_issue`
+    fires; (c) no-config AND disabled-config → ZERO Jira calls, create/complete still succeed;
+    (d) retry clears a prior `jira_sync_error`.
+  - `tests/test_jira_sync_integration.py`: fixed the one manual `sync_task_created(task)` call to the
+    `(slug, task_dto)` signature (un-deferral fallout).
+  - `tests/test_jira_retry_endpoint.py`: updated 5 mock side-effects to the `(slug, task_dto)`
+    signature and to persist via `record_jira_sync` (the endpoint now observes outcomes by re-reading
+    the storage port, not by mutating a now-frozen DTO).
+- **Tests:** `TEST_BACKENDS=postgres,dynamodb pytest -q` (ignoring the two pre-existing container-only
+  collection-error files `test_backfill_memberships.py`, `test_customauth_ratelimit.py`) →
+  **545 passed, 72 skipped, 0 failed**. The 72 skips are ALL the single reason
+  "postgres-only test (asserts on SQLAlchemy/ORM internals)" — ZERO `deferred`/"not wired into the
+  storage layer" skips remain (`-rs` confirmed). All 10 `test_parity.py::test_autosync_*` cases pass
+  on BOTH backends.
+- **Chain:** implementer → test-engineer → reviewer → security → data-reviewer → reliability-reviewer
+  (feature-runner embodied these). security: no secrets committed (tests use a runtime-generated
+  Fernet key + a fake token); retry rewrite REMOVED raw SQL (now storage-port only) — no f-string
+  SQL; token crypto boundary untouched; auth strengthened. data/reliability: adapter parity proven by
+  the both-backend parity suite; retry uses `list_tasks` + in-memory filter (no new GSI); best-effort
+  sync never raises; `record_jira_sync` keeps `version`/ETag + change-log unperturbed (D2), so the
+  post-sync re-read returns the same ETag.
+- **Decision:** synchronous outbound Jira HTTP on the create/complete hot path (enabled configs only);
+  async-offload is follow-up `6e7029d9-3805-448f-a41e-3c9912cddc9b`. Recorded in DECISIONS.md.
+- **Backlog:** claimed at start (status → in_progress, note); completed at end via
+  `scripts/agent_token.py` (`spec-keeper` Cognito user) with commit sha + test summary + proof_cmd.

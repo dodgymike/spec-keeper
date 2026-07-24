@@ -205,23 +205,19 @@ def project(client):
 def pytest_collection_modifyitems(config, items):
     """Merge-integration rules for the origin/main JIRA epic (#1) + relations-GET (#2).
 
-    The JIRA feature is SQLAlchemy-direct (Postgres-only) and is not yet adapted to
-    the switchable storage abstraction (see the merge commit's follow-up), so its
-    tests run on Postgres only. The relations-GET endpoint (origin #2) is now wired
-    to a cross-backend ``list_relations`` storage method (SLS-J2), so its tests run
-    on both backends.
+    The JIRA feature's isolated unit/integration tests reach into SQLAlchemy/ORM
+    internals (``db.session`` queries on ``Task``/``JiraProjectConfig``), so they
+    run on Postgres only. The relations-GET endpoint (origin #2) is now wired to a
+    cross-backend ``list_relations`` storage method (SLS-J2), and the JIRA
+    auto-sync lifecycle itself is now driven through ``current_app.storage``
+    (SLS-J5) — its cross-backend behaviour is proven in ``test_parity.py``. The
+    merge-era ``deferred`` skip hook has been fully retired: the ONLY skip-causing
+    rule left is the ``postgres_only`` fall-through for genuinely ORM-internal
+    ``test_jira_*`` tests.
     """
     for item in items:
         nid = item.nodeid
         name = getattr(item, "originalname", item.name)
-        # JIRA auto-sync was woven into the OLD SQLAlchemy task lifecycle; it is
-        # NOT wired into current_app.storage, so create/complete no longer trigger
-        # it. These lifecycle-integration tests are deferred with that adaptation.
-        if "test_jira_sync_integration" in nid or "test_jira_sync_hook" in nid:
-            item.add_marker(
-                pytest.mark.skip(reason="JIRA auto-sync on task lifecycle deferred: not wired into the storage layer")
-            )
-            continue
         # SLS-J1: both storage adapters now carry the Jira columns on TaskDTO, so
         # the two HTTP-level TestJiraFieldsInResponse methods (create/get render
         # jira_issue_key / jira_sync_error as null through the API) run cross-backend.

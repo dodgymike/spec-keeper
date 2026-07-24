@@ -19,7 +19,11 @@ from __future__ import annotations
 
 import threading
 import time
+from unittest.mock import patch
 
+import pytest
+
+from app.jira_client import JiraClientError
 from app.specmd import ParsedSpec, ParsedTask
 from app.storage.errors import Conflict
 
@@ -216,6 +220,142 @@ def test_expired_lease_reclaim(app, project):
     body = second.get_json()
     assert body["key"] == "R-1"
     assert body["owner"] == "bob"
+
+
+# --------------------------------------------------------------------------- #
+# Jira auto-sync lifecycle parity (SLS-J5)
+#
+# These go through the HTTP API + current_app.storage, so the parametrised
+# ``app`` fixture proves the best-effort Jira auto-sync (wired into create /
+# complete + the retry endpoint) behaves IDENTICALLY on BOTH backends. Jira HTTP
+# is mocked at the JiraClient boundary; the transition lookup is stubbed so the
+# assertions don't depend on a cached-transition warm-up call. Named without the
+# ``test_jira_`` prefix on purpose so conftest keeps them CROSS-BACKEND (the
+# postgres_only fall-through only tags genuinely ORM-internal ``test_jira_*``).
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def _jira_key(monkeypatch):
+    """Provide the Fernet key so the config's token can be encrypted at rest."""
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("JIRA_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+
+def _enable_jira(app, *, enabled=True, project_key="PAR"):
+    """Create the ``demo`` project's Jira config via the HTTP API (cross-backend).
+
+    The transition-cache warm-up (which would make a real outbound Jira call on an
+    enabled config) is mocked out — this test seeds nothing and stubs
+    ``find_transition`` directly where a transition id is needed."""
+    c = app.test_client()
+    with patch("app.blueprints.jira_config.warm_transition_cache"):
+        resp = c.post(f"{PROJ}/jira-config", json={
+            "base_url": "https://test.atlassian.net",
+            "email": "agent@example.com",
+            "api_token": "test-token-not-real",
+            "jira_project_key": project_key,
+            "enabled": enabled,
+        })
+    assert resp.status_code == 201, resp.get_json()
+
+
+def test_autosync_create_sets_issue_key_in_response(app, project, _jira_key):
+    """(a) Creating a task with a mocked JiraClient returns the ``jira_issue_key``
+    in the TaskOut RESPONSE on BOTH backends — proof the create hook fires through
+    the storage lifecycle and the response reflects the write-back."""
+    _enable_jira(app)
+    c = app.test_client()
+    with patch("app.jira_sync.JiraClient.create_issue",
+               return_value="PAR-1") as mock_create:
+        resp = c.post(BASE, json={"title": "synced task", "key": "JP-1"})
+
+    assert resp.status_code == 201, resp.get_json()
+    mock_create.assert_called_once_with(
+        project_key="PAR", summary="synced task", description="", issue_type="Task",
+    )
+    body = resp.get_json()
+    assert body["jira_issue_key"] == "PAR-1"   # in the RESPONSE, identically on both
+    assert body["jira_sync_error"] is None
+
+
+def test_autosync_complete_triggers_transition(app, project, _jira_key):
+    """(b) Completing a task transitions its Jira issue on BOTH backends."""
+    _enable_jira(app)
+    c = app.test_client()
+    with patch("app.jira_sync.JiraClient.create_issue", return_value="PAR-2"):
+        assert c.post(BASE, json={"title": "t", "key": "JP-2"}).status_code == 201
+
+    with patch("app.jira_sync.JiraClient.transition_issue") as mock_transition, \
+         patch("app.jira_sync.find_transition",
+               return_value={"id": "5", "name": "Done"}):
+        resp = c.post(f"{BASE}/JP-2/complete", json={"commit_sha": "abc123"})
+
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "done"
+    mock_transition.assert_called_once_with("PAR-2", "5")
+
+
+def test_autosync_noop_when_unconfigured(app, project, _jira_key):
+    """(c) With NO Jira config, create + complete succeed and make ZERO Jira calls
+    on BOTH backends (no outbound call, negligible added latency)."""
+    c = app.test_client()
+    with patch("app.jira_sync.JiraClient.create_issue") as mock_create, \
+         patch("app.jira_sync.JiraClient.transition_issue") as mock_transition:
+        r1 = c.post(BASE, json={"title": "plain", "key": "NP-1"})
+        assert r1.status_code == 201
+        assert r1.get_json()["jira_issue_key"] is None
+        r2 = c.post(f"{BASE}/NP-1/complete", json={"commit_sha": "z"})
+        assert r2.status_code == 200
+        assert r2.get_json()["status"] == "done"
+
+    mock_create.assert_not_called()      # zero outbound Jira calls
+    mock_transition.assert_not_called()
+
+
+def test_autosync_noop_when_disabled(app, project, _jira_key):
+    """(c) With a DISABLED Jira config, create + complete succeed and make ZERO
+    Jira calls on BOTH backends."""
+    _enable_jira(app, enabled=False)
+    c = app.test_client()
+    with patch("app.jira_sync.JiraClient.create_issue") as mock_create, \
+         patch("app.jira_sync.JiraClient.transition_issue") as mock_transition:
+        r1 = c.post(BASE, json={"title": "off", "key": "DP-1"})
+        assert r1.status_code == 201
+        assert r1.get_json()["jira_issue_key"] is None
+        r2 = c.post(f"{BASE}/DP-1/complete", json={"commit_sha": "z"})
+        assert r2.status_code == 200
+
+    mock_create.assert_not_called()
+    mock_transition.assert_not_called()
+
+
+def test_autosync_retry_clears_prior_error(app, project, _jira_key):
+    """(d) The retry endpoint re-runs sync through the storage port and clears a
+    prior ``jira_sync_error`` on BOTH backends."""
+    _enable_jira(app)
+    c = app.test_client()
+
+    # Create with Jira down -> error recorded, no issue key (best-effort; 201).
+    with patch("app.jira_sync.JiraClient.create_issue",
+               side_effect=JiraClientError(503, "down", "POST", "http://x")):
+        r = c.post(BASE, json={"title": "retry me", "key": "RP-1"})
+        assert r.status_code == 201
+        assert r.get_json()["jira_issue_key"] is None
+        assert r.get_json()["jira_sync_error"] is not None
+
+    # Retry with Jira up -> the error is cleared and the issue key is set.
+    with patch("app.jira_sync.JiraClient.create_issue",
+               return_value="PAR-10") as mock_create:
+        resp = c.post(f"{PROJ}/jira/sync")
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()
+        assert data["synced"] >= 1
+        assert data["failed"] == 0
+        mock_create.assert_called()
+
+    got = c.get(f"{BASE}/RP-1").get_json()
+    assert got["jira_issue_key"] == "PAR-10"
+    assert got["jira_sync_error"] is None
 
 
 def _tagged_spec():

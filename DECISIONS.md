@@ -582,3 +582,25 @@ shared sync signature changed, the retry endpoint's two call sites (`sync_task_c
 `sync_task_completed(task)`) now mismatch the new `(slug, task_dto)` signature — a known temporary
 inconsistency handed to SLS-J5 (its tests mock the sync functions, so they stay green). SLS-J5 owns
 moving that endpoint to the storage port and fixing the call sites.
+
+## SLS-J5 — Jira auto-sync wired into the create/complete lifecycle (both backends)
+
+**Convergence.** The best-effort Jira sync (SLS-J4's `sync_task_created(slug, task_dto)` /
+`sync_task_completed(slug, task_dto)`) is now called from the task blueprints after a successful
+`storage.create_task` / `storage.complete_task`, so auto-sync fires through the storage lifecycle on
+BOTH backends. The blueprint re-reads the task after sync so the create/complete RESPONSE reflects
+any `jira_issue_key` write-back (record_jira_sync does not bump `version`, so the ETag is unchanged —
+D2 preserved). The manual retry endpoint (`jira_sync_retry.py`) was rewritten off the ORM onto the
+storage port (`list_tasks` + in-memory filter, no new GSI), and its two mismatched call sites were
+fixed to the `(slug, task_dto)` signature. This retires the last merge-era `deferred` conftest skips:
+the ONLY remaining skip rule is the `postgres_only` fall-through for genuinely ORM-internal
+`test_jira_*` tests.
+
+**DECISION — Jira sync is a SYNCHRONOUS outbound HTTP call on the create/complete hot path.** When a
+project has an ENABLED Jira config, task create/complete now make a blocking outbound HTTP call to
+Jira Cloud inside the request. This is accepted for now: it is the simplest design that gives
+correctness + backend parity, and it adds tail latency (and couples request success timing to Jira
+availability) ONLY when Jira is enabled — a project with no/disabled config pays just one cheap
+`get_jira_config` read and makes NO outbound call. The async-offload alternative (push the sync onto
+SQS/EventBridge so the request returns immediately) is deliberately OUT OF SCOPE here and is already
+filed as follow-up task `6e7029d9-3805-448f-a41e-3c9912cddc9b`; do not solve async in SLS-J5.

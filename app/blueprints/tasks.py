@@ -17,6 +17,7 @@ from ..helpers import (
     require_project_perm,
 )
 from ..idempotency import idempotency_key_from_request
+from ..jira_sync import sync_task_completed, sync_task_created
 from ..schemas import (
     ClaimNextIn,
     CommitIn,
@@ -54,7 +55,14 @@ class TasksCollection(MethodView):
     def post(self, data, slug):
         """Create a task."""
         require_project_perm(slug, "write")
-        return current_app.storage.create_task(slug, data)
+        task = current_app.storage.create_task(slug, data)
+        # Best-effort Jira auto-sync (never raises). No-op — and NO outbound Jira
+        # call — when the project has no/disabled Jira config (a single cheap
+        # get_jira_config singleton read). Re-read so the response reflects any
+        # jira_issue_key / jira_sync_error the sync wrote (record_jira_sync does
+        # not bump version, so the ETag is unchanged).
+        sync_task_created(slug, task)
+        return current_app.storage.get_task(slug, task.public_id)
 
 
 @blp.route("/claim-next")
@@ -125,6 +133,12 @@ class TaskComplete(MethodView):
         task = current_app.storage.complete_task(
             slug, ident, data, expected_version_from_request()
         )
+        # Best-effort Jira auto-sync (never raises); no-op with NO outbound Jira
+        # call when Jira is unconfigured/disabled. Re-read so the response mirrors
+        # any jira_issue_key / jira_sync_error write (version — hence ETag —
+        # unchanged, per record_jira_sync's D2 contract).
+        sync_task_completed(slug, task)
+        task = current_app.storage.get_task(slug, task.public_id)
         return task, 200, etag_headers(task)
 
 

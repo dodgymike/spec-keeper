@@ -826,9 +826,12 @@ fingerprints (documented as a follow-up, not built).
 ## Jira integration (per-project, optional)
 
 The server can push task lifecycle events to Jira Cloud. Sync fires automatically on task create
-(creates a Jira issue) and task complete (transitions the issue to "Done"). It is best-effort:
-failures never block the API response — they are stored on `task.jira_sync_error` and can be
-retried.
+(creates a Jira issue) and task complete (transitions the issue to "Done"), through the storage
+lifecycle on **both backends** (Postgres and DynamoDB). It is best-effort: failures never block the
+API response — they are stored on `task.jira_sync_error` and can be retried. When a project has no
+enabled Jira config the sync is an immediate no-op (a single cheap config read, no outbound Jira
+call), so uninvolved projects pay negligible added latency. On success the create/complete response
+already carries the resolved `jira_issue_key`.
 
 ### Configure Jira for a project
 
@@ -900,7 +903,9 @@ Finds all tasks in the project that have `jira_sync_error` set OR are missing `j
 - Has `jira_issue_key` + status `done` → calls `sync_task_completed` (transitions to Done).
 - Has `jira_issue_key` + status not `done` → clears the stale error (nothing to retry yet).
 
-Returns 404 if the project has no enabled Jira config.
+The retry endpoint runs through the storage abstraction (enumerates via `list_tasks` + an in-memory
+filter, re-syncs via the storage port), so it behaves identically on both backends. Returns 404 if
+the project has no enabled Jira config.
 
 **Response fields:**
 | Field | Type | Notes |

@@ -76,10 +76,15 @@ class TestJiraSyncRetrySuccess:
             jira_issue_key=None,
         )
 
+        # SLS-J5: the endpoint calls sync with the ``(slug, task_dto)`` signature
+        # and observes the outcome by RE-READING through the storage port, so the
+        # mock persists its effect via ``record_jira_sync`` (mutating the frozen
+        # DTO would neither stick nor be observed).
         with patch("app.blueprints.jira_sync_retry.sync_task_created") as mock_sync:
-            def clear_error(task):
-                task.jira_issue_key = "TEST-1"
-                task.jira_sync_error = None
+            def clear_error(slug, task):
+                from flask import current_app
+                current_app.storage.record_jira_sync(
+                    slug, task.public_id, issue_key="TEST-1")
 
             mock_sync.side_effect = clear_error
 
@@ -99,8 +104,9 @@ class TestJiraSyncRetrySuccess:
         )
 
         with patch("app.blueprints.jira_sync_retry.sync_task_completed") as mock_sync:
-            def clear_error(task):
-                task.jira_sync_error = None
+            def clear_error(slug, task):
+                from flask import current_app
+                current_app.storage.record_jira_sync(slug, task.public_id)
 
             mock_sync.side_effect = clear_error
 
@@ -122,9 +128,12 @@ class TestJiraSyncRetryFailure:
         )
 
         with patch("app.blueprints.jira_sync_retry.sync_task_created") as mock_sync:
-            # sync_task_created is best-effort and sets the error itself
-            def keep_error(task):
-                task.jira_sync_error = "sync_task_created failed: still broken"
+            # sync_task_created is best-effort and records the error itself
+            def keep_error(slug, task):
+                from flask import current_app
+                current_app.storage.record_jira_sync(
+                    slug, task.public_id,
+                    error="sync_task_created failed: still broken")
 
             mock_sync.side_effect = keep_error
 
@@ -150,13 +159,15 @@ class TestJiraSyncRetryFailure:
         call_count = [0]
 
         with patch("app.blueprints.jira_sync_retry.sync_task_created") as mock_sync:
-            def alternate(task):
+            def alternate(slug, task):
+                from flask import current_app
                 call_count[0] += 1
                 if call_count[0] == 1:
-                    task.jira_issue_key = "TEST-2"
-                    task.jira_sync_error = None
+                    current_app.storage.record_jira_sync(
+                        slug, task.public_id, issue_key="TEST-2")
                 else:
-                    task.jira_sync_error = "still broken"
+                    current_app.storage.record_jira_sync(
+                        slug, task.public_id, error="still broken")
 
             mock_sync.side_effect = alternate
 
@@ -215,9 +226,10 @@ class TestJiraSyncRetryNoEligible:
         )
 
         with patch("app.blueprints.jira_sync_retry.sync_task_created") as mock_sync:
-            def create_issue(task):
-                task.jira_issue_key = "TEST-10"
-                task.jira_sync_error = None
+            def create_issue(slug, task):
+                from flask import current_app
+                current_app.storage.record_jira_sync(
+                    slug, task.public_id, issue_key="TEST-10")
 
             mock_sync.side_effect = create_issue
 
