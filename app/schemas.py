@@ -187,6 +187,11 @@ class TaskOut(Schema):
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
     completed_at = fields.DateTime(allow_none=True, dump_only=True)
+    # JIRA-12 (merged from origin/main): linked Jira issue + last sync error,
+    # read-only on the task. Postgres-backed (columns on the SQLAlchemy Task model);
+    # null on the DynamoDB backend until the Jira feature is adapted to storage.
+    jira_issue_key = fields.Str(allow_none=True, dump_only=True, metadata={"description": "Linked Jira issue key, e.g. PROJ-123."})
+    jira_sync_error = fields.Str(allow_none=True, dump_only=True, metadata={"description": "Last Jira sync error message, if any."})
 
 
 class TaskIn(Schema):
