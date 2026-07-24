@@ -819,3 +819,44 @@ class AdminRejectIn(Schema):
         load_default="", allow_none=True,
         metadata={"description": "Optional free-text reason recorded on the rejected row."},
     )
+
+
+
+# --- JIRA epic + relations (merged from origin/main #1/#2) ---
+class RelationOut(Schema):
+    """One edge from a task's perspective — direction tells you whether this task
+    is the source (outgoing) or the target (incoming) of the relation."""
+    direction = fields.Str()  # "outgoing" | "incoming"
+    kind = fields.Str()
+    task = fields.Str(metadata={"description": "Display id of the OTHER task in this edge."})
+    created_at = fields.DateTime(dump_only=True)
+
+
+class JiraConfigIn(Schema):
+    base_url = fields.Str(required=True, metadata={"description": "Jira instance base URL, e.g. https://myco.atlassian.net"})
+    email = fields.Str(required=True, metadata={"description": "Jira user email for API auth."})
+    api_token = fields.Str(required=True, metadata={"description": "Jira API token (write-only, encrypted at rest)."})
+    jira_project_key = fields.Str(required=True, metadata={"description": "Jira project key, e.g. PROJ."})
+    enabled = fields.Bool(load_default=False)
+
+
+class JiraConfigUpdate(Schema):
+    base_url = fields.Str(metadata={"description": "Jira instance base URL."})
+    email = fields.Str(metadata={"description": "Jira user email."})
+    api_token = fields.Str(metadata={"description": "New API token (write-only, encrypted at rest)."})
+    jira_project_key = fields.Str(metadata={"description": "Jira project key."})
+    enabled = fields.Bool()
+
+
+class JiraConfigOut(Schema):
+    base_url = fields.Str()
+    email = fields.Str()
+    jira_project_key = fields.Str()
+    enabled = fields.Bool()
+    has_token = fields.Bool(metadata={"description": "Whether an API token is configured."})
+    updated_at = fields.DateTime(dump_only=True)
+
+
+class JiraSyncRetryOut(Schema):
+    synced = fields.Int(metadata={"description": "Tasks where sync succeeded (error cleared)."})
+    failed = fields.Int(metadata={"description": "Tasks where sync still failed."})

@@ -39,6 +39,8 @@ def create_app(config_object: type = Config) -> Flask:
     from .blueprints.chains import blp as chains_blp  # LOG-3
     from .blueprints.enroll import blp as enroll_blp  # ONBOARD-3 public redeem
     from .blueprints.epics import blp as epics_blp
+    from .blueprints.jira_config import blp as jira_config_blp  # JIRA-5
+    from .blueprints.jira_sync_retry import blp as jira_sync_retry_blp  # JIRA-11
     from .blueprints.log import blp as log_blp
     from .blueprints.members import blp as members_blp  # ISO-3
     from .blueprints.ports import blp as ports_blp
@@ -59,6 +61,8 @@ def create_app(config_object: type = Config) -> Flask:
     api.register_blueprint(admin_blp)
     api.register_blueprint(signup_blp)  # HA-7 public signup queue
     api.register_blueprint(enroll_blp)  # ONBOARD-3 public agent-enrollment redeem
+    api.register_blueprint(jira_config_blp)  # JIRA-5
+    api.register_blueprint(jira_sync_retry_blp)  # JIRA-11
 
     _register_cli(app)
     return app

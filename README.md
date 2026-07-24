@@ -119,8 +119,46 @@ same HA-7 guards) plus, for preview/redeem, the single-use-token semantics descr
   auth), decoupled behind SQS to an async worker Lambda, plus an admin bridge
   (`/api/v1/admin/signups*`) to list/approve/reject requests; approval synchronously mints an
   HA-2 invite and emails the join link. See "Public signup queue" below.
+- **Jira sync** — optional push-only integration; creates Jira issues on task creation, transitions
+  to Done on task completion. Per-project config with Fernet-encrypted API tokens, transition cache,
+  and a manual retry endpoint for failures.
 - **Alembic migrations**, **OpenAPI 3** + Swagger UI, **Docker** compose, and a **scheduled daily
   backup** (`scripts/backup.sh` via a launchd LaunchAgent).
+
+## Jira Sync
+
+Optional push-only integration: the Spec Server creates Jira issues on task creation and
+transitions them to "Done" on task completion. Sync is **best-effort** — a Jira failure never
+blocks the API response; the error is stored on the task and can be retried later.
+
+**Key design points:**
+
+- **Per-project DB-backed config** — each project stores its Jira connection (base URL, email,
+  encrypted API token, Jira project key, enabled flag) in the `jira_project_config` table; there
+  is no global env-var-based config.
+- **Encrypted tokens** — API tokens are Fernet-encrypted at rest using the
+  `JIRA_TOKEN_ENCRYPTION_KEY` env var; the token is decrypted in-memory only at call time.
+- **Transition cache** — Jira project statuses are fetched and cached in a JSONB column on config
+  save (when enabled). A "refresh once before failing" strategy handles Jira workflow changes
+  without hammering the API.
+- **Trigger scope** — sync fires on task create and task complete only (not every status change).
+  Extending to all status transitions is tracked as a deferred follow-up (JIRA-14).
+- **Retry** — `POST /projects/{slug}/jira/sync` retries all tasks with a sync error or missing
+  Jira issue key.
+
+Task API responses include read-only `jira_issue_key` and `jira_sync_error` fields when present.
+
+```bash
+# Configure Jira for a project:
+curl -s -H 'Content-Type: application/json' \
+  -X POST $B/projects/corsearch/jira-config \
+  -d '{"base_url":"https://myco.atlassian.net","email":"bot@co.com","api_token":"...","jira_project_key":"PROJ","enabled":true}'
+
+# Retry failed syncs:
+curl -s -X POST $B/projects/corsearch/jira/sync
+```
+
+Full endpoint recipes in **`AGENTS_API.md`**.
 
 ## Architecture
 
@@ -138,6 +176,11 @@ same HA-7 guards) plus, for preview/redeem, the single-use-token semantics descr
 | Signup queue boto3 glue (signups table, SQS enqueue, SES send) | `app/signup_aws.py` |
 | Per-IP fixed-window rate limiter for the public signup routes | `app/signup_ratelimit.py` |
 | REST blueprints (projects · agents · epics · tasks · reservations · ports · log · chains · admin · signup · enroll) | `app/blueprints/` |
+| Jira sync (best-effort create/transition, never raises) | `app/jira_sync.py` |
+| Jira Cloud REST client (create issue, transition) | `app/jira_client.py` |
+| Jira transition cache (warmup + refresh-once lookup) | `app/jira_transitions.py` |
+| Fernet encryption helper (token at rest) | `app/crypto.py` |
+| REST blueprints (projects · agents · epics · tasks · reservations · ports · log · chains · jira) | `app/blueprints/` |
 | Alembic migrations (run on boot) | `migrations/` |
 | Tests (concurrency + round-trip + idempotency) | `tests/` |
 | Backup / migrate / schedule scripts | `scripts/` |
@@ -160,9 +203,10 @@ The DynamoDB adapter reads its own settings straight from `os.environ` (not `app
 a drop-in choice with zero effect on the default Postgres path.
 
 Key tables: `projects`, `agents` (project-scoped), `epics`, `tasks` (status enum, priority,
-component, `owner`, `version`, lease, `section`), `tags`, `task_relations`, `commit_refs`,
-`counters` + `reservations` (atomic numbering), `leases` (one active per task), `events`,
-`decisions`, `chain_runs` + `chain_steps`, `idempotency_keys`.
+component, `owner`, `version`, lease, `section`, `jira_issue_key`, `jira_sync_error`), `tags`,
+`task_relations`, `commit_refs`, `counters` + `reservations` (atomic numbering), `leases` (one
+active per task), `events`, `decisions`, `chain_runs` + `chain_steps`, `idempotency_keys`,
+`jira_project_config` (per-project Jira credentials + transition cache).
 
 ## Running the tests
 
@@ -370,6 +414,8 @@ IAM scoped to exact ARNs, reusing the HA-6 SES send policy + configuration set. 
 
 **Deferred, not shipped:** an S3 WORM audit bucket and peppered ip/ua fingerprints — documented as
 a follow-up, tracked separately from this backend + infra slice.
+| `API_KEYS` | _(empty)_ | Comma-separated bearer tokens. Empty ⇒ auth off (local-only). |
+| `JIRA_TOKEN_ENCRYPTION_KEY` | _(empty)_ | Fernet key for encrypting Jira API tokens at rest. Required only if Jira sync is used. Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 
 ## Backups
 
@@ -391,6 +437,10 @@ idempotency, pagination), `DOGFOOD` — this server now hosts **its own** backlo
 (pluggable storage: a DynamoDB adapter with the same atomic-claim/atomic-reservation/
 optimistic-lock guarantees as Postgres, behind `STORAGE_BACKEND`). The current backlog lives on
 the running server (project slug `spec-server`); `SPEC.md` is its readable mirror.
+All planned epics are shipped and tested (**142 passing**): MVP, `PORT` (SPEC.md round-trip), `LOG`
+(events + decisions + chain tracking), `HARDEN` (Alembic, lease reaper, idempotency, pagination),
+`DOGFOOD` (self-hosting), and `JIRA` (push-only Jira Cloud sync). The current backlog lives on the
+running server (project slug `spec-server`); `SPEC.md` is its readable mirror.
 
 This repo is itself developed with the SPEC-driven multi-agent workflow it hosts — see `CLAUDE.md`
 and `.claude/agents/`. To adopt it in another repo, see `INTEGRATION_GUIDE.md`.

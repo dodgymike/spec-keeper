@@ -252,6 +252,10 @@ class Task(Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column()
 
+    # Jira integration (JIRA-7): nullable columns for bi-directional sync
+    jira_issue_key: Mapped[str | None] = mapped_column(sa.Text)  # e.g. "PROJ-123"
+    jira_sync_error: Mapped[str | None] = mapped_column(sa.Text)  # last sync error message
+
     project: Mapped[Project] = relationship(back_populates="tasks")
     epic: Mapped[Epic | None] = relationship(back_populates="tasks")
     tags: Mapped[list["Tag"]] = relationship(
@@ -263,6 +267,20 @@ class Task(Base):
     notes: Mapped[list["TaskNote"]] = relationship(
         back_populates="task", cascade="all, delete-orphan",
         order_by="TaskNote.created_at",
+    )
+    outgoing_relations: Mapped[list["TaskRelation"]] = relationship(
+        foreign_keys="TaskRelation.src_task_id",
+        back_populates="src_task", cascade="all, delete-orphan",
+        order_by="TaskRelation.created_at",
+    )
+    incoming_relations: Mapped[list["TaskRelation"]] = relationship(
+        foreign_keys="TaskRelation.dst_task_id",
+        back_populates="dst_task", cascade="all, delete-orphan",
+        order_by="TaskRelation.created_at",
+    )
+    chain_runs: Mapped[list["ChainRun"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan",
+        order_by="ChainRun.started_at",
     )
 
     @property
@@ -316,6 +334,13 @@ class TaskRelation(Base):
         sa.Enum(RelationKind, name="relation_kind"), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
+
+    src_task: Mapped["Task"] = relationship(
+        foreign_keys=[src_task_id], back_populates="outgoing_relations"
+    )
+    dst_task: Mapped["Task"] = relationship(
+        foreign_keys=[dst_task_id], back_populates="incoming_relations"
+    )
 
 
 class CommitRef(Base):
@@ -520,6 +545,7 @@ class ChainRun(Base):
         cascade="all, delete-orphan",
         order_by="ChainStep.step_order",
     )
+    task: Mapped["Task"] = relationship(back_populates="chain_runs")
 
 
 class ChainStep(Base):
@@ -545,3 +571,32 @@ class ChainStep(Base):
     status: Mapped[str] = mapped_column(sa.Text, default="pending", nullable=False)
     skip_justification: Mapped[str | None] = mapped_column(sa.Text)
     output_ref: Mapped[str | None] = mapped_column(sa.Text)
+
+
+# --------------------------------------------------------------------------- #
+# Jira integration configuration (per-project)
+# --------------------------------------------------------------------------- #
+class JiraProjectConfig(Base):
+    """Per-project Jira integration settings. The api_token_encrypted column
+    stores an encrypted token (encryption logic added by JIRA-2)."""
+
+    __tablename__ = "jira_project_config"
+    __table_args__ = (
+        UniqueConstraint("project_id", name="uq_jira_config_project"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    base_url: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    email: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    api_token_encrypted: Mapped[str | None] = mapped_column(sa.Text)
+    jira_project_key: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
+    cached_transitions: Mapped[dict | None] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(
+        default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    project: Mapped[Project] = relationship()
