@@ -880,3 +880,36 @@ to the server's `/events` endpoint.
   flipped `done`, else the server flip is PENDING and a coordinator reconciles from this entry.
 - **NOT deployed** — a redeploy (rebuild `build/lambda.zip` from this lock, ship) is a separate
   coordinated step run by the deploy-coordinator after merge.
+
+## 2026-07-24 — SLS-J1: Jira-aware TaskDTO — both adapters populate jira_issue_key / jira_sync_error
+
+- **Task (one sentence):** make both storage adapters surface `jira_issue_key` / `jira_sync_error`
+  through the backend-neutral `TaskDTO`, so `TaskOut`'s dump-only Jira fields render (as null by
+  default) on BOTH Postgres and DynamoDB instead of always null-because-absent.
+- **Files:** `app/storage/dto.py` (two new `TaskDTO` fields, defaulted `None`), `app/storage/postgres.py`
+  (`_task_dto` reads `t.jira_issue_key` / `t.jira_sync_error`), `app/storage/dynamo.py` (`_task_dto`
+  reads `base.get(...)`; `create_task` seeds both attributes to `None`), `tests/conftest.py`
+  (removed the `TestJiraFieldsInResponse` "storage DTO not yet Jira-aware" skip; the two HTTP
+  response-schema methods now `continue` before the `test_jira_` → `postgres_only` fall-through).
+- **Scope:** DTO + the two `_task_dto` builders + `create_task` seeding + the conftest deferral only.
+  jira_sync.py / jira_config.py / relations untouched; no sync wired (that is SLS-J2..J5).
+- **Parity:** identical observable behaviour on both backends — a create/get returns the two fields
+  as `null` (present, not missing, not error) on Postgres AND DynamoDB.
+- **Proof (verbatim), `TEST_BACKENDS=postgres,dynamodb`, `-k "TestJiraFieldsInResponse or jira_schema"`:**
+  `9 passed, 5 skipped, 577 deselected` — the two response-schema methods
+  (`test_create_task_response_includes_jira_fields`, `test_get_task_response_includes_jira_fields`)
+  PASSED on both `[postgres]` and `[dynamodb]`; `test_get_task_with_jira_values_set` (ORM-seeding) +
+  DumpOnly + OpenAPI stay `postgres_only` (SKIPPED on `[dynamodb]`). Regression sweep
+  `test_parity.py test_tasks_api.py test_members_parity.py` on both backends: `46 passed, 6 skipped`.
+- **Conftest deviation:** the task said "just remove the branch", but the `test_jira_` fall-through
+  matches the whole file's nodeid, so a pure removal keeps the two response methods `postgres_only`
+  (SKIPPED on DynamoDB) — contradicting the task's own both-backend proof. Added a targeted
+  `continue` for the two response-method names so they run cross-backend (see DECISIONS.md).
+- **Chain:** feature-runner embodied implementer → test-engineer → reviewer → security →
+  data-reviewer → reliability-reviewer. reviewer: exactly one task, scope respected, keyword-only
+  `TaskDTO` construction (new defaulted fields safe), no positional builds. security: no secrets;
+  Jira fields stay dump-only (TaskIn rejects them 422 — TestJiraFieldsDumpOnly still green); no SQL/
+  expression injection surface added. data/reliability reviewers: adapter parity holds — both
+  adapters carry the columns, DynamoDB seeds the attribute on create so reads never KeyError, and the
+  change is read-surface-only (no lease/version/atomicity path touched).
+- **NOT deployed** — source-only change.

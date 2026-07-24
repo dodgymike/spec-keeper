@@ -91,6 +91,8 @@ class TaskDTO:
     lease_expires_at: datetime | None
     position: float
     version: int
+    jira_issue_key: str | None = None
+    jira_sync_error: str | None = None
     tags: list[str] = field(default_factory=list)
     commits: list[CommitRefDTO] = field(default_factory=list)
     notes: list[NoteDTO] = field(default_factory=list)

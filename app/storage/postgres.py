@@ -128,6 +128,7 @@ def _task_dto(t: Task) -> TaskDTO:
         component=t.component, proof_cmd=t.proof_cmd, status_note=t.status_note,
         section=t.section, owner=t.owner, lease_expires_at=t.lease_expires_at,
         position=t.position, version=t.version,
+        jira_issue_key=t.jira_issue_key, jira_sync_error=t.jira_sync_error,
         tags=[tag.key for tag in t.tags],
         commits=[_commit_dto(c) for c in t.commits],
         notes=[_note_dto(n) for n in t.notes],

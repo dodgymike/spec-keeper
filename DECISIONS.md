@@ -449,3 +449,24 @@ comment: it does not affect pip's parsing or the `--generate-hashes` integrity (
 platform `pip download` resolves with `PIP_EXIT=0`), and the resolved package section is left
 byte-for-byte as pip-compile emitted it — so this stays a genuine pip-compile artifact while
 preserving the INFRA-7 pin rationale the task explicitly asked to keep.
+
+## 2026-07-24 — SLS-J1: cross-backend Jira TaskDTO + narrowing the jira test-deferral
+
+**Decision.** Add `jira_issue_key` / `jira_sync_error` to the backend-neutral `TaskDTO` and have
+BOTH adapters populate them (Postgres reads the ORM columns; DynamoDB reads the item attributes and
+`create_task` seeds both to `None`). In `tests/conftest.py`, remove the blanket
+`TestJiraFieldsInResponse` skip and let the two HTTP-level response-schema methods run cross-backend,
+while `test_get_task_with_jira_values_set` (which seeds values via `db.session`) stays Postgres-only.
+
+**Why the conftest change is more than a pure branch removal.** The task specified "just remove the
+`TestJiraFieldsInResponse` deferral branch", but the surviving `if "test_jira_" in nid` fall-through
+matches on the *nodeid*, and every test in `tests/test_jira_schema_fields.py` has `test_jira_` in its
+path — so a pure removal leaves the two response methods marked `postgres_only` and SKIPPED on
+DynamoDB (empirically confirmed: 7 passed / 7 skipped). That directly contradicts the task's own
+proof ("`TestJiraFieldsInResponse` green on BOTH backends"). The minimal fix that satisfies the
+proof is an explicit `continue` for the two response-schema method names *before* the fall-through,
+so they run cross-backend while the ORM-seeding test still falls through to `postgres_only`.
+
+**Consequence.** `TestJiraFieldsDumpOnly` and `TestJiraFieldsInOpenAPI` remain Postgres-only (schema/
+OpenAPI-level, backend-neutral, unchanged from before) — left untouched to keep the change minimal
+and scoped to exactly the two methods the task named.

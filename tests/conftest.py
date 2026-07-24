@@ -229,13 +229,13 @@ def pytest_collection_modifyitems(config, items):
                 pytest.mark.skip(reason="JIRA auto-sync on task lifecycle deferred: not wired into the storage layer")
             )
             continue
-        # JIRA-12 jira fields on the task RESPONSE need the storage DTO to carry
-        # the Jira columns (currently only on the SQLAlchemy model) — deferred with
-        # the same adaptation. The schema-level OpenAPI test still runs + passes.
-        if "TestJiraFieldsInResponse" in nid:
-            item.add_marker(
-                pytest.mark.skip(reason="JIRA fields on task response deferred: storage DTO not yet Jira-aware")
-            )
+        # SLS-J1: both storage adapters now carry the Jira columns on TaskDTO, so
+        # the two HTTP-level TestJiraFieldsInResponse methods (create/get render
+        # jira_issue_key / jira_sync_error as null through the API) run cross-backend.
+        # test_get_task_with_jira_values_set seeds the values via the ORM
+        # (db.session) so it stays Postgres-only via the fall-through below.
+        if name in ("test_create_task_response_includes_jira_fields",
+                    "test_get_task_response_includes_jira_fields"):
             continue
         # The remaining JIRA tests exercise the feature in isolation (client,
         # transitions, config/retry endpoints, crypto, models) — Postgres-only.
