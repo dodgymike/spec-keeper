@@ -2,6 +2,11 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import * as cognito from "../auth/cognito";
 import * as session from "../auth/session";
 import { friendlyError } from "../auth/errors";
+import {
+  clearRememberedEmail,
+  getRememberedEmail,
+  setRememberedEmail,
+} from "../lib/rememberedEmail";
 import "./LoginPage.css";
 
 type Mode = "passkey" | "otp-email" | "otp-code";
@@ -25,7 +30,12 @@ const STEP_HEADINGS: Record<Mode, string> = {
  */
 export function LoginPage() {
   const [mode, setMode] = useState<Mode>("passkey");
-  const [email, setEmail] = useState("");
+  // `remembered` is the email persisted from a prior opt-in sign-in (null when
+  // none). When set, the passkey step is shown alone for that address; the
+  // email input + "Remember me" checkbox are the FRESH-entry state instead.
+  const [remembered, setRemembered] = useState<string | null>(() => getRememberedEmail());
+  const [email, setEmail] = useState(() => getRememberedEmail() ?? "");
+  const [remember, setRemember] = useState(false);
   const [code, setCode] = useState("");
   const [otpSession, setOtpSession] = useState("");
   const [busy, setBusy] = useState(false);
@@ -34,13 +44,38 @@ export function LoginPage() {
 
   const headingRef = useRef<HTMLHeadingElement>(null);
 
+  // The returning-visitor shortcut: a remembered email collapses the passkey
+  // step to just its button (+ "Change email"). Only in `passkey` mode — the
+  // OTP fallback screens always show their own inputs.
+  const showRemembered = remembered !== null && mode === "passkey";
+
   useEffect(() => {
     headingRef.current?.focus();
   }, [mode]);
 
+  // Forget the remembered email and return to the normal entry state (input +
+  // checkbox). The "Change email" / "Not you?" opt-out — a shared device must
+  // be able to fully clear one operator's email before the next signs in.
+  function handleChangeEmail() {
+    clearRememberedEmail();
+    setRemembered(null);
+    setEmail("");
+    setRemember(false);
+    setError("");
+    setStatus("");
+  }
+
   async function handlePasskeySignIn(event: FormEvent) {
     event.preventDefault();
     if (busy) return;
+    // Opt-in persistence: only when the user ticked "Remember me" on the fresh
+    // entry form. In the remembered state the email is already stored, so there
+    // is no checkbox and nothing new to persist.
+    if (remember) {
+      const trimmed = email.trim();
+      setRememberedEmail(trimmed);
+      setRemembered(trimmed || null);
+    }
     setError("");
     setBusy(true);
     setStatus("Follow your device's prompt…");
@@ -123,7 +158,25 @@ export function LoginPage() {
           </p>
         ) : null}
 
-        {mode === "passkey" ? (
+        {mode === "passkey" && showRemembered ? (
+          <form onSubmit={(event) => void handlePasskeySignIn(event)}>
+            <p className="login__remembered" aria-live="polite">
+              Signing in as <span className="login__remembered-email">{remembered}</span>
+            </p>
+            <button type="submit" className="login__button" aria-busy={busy}>
+              Sign in with a passkey
+            </button>
+            <button
+              type="button"
+              className="login__link-button"
+              onClick={handleChangeEmail}
+            >
+              Change email
+            </button>
+          </form>
+        ) : null}
+
+        {mode === "passkey" && !showRemembered ? (
           <form onSubmit={(event) => void handlePasskeySignIn(event)}>
             <label htmlFor="login-email" className="login__label">
               Email
@@ -137,6 +190,18 @@ export function LoginPage() {
               value={email}
               onChange={(event) => setEmail(event.target.value)}
             />
+            <div className="login__remember">
+              <input
+                id="login-remember"
+                type="checkbox"
+                className="login__checkbox"
+                checked={remember}
+                onChange={(event) => setRemember(event.target.checked)}
+              />
+              <label htmlFor="login-remember" className="login__remember-label">
+                Remember my email on this device
+              </label>
+            </div>
             <button type="submit" className="login__button" aria-busy={busy}>
               Sign in with a passkey
             </button>
@@ -185,7 +250,7 @@ export function LoginPage() {
           </form>
         ) : null}
 
-        {mode !== "otp-code" ? (
+        {mode !== "otp-code" && !showRemembered ? (
           <button
             type="button"
             className="login__link-button"
