@@ -1101,12 +1101,24 @@ class DynamoBackend:
         src = self._get_task_base(slug, ident, consistent=True)
         dst = self._get_task_base(slug, target, consistent=True)
         kind_enum = RelationKind(kind)
+        created = _now_iso()
         rel = {
             "PK": K.pk(slug),
             "SK": K.relation_sk(src["public_id"], kind_enum.value, dst["public_id"]),
             "type": "relation", "kind": kind_enum.value,
             "src": src["public_id"], "dst": dst["public_id"],
-            "created_at": _now_iso(),
+            "created_at": created,
+        }
+        # D1 (SLS-J2): a MIRROR item under the destination task's child collection,
+        # written in the SAME TransactWriteItems as the forward edge, so an
+        # incoming-edge query is a begins_with range read (no new GSI). It carries
+        # the same fields so list_relations can render the edge from either end.
+        rel_in = {
+            "PK": K.pk(slug),
+            "SK": K.relation_in_sk(dst["public_id"], kind_enum.value, src["public_id"]),
+            "type": "relation_in", "kind": kind_enum.value,
+            "src": src["public_id"], "dst": dst["public_id"],
+            "created_at": created,
         }
         src_disp = src.get("key") or src["public_id"]
         dst_disp = dst.get("key") or dst["public_id"]
@@ -1127,15 +1139,56 @@ class DynamoBackend:
             self._apply_task_gsi(dst)
             self._transact([
                 (rel, None, None, None),
+                (rel_in, None, None, None),
                 (dst, "#v = :expected", {"#v": "version"}, {":expected": cur_v}),
                 (change, None, None, None),
             ])
         else:
             self._transact([
                 (rel, None, None, None),
+                (rel_in, None, None, None),
                 (change, None, None, None),
             ])
         return f"{src_disp} {kind_enum.value} {dst_disp}"
+
+    def list_relations(self, slug: str, ident: str) -> list[dict]:
+        self._project_item(slug)
+        task = self._get_task_base(slug, ident, consistent=True)
+        pubid = task["public_id"]
+        out: list[dict] = []
+        # Outgoing edges: forward REL items under this task; the OTHER end is dst.
+        outgoing = self._query(
+            KeyConditionExpression=Key("PK").eq(K.pk(slug))
+            & Key("SK").begins_with(K.relation_out_prefix(pubid)),
+        )
+        for r in outgoing:
+            out.append({
+                "direction": "outgoing",
+                "kind": r["kind"],
+                "task": self._display_for(slug, r["dst"]),
+                "created_at": _dt(r.get("created_at")),
+            })
+        # Incoming edges: mirror RELIN items under this task; the OTHER end is src.
+        incoming = self._query(
+            KeyConditionExpression=Key("PK").eq(K.pk(slug))
+            & Key("SK").begins_with(K.relation_in_prefix(pubid)),
+        )
+        for r in incoming:
+            out.append({
+                "direction": "incoming",
+                "kind": r["kind"],
+                "task": self._display_for(slug, r["src"]),
+                "created_at": _dt(r.get("created_at")),
+            })
+        out.sort(key=lambda e: (e["created_at"] is not None, e["created_at"]))
+        return out
+
+    def _display_for(self, slug: str, pubid: str) -> str:
+        """Display id (human key, else public_id) of a task by public_id."""
+        base = self._get(K.pk(slug), K.task_sk(pubid))
+        if base is None:
+            return pubid
+        return base.get("key") or pubid
 
     # ----- reservations / counters ------------------------------------- #
     def reserve_number(self, slug: str, namespace: str, *, reserved_by=None,

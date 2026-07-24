@@ -97,6 +97,10 @@ class StorageBackend(Protocol):
     def list_task_notes(self, slug: str, ident: str) -> list[NoteDTO]: ...
     def append_task_note(self, slug: str, ident: str, data: dict) -> NoteDTO: ...
     def add_relation(self, slug: str, ident: str, target: str, kind: str) -> str: ...
+    def list_relations(self, slug: str, ident: str) -> list[dict]: ...           # NotFound
+    """Every edge touching task ``ident``, from that task's perspective. Each
+    dict is ``{direction: "outgoing"|"incoming", kind, task, created_at}`` where
+    ``task`` is the OTHER task's display id (its ``RelationOut`` representation)."""
 
     # --- reservations / counters (atomic reservation) ------------------
     def reserve_number(self, slug: str, namespace: str, *, reserved_by: str | None = None,

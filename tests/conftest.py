@@ -207,20 +207,13 @@ def pytest_collection_modifyitems(config, items):
 
     The JIRA feature is SQLAlchemy-direct (Postgres-only) and is not yet adapted to
     the switchable storage abstraction (see the merge commit's follow-up), so its
-    tests run on Postgres only. The relations-GET endpoint (origin #2) is deferred
-    pending a ``list_relations`` storage method on both adapters, so its test is
-    skipped until that lands.
+    tests run on Postgres only. The relations-GET endpoint (origin #2) is now wired
+    to a cross-backend ``list_relations`` storage method (SLS-J2), so its tests run
+    on both backends.
     """
     for item in items:
         nid = item.nodeid
         name = getattr(item, "originalname", item.name)
-        # relations-GET (origin #2): endpoint deferred -> needs a storage
-        # list_relations on both adapters; skip its tests until that lands.
-        if name.startswith("test_get_relations"):
-            item.add_marker(
-                pytest.mark.skip(reason="relations-GET (origin #2) deferred: needs storage list_relations")
-            )
-            continue
         # JIRA auto-sync was woven into the OLD SQLAlchemy task lifecycle; it is
         # NOT wired into current_app.storage, so create/complete no longer trigger
         # it. These lifecycle-integration tests are deferred with that adaptation.

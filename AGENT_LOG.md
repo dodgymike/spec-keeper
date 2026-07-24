@@ -913,3 +913,46 @@ to the server's `/events` endpoint.
   adapters carry the columns, DynamoDB seeds the attribute on create so reads never KeyError, and the
   change is read-surface-only (no lease/version/atomicity path touched).
 - **NOT deployed** — source-only change.
+
+## 2026-07-24 — SLS-J2 (feature-runner): list_relations on the storage port + both adapters + wire relations-GET
+
+- **Task:** add `list_relations(slug, ident) -> list[dict]` to the storage port and BOTH adapters,
+  and wire the previously-405ing `GET /projects/{slug}/tasks/{id}/relations` endpoint. Each edge is
+  `{direction, kind, task, created_at}` (`task` = the OTHER task's display id), matching `RelationOut`.
+- **Files:** `app/storage/base.py` (Protocol method + contract docstring), `app/storage/postgres.py`
+  (`list_relations` = outgoing `src_task_id==task` ∪ incoming `dst_task_id==task`, resolving the other
+  end's `display_id`; **+ a parity fix in `_task`** — guard the UUID `public_id` lookup behind a
+  `uuid.UUID()` parse so an unknown non-UUID ident 404s instead of raising `DataError`/500),
+  `app/storage/keys.py` (`relation_in_sk` mirror encoder + `relation_out_prefix`/`relation_in_prefix`),
+  `app/storage/dynamo.py` (`add_relation` writes the `RELIN` mirror item in the SAME
+  `TransactWriteItems`; `list_relations` = two `begins_with` reads `REL#`/`RELIN#`; `_display_for`
+  helper), `app/blueprints/tasks.py` (`get` on `TaskRelations`, `@blp.response(200, RelationOut(many=True))`),
+  `tests/conftest.py` (removed the `test_get_relations*` deferral skip), `DECISIONS.md` (D1 + backfill
+  follow-up + the `_task` parity fix).
+- **D1 (given):** DynamoDB uses a relation-MIRROR item, NO new GSI, NO terraform/deploy. Verified the
+  `RELIN#` prefix does not alias `REL#`, and `_load_task_full` still ignores mirror items (only
+  collects `#COMMIT#`/`#NOTE#` children) — task loads undisturbed.
+- **Backfill follow-up (NOT run):** pre-mirror prod relations lack a `RELIN` mirror, so relations-GET
+  will miss incoming edges for old data until a one-shot backfill runs. Recorded in DECISIONS.md.
+- **Parity:** identical observable behaviour on both backends — same edges, same
+  `direction`/`kind`/`task`, same 404 on unknown ident. A behaviour on one backend but not the other
+  would be a bug; both pass the same tests.
+- **Proof (verbatim), `TEST_BACKENDS=postgres,dynamodb`, `pytest tests/test_tasks_api.py -k relations -v`:**
+  `test_get_relations_lists_both_directions[postgres] PASSED`,
+  `test_get_relations_empty_when_none[postgres] PASSED`,
+  `test_get_relations_404_unknown_task[postgres] PASSED`,
+  `test_get_relations_lists_both_directions[dynamodb] PASSED`,
+  `test_get_relations_empty_when_none[dynamodb] PASSED`,
+  `test_get_relations_404_unknown_task[dynamodb] PASSED` — `6 passed, 18 deselected`. The DynamoDB
+  both-directions pass proves the mirror item works (GET src → outgoing→dst, GET dst → incoming←src).
+  Full-file sweep both backends: `24 passed`. Supersede/delete-with-relation both backends: `6 passed`
+  (confirms task loads ignore mirror items).
+- **Chain:** feature-runner embodied implementer → test-engineer → reviewer → security →
+  data-reviewer → reliability-reviewer. reviewer: exactly one task (relations only), scope respected
+  (no jira_sync/jira_config/DTO Jira fields touched), the `_task` guard is the minimal parity fix the
+  un-deferred 404 test requires. security: no secrets; DynamoDB values bind via
+  `ExpressionAttributeValues`/`Key`, never formatted into an expression (no injection); SQL stays
+  parameterized; the UUID guard closes a 500-on-bad-input footgun. data/reliability reviewers: the
+  edge + its mirror are written in ONE `TransactWriteItems` (all-or-nothing — never a half-written
+  edge), so the two adapters stay consistent; no lease/version/atomicity path changed.
+- **NOT deployed** — source-only change. No new GSI, no `infra/terraform` change (D1 is mirror-item).

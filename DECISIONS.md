@@ -470,3 +470,32 @@ so they run cross-backend while the ORM-seeding test still falls through to `pos
 **Consequence.** `TestJiraFieldsDumpOnly` and `TestJiraFieldsInOpenAPI` remain Postgres-only (schema/
 OpenAPI-level, backend-neutral, unchanged from before) — left untouched to keep the change minimal
 and scoped to exactly the two methods the task named.
+
+## 2026-07-24 — SLS-J2: relations-GET via a DynamoDB relation-MIRROR item (D1)
+
+**D1 (given).** `list_relations` returns a task's incoming edges on DynamoDB via a **mirror item**,
+not a new GSI. `add_relation` writes, in the SAME `TransactWriteItems` as the forward edge
+`SK = TASK#<src>#REL#<kind>#<dst>`, a second item `SK = TASK#<dst>#RELIN#<kind>#<src>` under the
+destination task's child collection. `list_relations` is then two `begins_with` range reads on the
+task's own partition — `TASK#<ident>#REL#` (outgoing) and `TASK#<ident>#RELIN#` (incoming) — so
+incoming edges need no index. The pair is written atomically, so an edge and its mirror never
+diverge. Chosen precisely to avoid any new GSI / `infra/terraform` change / redeploy. Verified the
+`RELIN` prefix does not alias the `REL#` prefix (the char after `REL` is `I`, not `#`), and that
+`_load_task_full` still ignores mirror items (it only collects `#COMMIT#`/`#NOTE#` children), so task
+loads are undisturbed (`test_supersede_relation[dynamodb]` green).
+
+**Backfill follow-up (do NOT run here).** Pre-existing production relations were written BEFORE the
+mirror item existed, so they have a forward `REL#` item but no `RELIN#` mirror. Until a one-shot
+backfill writes a `RELIN` mirror for every existing forward relation, `GET .../relations` will return
+outgoing edges for old data but MISS incoming edges for those pre-mirror relations. A backfill task
+(scan `type=relation` items, write the matching `relation_in_sk` mirror idempotently) is required
+before relations-GET is trustworthy for incoming edges on historical data. Tracked as a follow-up;
+not executed in SLS-J2.
+
+**Parity fix (Postgres).** Un-deferring the relations-GET tests surfaced a latent Postgres bug:
+`PostgresBackend._task` cast a non-UUID ident (e.g. a bogus human key `NOPE-1`) directly against the
+UUID-typed `public_id` column, raising `DataError` (HTTP 500) instead of `NotFound` (404). The
+DynamoDB adapter already 404s cleanly. `_task` now guards the `public_id` lookup behind a
+`uuid.UUID(ident)` parse, so an unknown ident 404s on both backends
+(`test_get_relations_404_unknown_task` green on postgres + dynamodb). This restores backend parity
+for every task-by-ident endpoint, not just relations-GET.

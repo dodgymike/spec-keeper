@@ -14,6 +14,8 @@ returned DTO carries server-populated defaults (public_id, timestamps, version).
 """
 from __future__ import annotations
 
+import uuid as _uuid
+
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
@@ -215,11 +217,20 @@ class PostgresBackend:
             sa.select(Task).where(Task.project_id == project_id, Task.key == ident)
         ).scalar_one_or_none()
         if task is None:
-            task = db.session.execute(
-                sa.select(Task).where(
-                    Task.project_id == project_id, Task.public_id == ident
-                )
-            ).scalar_one_or_none()
+            # Only try the public_id lookup for a well-formed UUID; the column is
+            # UUID-typed, so a non-UUID ident (e.g. a bogus human key) would raise a
+            # DataError on the cast. Skipping it makes an unknown ident 404 cleanly,
+            # matching the DynamoDB adapter's _get_task_base (backend parity).
+            try:
+                _uuid.UUID(str(ident))
+            except (ValueError, AttributeError, TypeError):
+                pass
+            else:
+                task = db.session.execute(
+                    sa.select(Task).where(
+                        Task.project_id == project_id, Task.public_id == ident
+                    )
+                ).scalar_one_or_none()
         if task is None:
             raise NotFound(f"Task '{ident}' not found.")
         return task
@@ -713,6 +724,36 @@ class PostgresBackend:
                       version=src.version, snapshot=task_snapshot(_task_dto(src)))
         db.session.commit()
         return message
+
+    def list_relations(self, slug: str, ident: str) -> list[dict]:
+        project = self._project(slug)
+        task = self._task(project.id, ident)
+        out: list[dict] = []
+        # Outgoing: this task is the source; the OTHER task is the destination.
+        outgoing = db.session.execute(
+            sa.select(TaskRelation).where(TaskRelation.src_task_id == task.id)
+            .order_by(TaskRelation.created_at)
+        ).scalars().all()
+        for rel in outgoing:
+            out.append({
+                "direction": "outgoing",
+                "kind": rel.kind.value,
+                "task": rel.dst_task.display_id,
+                "created_at": rel.created_at,
+            })
+        # Incoming: this task is the destination; the OTHER task is the source.
+        incoming = db.session.execute(
+            sa.select(TaskRelation).where(TaskRelation.dst_task_id == task.id)
+            .order_by(TaskRelation.created_at)
+        ).scalars().all()
+        for rel in incoming:
+            out.append({
+                "direction": "incoming",
+                "kind": rel.kind.value,
+                "task": rel.src_task.display_id,
+                "created_at": rel.created_at,
+            })
+        return out
 
     # ----- reservations / counters -------------------------------------
     def reserve_number(self, slug: str, namespace: str, *, reserved_by=None,

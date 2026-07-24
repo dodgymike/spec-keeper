@@ -95,6 +95,27 @@ def relation_sk(pubid: str, kind: str, dst_pubid: str) -> str:
     return f"TASK#{pubid}#REL#{kind}#{dst_pubid}"
 
 
+def relation_in_sk(dst_pubid: str, kind: str, src_pubid: str) -> str:
+    """Mirror SK for the INCOMING edge (D1, SLS-J2).
+
+    The forward edge lives under the source's ``TASK#<src>#REL#<kind>#<dst>``;
+    this mirror item lives under the destination's ``TASK#<dst>#RELIN#<kind>#<src>``
+    so an incoming-edge query is a ``begins_with(TASK#<dst>#RELIN#)`` range read on
+    the same partition — no new GSI. Written in the same TransactWriteItems as the
+    forward edge, so the pair is all-or-nothing."""
+    return f"TASK#{dst_pubid}#RELIN#{kind}#{src_pubid}"
+
+
+def relation_out_prefix(pubid: str) -> str:
+    """begins_with prefix returning a task's OUTGOING relation edges."""
+    return f"TASK#{pubid}#REL#"
+
+
+def relation_in_prefix(pubid: str) -> str:
+    """begins_with prefix returning a task's INCOMING relation mirror edges."""
+    return f"TASK#{pubid}#RELIN#"
+
+
 def counter_sk(namespace: str) -> str:
     return f"COUNTER#{namespace}"
 

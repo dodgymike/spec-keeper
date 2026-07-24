@@ -25,6 +25,7 @@ from ..schemas import (
     NoteIn,
     NoteOut,
     RelationIn,
+    RelationOut,
     ReleaseIn,
     StatusIn,
     TaskIn,
@@ -180,6 +181,12 @@ class TaskNotes(MethodView):
 
 @blp.route("/<ident>/relations")
 class TaskRelations(MethodView):
+    @blp.response(200, RelationOut(many=True))
+    def get(self, slug, ident):
+        """List every edge touching this task (outgoing + incoming)."""
+        require_project_perm(slug, "read")
+        return current_app.storage.list_relations(slug, ident)
+
     @blp.arguments(RelationIn)
     @blp.response(201, MessageOut)
     def post(self, data, slug, ident):
