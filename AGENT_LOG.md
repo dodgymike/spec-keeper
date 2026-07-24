@@ -1125,3 +1125,36 @@ to the server's `/events` endpoint.
   `app/schemas.py` (~lines 190-192) still reads "null on the DynamoDB backend until the Jira feature
   is adapted to storage", which is now stale (SLS-J1 populates both adapters). A trivial code-comment
   fix for a future app-touching task.
+
+## 2026-07-24 — SLS: backfill RELIN relation mirrors for pre-SLS-J2 prod relations
+
+- **Task:** `73059eaa-3a1d-46ce-a159-72ca59c75e16` (project `spec-server`, epic SLS, P2) — one-shot,
+  idempotent, dry-run-first DynamoDB backfill that creates the missing `type=relation_in` (RELIN)
+  mirror items for forward relations created before SLS-J2 made relations bidirectional, so
+  `list_relations` returns their incoming edges. A deploy agent runs it after review; NOT run here.
+- **Files:** `scripts/backfill_relation_mirrors.py` (new), `tests/test_backfill_relation_mirrors.py`
+  (new, DynamoDB-Local, self-skips on Postgres), `scripts/README-backfill-relation-mirrors.md` (new).
+  No `app/` runtime change (scope-guarded).
+- **Design:** a single paginated `Scan` filtered to `type = "relation"` (value bound via
+  `Attr(...).eq` → ExpressionAttributeValues, never string-formatted); the mirror SK is derived with
+  the runtime encoder `app.storage.keys.relation_in_sk` (imported, not duplicated); each mirror is
+  written with a conditional put `attribute_not_exists(PK) AND attribute_not_exists(SK)` →
+  idempotent. `--dry-run` is the DEFAULT and read-only (probes each mirror, writes nothing);
+  `--apply` performs the writes. Table/region/endpoint come from env (`DYNAMODB_TABLE`/`AWS_REGION`/
+  `DYNAMODB_ENDPOINT_URL`) exactly like the app storage layer; no creds in the script; prod table
+  never hardcoded.
+- **Test:** `TEST_BACKENDS=dynamodb` against DynamoDB Local → `3 passed in 1.20s`; on Postgres
+  (`TEST_BACKENDS=postgres`) → `3 skipped` (the backfill targets the DynamoDB table). Asserts: a
+  forward-only relation gets a byte-identical mirror on `--apply` and then surfaces as an incoming
+  edge in `list_relations`; re-running is idempotent (scanned=1/created=0/skipped-existing=1);
+  dry-run writes nothing; an already-mirrored relation is left untouched.
+- **Chain:** implementer → test-engineer → reviewer → security → data-reviewer → reliability-reviewer,
+  all embodied inline by feature-runner (no subagent-spawn tool is available in this environment;
+  justification recorded here per the skip rule). Reviewer: exactly one task, no runtime code touched,
+  mirror byte-identical (test-proven). Security: no secrets; `type` value + conditional put bind via
+  ExpressionAttributeValues (no f-string into any expression); table from env, not hardcoded prod.
+  Data-reviewer: no parity gap — this is Dynamo-only; Postgres stores each relation as one row queried
+  both directions, so there is no forward/mirror split to backfill (see DECISIONS). Reliability:
+  conditional-put idempotency proven by the re-run test; full `LastEvaluatedKey` pagination; dry-run
+  read-only; a non-conditional `ClientError` fails loudly (a one-shot re-run resumes idempotently).
+- **Safe to run against prod:** dry-run default + read-only; `--apply` is idempotent conditional writes.

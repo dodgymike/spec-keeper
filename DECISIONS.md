@@ -604,3 +604,14 @@ availability) ONLY when Jira is enabled — a project with no/disabled config pa
 `get_jira_config` read and makes NO outbound call. The async-offload alternative (push the sync onto
 SQS/EventBridge so the request returns immediately) is deliberately OUT OF SCOPE here and is already
 filed as follow-up task `6e7029d9-3805-448f-a41e-3c9912cddc9b`; do not solve async in SLS-J5.
+
+**DECISION — the RELIN mirror backfill is DynamoDB-only and writes each mirror non-transactionally.**
+The pre-SLS-J2 forward-relation backfill (`scripts/backfill_relation_mirrors.py`) has no Postgres
+counterpart: the Postgres adapter stores each relation as a single row queried from both ends, so
+there is no forward/mirror split and nothing to backfill — this is NOT a backend-parity violation.
+Unlike the runtime `add_relation` (which must write forward + mirror in one `TransactWriteItems` so
+a newly-created pair is all-or-nothing), the backfill writes each mirror with an independent
+conditional put. This is safe because the forward item already exists durably; each mirror is
+independent and idempotent (`attribute_not_exists(PK) AND attribute_not_exists(SK)`), so a crash
+mid-run leaves a consistent partial state that a plain re-run completes without duplicates. No
+multi-item transaction is needed or used.
