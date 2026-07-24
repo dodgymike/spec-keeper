@@ -1091,3 +1091,37 @@ to the server's `/events` endpoint.
   async-offload is follow-up `6e7029d9-3805-448f-a41e-3c9912cddc9b`. Recorded in DECISIONS.md.
 - **Backlog:** claimed at start (status → in_progress, note); completed at end via
   `scripts/agent_token.py` (`spec-keeper` Cognito user) with commit sha + test summary + proof_cmd.
+
+## 2026-07-24 — SLS-J6: docs for the Jira storage-abstraction adaptation (feature-runner, DOCS-ONLY)
+
+- **Task:** `2a41d3cb-77c8-420c-8666-1eca00dc3e02` (epic SLS, P2). Documentation pass closing the
+  JIRA storage-abstraction epic (SLS-J1..J5): record the new DynamoDB item types + storage-port
+  methods so the docs reflect full Postgres/DynamoDB parity. No app code, tests, or terraform.
+- **Change (docs only):**
+  - `STORAGE_ABSTRACTION_DEEPDIVE.md`: added the `RELIN` relation-mirror item and the `JIRACFG`
+    singleton to the §3.1 item-type table; added a new §3.5 "Jira integration + relations mirror
+    (SLS-J1..J5)" documenting both item shapes, the SLS-J2 backfill caveat, a port-method table
+    (`list_relations`, `get/create/update_jira_config`, `set_jira_transitions`, `record_jira_sync`)
+    with per-method parity notes, and the D2 silent-write property of `record_jira_sync`
+    (no `version` bump / no change-log entry; scoped column update on both backends).
+  - `AGENTS_API.md`: relations-GET, the dump-only `jira_issue_key`/`jira_sync_error` TaskOut fields,
+    and jira-config CRUD parity were ALREADY documented by SLS-J3/J5 — reconciled (no duplication/
+    contradiction) and added the one missing fact: the retry endpoint now requires project `write`
+    permission.
+  - `README.md`: added a "Full backend parity" bullet to the Jira Sync section (config CRUD +
+    auto-sync + relations-GET behave identically on both backends; `JIRACFG` singleton + `RELIN`
+    mirror on DynamoDB) and noted the DynamoDB `JIRACFG` item alongside the Postgres table.
+- **Verification (docs only, no test run):** proof grep
+  `grep -n "list_relations|JIRACFG|RELIN|record_jira_sync" STORAGE_ABSTRACTION_DEEPDIVE.md AGENTS_API.md`
+  matches. Spot-checked every documented surface against merged code: endpoint paths
+  (`app/blueprints/tasks.py`, `jira_config.py`, `jira_sync_retry.py`), `RelationOut`/`TaskOut` field
+  names and dump-only flags (`app/schemas.py`), key builders (`app/storage/keys.py`:
+  `jira_config_sk`=`JIRACFG`, `relation_in_sk`=`TASK#<dst>#RELIN#<kind>#<src>`), and the port-method
+  signatures + D2 comment (`app/storage/base.py`). No repo markdown link-checker configured.
+- **Chain:** implementer (documentation) → reviewer (feature-runner embodied). **Security/data/
+  reliability SKIPPED with justification:** pure-docs change — no app code, no SQL, no secrets, no
+  schema/infra — so the injection/parity/failure-mode audits have nothing to assess.
+- **Follow-up found (not fixed — scope-guarded to docs):** the `TaskOut` code comment in
+  `app/schemas.py` (~lines 190-192) still reads "null on the DynamoDB backend until the Jira feature
+  is adapted to storage", which is now stale (SLS-J1 populates both adapters). A trivial code-comment
+  fix for a future app-touching task.

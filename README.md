@@ -133,9 +133,14 @@ blocks the API response; the error is stored on the task and can be retried late
 
 **Key design points:**
 
+- **Full backend parity** — config CRUD, auto-sync on create/complete, and the relations-GET
+  endpoint all go through the storage abstraction, so the whole Jira feature behaves identically on
+  both backends (Postgres and DynamoDB; SLS-J1..J5). On DynamoDB the config is a `JIRACFG`
+  singleton item and task relations gain a `RELIN` mirror item for incoming-edge reads — see
+  `STORAGE_ABSTRACTION_DEEPDIVE.md` §3.5.
 - **Per-project DB-backed config** — each project stores its Jira connection (base URL, email,
-  encrypted API token, Jira project key, enabled flag) in the `jira_project_config` table; there
-  is no global env-var-based config.
+  encrypted API token, Jira project key, enabled flag) — the `jira_project_config` table on
+  Postgres, the `JIRACFG` singleton item on DynamoDB; there is no global env-var-based config.
 - **Encrypted tokens** — API tokens are Fernet-encrypted at rest using the
   `JIRA_TOKEN_ENCRYPTION_KEY` env var; the token is decrypted in-memory only at call time.
 - **Transition cache** — Jira project statuses are fetched and cached in a JSONB column on config

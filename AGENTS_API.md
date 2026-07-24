@@ -904,8 +904,9 @@ Finds all tasks in the project that have `jira_sync_error` set OR are missing `j
 - Has `jira_issue_key` + status not `done` → clears the stale error (nothing to retry yet).
 
 The retry endpoint runs through the storage abstraction (enumerates via `list_tasks` + an in-memory
-filter, re-syncs via the storage port), so it behaves identically on both backends. Returns 404 if
-the project has no enabled Jira config.
+filter, re-syncs via the storage port), so it behaves identically on both backends. It requires
+**project `write` permission** (it mutates task sync state), and returns 404 if the project has no
+enabled Jira config.
 
 **Response fields:**
 | Field | Type | Notes |

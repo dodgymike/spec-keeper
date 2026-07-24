@@ -267,7 +267,8 @@ Base table: `PK` (S), `SK` (S).
 | **Task** | `P#<slug>` | `TASK#<public_id>` |
 | TaskNote | `P#<slug>` | `TASK#<public_id>#NOTE#<ts>#<uuid>` |
 | CommitRef | `P#<slug>` | `TASK#<public_id>#COMMIT#<sha>` |
-| TaskRelation | `P#<slug>` | `TASK#<public_id>#REL#<kind>#<dst_pubid>` |
+| TaskRelation (forward) | `P#<slug>` | `TASK#<src_public_id>#REL#<kind>#<dst_pubid>` |
+| TaskRelation (mirror, **SLS-J2/D1**) | `P#<slug>` | `TASK#<dst_public_id>#RELIN#<kind>#<src_pubid>` |
 | Lease history | `P#<slug>` | `TASK#<public_id>#LEASE#<ts>` (TTL attr for GC only) |
 | Tag adjacency | `P#<slug>` | `TAG#<key>#TASK#<public_id>` (for tag filter) |
 | Counter | `P#<slug>` | `COUNTER#<namespace>` |
@@ -276,6 +277,7 @@ Base table: `PK` (S), `SK` (S).
 | Decision | `P#<slug>` | `DEC#<ts>#<uuid>` |
 | ChainRun | `P#<slug>` | `CRUN#<run_pubid>` |
 | ChainStep | `P#<slug>` | `CRUN#<run_pubid>#STEP#<step_name>` |
+| Jira config (singleton, **SLS-J3**) | `P#<slug>` | `JIRACFG` |
 | Idempotency | `P#<slug>` | `IDEM#<endpoint>#<key>` |
 
 `<ts>` = ISO-8601 UTC with millis (lexicographically sortable). `<zero-padded value>` keeps
@@ -426,6 +428,74 @@ with invariant #3.
 - **Leases:** the one-active-lease invariant (`models.py:386-395`) is enforced *inline* by the
   claim's conditional write (owner-absent / lease-expired) — no separate lease lock item
   needed. Lease *history* is optional audit items with a TTL attribute for GC.
+
+### 3.5 Jira integration + relations mirror (SLS-J1..J5 — realised, both backends)
+
+The Jira feature (originally Postgres/ORM-only) was adapted to the storage port in the SLS-J*
+epic, so it now has full Postgres/DynamoDB parity. No new GSI, table, migration, or reserved
+number was needed — every addition rides the existing single-table partition by exact key or
+`begins_with` range read.
+
+**New DynamoDB item types** (also in the §3.1 table):
+
+- **`RELIN` relation-mirror item (SLS-J2, decision D1).** DynamoDB has no cheap "incoming edges"
+  query. Rather than add a GSI, `add_relation` writes a *second* mirror item
+  `SK = TASK#<dst>#RELIN#<kind>#<src>` under the destination task, in the **same
+  `TransactWriteItems`** as the forward `SK = TASK#<src>#REL#<kind>#<dst>` edge — so an edge and
+  its mirror never diverge. `list_relations` is then two `begins_with` range reads on the task's
+  own partition: `TASK#<ident>#REL#` (outgoing) + `TASK#<ident>#RELIN#` (incoming). The `RELIN`
+  prefix does not alias `REL#` (the char after `REL` is `I`, not `#`), and `_load_task_full`
+  ignores mirror items (it only collects `#COMMIT#`/`#NOTE#` children), so task loads are
+  undisturbed. Postgres serves the same shape by reading its `task_relations` rows in both
+  directions — no schema change.
+  - **Backfill caveat (from DECISIONS.md, SLS-J2).** Relations written in production BEFORE the
+    mirror item existed have a forward `REL#` item but **no** `RELIN#` mirror. Until a one-shot
+    backfill (scan `type=relation` items, idempotently write the matching `relation_in_sk`
+    mirror) runs, `GET .../relations` returns *outgoing* edges for old data but MISSES *incoming*
+    edges for those pre-mirror relations. Tracked as a follow-up; not executed in SLS-J2.
+- **`JIRACFG` singleton item (SLS-J3).** The per-project Jira config (`base_url`, `email`,
+  encrypted API token, `jira_project_key`, `enabled`, `cached_transitions`) is one item per
+  project at `PK = P#<slug>`, `SK = JIRACFG` (`keys.jira_config_sk()`). Create-once uses a
+  conditional `attribute_not_exists(PK)` put → `Conflict`, mirroring the Postgres
+  `UNIQUE(project_id)` backstop. The stored token is **always ciphertext** — the blueprint
+  `encrypt()`s before the value crosses the storage port and decrypts (only for outbound Jira
+  calls) after reading; the plaintext never enters storage, is never logged, and is never
+  formatted into a SQL/DynamoDB expression. Project deletion removes it on both backends
+  (Postgres FK `ON DELETE CASCADE`; Dynamo `delete_project` wipes the whole `P#<slug>`
+  partition). Config update / `set_jira_transitions` are last-writer-wins read-then-write on both
+  backends (no optimistic-lock version on the singleton — matches prior behaviour, a rare admin op).
+
+**New storage-port methods** (on `StorageBackend`; both adapters implement each with identical
+observable behaviour):
+
+| Port method | Task | Parity note |
+|---|---|---|
+| `list_relations(slug, ident)` | SLS-J2 | Postgres: read `task_relations` both directions. DynamoDB: `begins_with` on `REL#` + `RELIN#`. Returns `[{direction, kind, task, created_at}]` from the requested task's perspective; unknown ident → `NotFound` (404) on both. |
+| `get_jira_config(slug)` | SLS-J3 | Returns a `JiraConfigDTO` (ciphertext only) or `None` when unset; `NotFound` if the project is absent. |
+| `create_jira_config(slug, data)` | SLS-J3 | Create-once: `Conflict` (409) if one already exists — PG `UNIQUE(project_id)`, Dynamo `attribute_not_exists(PK)`. |
+| `update_jira_config(slug, data)` | SLS-J3 | Partial update; `NotFound` if project or config absent. Bumps `updated_at` on both. |
+| `set_jira_transitions(slug, transitions)` | SLS-J3/J4 | Persists the cached transition map; used by the transition-cache warmup/refresh. Last-writer-wins on both. |
+| `record_jira_sync(slug, task_ident, *, issue_key=None, error=None)` | SLS-J4 | Best-effort write-back of a sync result: sets `jira_issue_key` (when given) and `jira_sync_error` (the new value; cleared to `None` on success). **See D2 below.** |
+
+**D2 — `record_jira_sync` is a SILENT write (hard rule, SLS-J4).** It updates ONLY the two Jira
+task attributes and MUST NOT bump `task.version` and MUST NOT write a change-log (`Change`/delta)
+entry — background sync metadata must never perturb optimistic-locking (`If-Match`/412) or the UI
+delta feed. It MAY emit the existing `jira_sync_error` **audit event** (the `/events` path — which
+is NOT the change-log delta feed). Parity is by construction: Postgres issues a **column-scoped
+`UPDATE`** of just the two Jira columns (so a concurrent `version` bump is preserved); DynamoDB
+uses a **scoped `UpdateItem`** (SET the two attrs, REMOVE `jira_sync_error` to clear on success)
+rather than a full-item `PutItem`, so it never clobbers a concurrent write. Values bind via
+`ExpressionAttributeValues`, never string-formatted. Asserted cross-backend in
+`tests/test_record_jira_sync.py`: after the call `version` and `changes_head` are UNCHANGED on both
+backends.
+
+**Auto-sync + retry (SLS-J5).** Best-effort Jira sync is called from the create/complete task
+blueprints after `storage.create_task` / `storage.complete_task`, so auto-sync fires through the
+storage lifecycle on BOTH backends; it is a zero-outbound-call no-op (one cheap `get_jira_config`
+read) when Jira is unconfigured/disabled. The manual retry endpoint enumerates candidates via
+`list_tasks` + an in-memory filter (no new GSI) and re-syncs via the port — identical on both
+backends. Sync is a synchronous outbound HTTP call on the hot path when Jira is enabled; the
+async-offload alternative is filed as a follow-up.
 
 ---
 
