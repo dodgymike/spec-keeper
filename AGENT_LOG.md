@@ -1158,3 +1158,40 @@ to the server's `/events` endpoint.
   conditional-put idempotency proven by the re-run test; full `LastEvaluatedKey` pagination; dry-run
   read-only; a non-conditional `ClientError` fails loudly (a one-shot re-run resumes idempotently).
 - **Safe to run against prod:** dry-run default + read-only; `--apply` is idempotent conditional writes.
+
+## SEC-FIX-1 — JIRA config cross-tenant IDOR + SSRF remediation (feature-runner)
+- **Task:** cloud Spec Server `spec-server`, epic SECURITY, P0, public_id
+  `f3883132-a6c7-4553-8c32-4ecf4f177f30` (owner `spec-keeper`). Branch
+  `sec-fix-1-jira-config-idor-ssrf` off `main` @ `5427a82`.
+- **Fix 1 (P0) — project-isolation bypass:** `app/blueprints/jira_config.py` now gates GET on
+  `require_project_perm(slug, "read")` and POST/PUT on `require_project_perm(slug, "write")` (was the
+  bare global-group `require_api_key()`), matching the sibling `jira_sync_retry.py`. Under
+  `PROJECT_ISOLATION_ENFORCED` a non-member GET is hidden (404) and a non-member write is 403. A
+  `# SEC: consider tightening to "admin"` note is left (this resource stores integration creds);
+  shipped `write` now for parity + to unblock legitimate writers.
+- **Fix 2 (P1) — SSRF via `base_url`:** new `app/jira_url.py` (`validate_jira_base_url`): https-only,
+  no embedded credentials, reject IP-literal private/loopback/link-local/reserved/unspecified/
+  multicast hosts and `localhost`, default-https-port only, host must match an allow-list (default
+  `.atlassian.net`, config `JIRA_ALLOWED_HOST_SUFFIXES`). Enforced at the schema boundary
+  (`JiraConfigIn`/`JiraConfigUpdate` `@validates("base_url")` → 422) AND re-enforced in
+  `JiraClient.__init__` (defense-in-depth); `JiraClient` now sets an explicit `(5, 30)` request timeout.
+- **Fix 3 (P2) — bounded persisted error text:** `app/jira_sync.py` `_safe_sync_error(exc)` persists a
+  generic reader-safe `jira_sync_error` (`sync failed (HTTP <code>)` for `JiraClientError`, else
+  `sync failed`) instead of `f"...failed: {exc}"`; the full exception stays server-side in
+  `logger.warning` only.
+- **Tests:** new `tests/test_sec_fix_1_jira_config.py` — cross-tenant denial + SSRF-over-HTTP proven on
+  BOTH backends (`TEST_BACKENDS=postgres,dynamodb`), plus unit tests for the URL guard, JiraClient
+  defense-in-depth, request timeout, and bounded error text. Updated three existing suites
+  (`test_jira_sync.py`, `test_jira_sync_hook.py`, `test_jira_sync_integration.py`) whose assertions
+  pinned the OLD verbose message, and `test_jiracfg_parity.py`'s non-allow-listed `https://a.x` →
+  `https://a.atlassian.net`. Result: the SEC-FIX-1 file `31 passed`; the jira+isolation regression
+  slice `159 passed, 61 skipped`; the schema/openapi/auth slice `50 passed`.
+- **Chain:** implementer → test-engineer → reviewer → security → data-reviewer → reliability-reviewer,
+  embodied inline by feature-runner (no subagent-spawn tool in this environment; recorded here per the
+  skip rule). Reviewer: exactly one task; smallest change; blueprint gate matches the sibling.
+  Security: IDOR closed (per-project gate, fail-closed, read→404/write→403); SSRF closed
+  (allow-list + private-IP + scheme + userinfo + port, defense-in-depth + timeout); no raw upstream
+  body reaches `spec-readers`. Data/reliability: all three fixes live in backend-agnostic paths
+  (blueprint/schema/sync) that go through the storage port; the authz + SSRF tests pass on both
+  backends → parity holds; best-effort sync still never raises (JiraUrlError is caught, bounded error
+  recorded).

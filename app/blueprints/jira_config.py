@@ -22,7 +22,7 @@ from flask.views import MethodView
 from flask_smorest import Blueprint, abort
 
 from ..crypto import encrypt
-from ..helpers import require_api_key
+from ..helpers import require_project_perm
 from ..jira_transitions import warm_transition_cache
 from ..schemas import JiraConfigIn, JiraConfigOut, JiraConfigUpdate
 
@@ -69,7 +69,13 @@ class JiraConfigResource(MethodView):
     @blp.response(200, JiraConfigOut)
     def get(self, slug):
         """Get the Jira integration config for a project."""
-        require_api_key()
+        # SEC-FIX-1: per-project authorization (NOT the bare global-group gate) —
+        # otherwise any enrolled agent could read ANOTHER project's Jira config
+        # under PROJECT_ISOLATION_ENFORCED. A non-member read is hidden (404).
+        # SEC: consider tightening to "admin" (this resource stores integration
+        # credentials); shipping "write"/"read" now for parity with the sibling
+        # jira_sync_retry gate and to unblock legitimate writers.
+        require_project_perm(slug, "read")
         config = current_app.storage.get_jira_config(slug)  # 404 if project absent
         if config is None:
             abort(404, message="Jira config not found for this project.")
@@ -79,7 +85,9 @@ class JiraConfigResource(MethodView):
     @blp.response(201, JiraConfigOut)
     def post(self, data, slug):
         """Create Jira integration config for a project."""
-        require_api_key()
+        # SEC-FIX-1: per-project write authorization (see the GET note above; a
+        # non-member write is 403). SEC: consider tightening to "admin".
+        require_project_perm(slug, "write")
         # Encrypt HERE so storage only ever receives ciphertext.
         stored = {
             "base_url": data["base_url"],
@@ -97,7 +105,9 @@ class JiraConfigResource(MethodView):
     @blp.response(200, JiraConfigOut)
     def put(self, data, slug):
         """Update Jira integration config for a project."""
-        require_api_key()
+        # SEC-FIX-1: per-project write authorization (see the GET note above; a
+        # non-member write is 403). SEC: consider tightening to "admin".
+        require_project_perm(slug, "write")
         stored: dict = {}
         for fld in ("base_url", "email", "jira_project_key", "enabled"):
             if fld in data:

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import requests
 
+from .jira_url import DEFAULT_ALLOWED_HOST_SUFFIXES, validate_jira_base_url
+
 
 class JiraClientError(Exception):
     """Raised when the Jira API returns a non-2xx response.
@@ -39,8 +41,17 @@ class JiraClient:
 
     API_PATH = "/rest/api/3"
 
+    #: Explicit (connect, read) timeout so a hung/slow upstream (or an SSRF target
+    #: that never responds) can never block the worker indefinitely.
+    DEFAULT_TIMEOUT = (5, 30)
+
     def __init__(self, base_url: str, email: str, api_token: str):
-        self._base_url = base_url.rstrip("/")
+        # SEC-FIX-1 defense-in-depth: re-validate the base_url here (the schema is
+        # the first gate) so a value that somehow bypassed validation still cannot
+        # reach an internal host. The allow-list is read from the app config when
+        # in a request/app context, else the Jira-Cloud default.
+        allowed = self._allowed_suffixes()
+        self._base_url = validate_jira_base_url(base_url, allowed).rstrip("/")
         self._email = email
         self._api_token = api_token
         self._session = requests.Session()
@@ -50,12 +61,24 @@ class JiraClient:
             "Accept": "application/json",
         })
 
+    @staticmethod
+    def _allowed_suffixes():
+        """Effective host allow-list: app config when available, else default."""
+        try:
+            from flask import current_app
+
+            configured = current_app.config.get("JIRA_ALLOWED_HOST_SUFFIXES")
+        except (RuntimeError, ImportError):
+            configured = None
+        return configured or DEFAULT_ALLOWED_HOST_SUFFIXES
+
     def _url(self, path: str) -> str:
         return f"{self._base_url}{self.API_PATH}{path}"
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
         """Send a request and raise JiraClientError on non-2xx responses."""
         url = self._url(path)
+        kwargs.setdefault("timeout", self.DEFAULT_TIMEOUT)
         resp = self._session.request(method, url, **kwargs)
         if not resp.ok:
             # Truncate body to avoid leaking large payloads into logs.

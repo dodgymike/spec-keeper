@@ -130,7 +130,9 @@ class TestCreateTaskSyncHook:
             ).scalar_one()
             assert task.jira_issue_key is None
             assert task.jira_sync_error is not None
-            assert "sync_task_created failed" in task.jira_sync_error
+            # SEC-FIX-1: bounded reader-safe message (status only, no upstream body).
+            assert task.jira_sync_error == "sync failed (HTTP 503)"
+            assert "Service Unavailable" not in task.jira_sync_error
 
     @pytest.mark.parametrize("marker", ["jira_sync_hook"])
     def test_create_task_no_config_no_sync_call(
@@ -217,4 +219,6 @@ class TestCompleteTaskSyncHook:
                 db.select(Task).where(Task.key == "JSH-5")
             ).scalar_one()
             assert task.jira_sync_error is not None
-            assert "sync_task_completed failed" in task.jira_sync_error
+            # SEC-FIX-1: bounded reader-safe message (status only, no upstream body).
+            assert task.jira_sync_error == "sync failed (HTTP 500)"
+            assert "Internal Server Error" not in task.jira_sync_error

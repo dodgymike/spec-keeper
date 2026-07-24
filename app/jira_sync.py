@@ -18,11 +18,24 @@ import logging
 from flask import current_app
 
 from .crypto import decrypt
-from .jira_client import JiraClient
+from .jira_client import JiraClient, JiraClientError
 from .jira_transitions import find_transition
 from .storage.dto import TaskDTO
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_sync_error(exc: Exception) -> str:
+    """A BOUNDED, reader-safe message for ``jira_sync_error`` (SEC-FIX-1).
+
+    ``jira_sync_error`` is surfaced to ``spec-readers`` via ``TaskOut`` and the
+    events feed, so the raw upstream body / exception text must NEVER be persisted
+    (it can leak internal detail). The full exception stays server-side only via
+    ``logger.warning`` at the call site. For a Jira API error we keep only the HTTP
+    status code; everything else folds into a generic string."""
+    if isinstance(exc, JiraClientError):
+        return f"sync failed (HTTP {exc.status_code})"
+    return "sync failed"
 
 
 def _build_client(config) -> JiraClient:
@@ -72,7 +85,7 @@ def sync_task_created(slug: str, task_dto: TaskDTO) -> None:
         )
         try:
             current_app.storage.record_jira_sync(
-                slug, task_dto.public_id, error=f"sync_task_created failed: {exc}"
+                slug, task_dto.public_id, error=_safe_sync_error(exc)
             )
         except Exception:
             # Last-resort guard: even error recording must not raise
@@ -132,7 +145,7 @@ def sync_task_completed(slug: str, task_dto: TaskDTO) -> None:
         )
         try:
             current_app.storage.record_jira_sync(
-                slug, task_dto.public_id, error=f"sync_task_completed failed: {exc}"
+                slug, task_dto.public_id, error=_safe_sync_error(exc)
             )
         except Exception:
             logger.exception(

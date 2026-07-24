@@ -5,9 +5,33 @@ auto-generated OpenAPI document that agents consume.
 """
 from __future__ import annotations
 
-from marshmallow import EXCLUDE, Schema, fields, validate
+from flask import current_app
+from marshmallow import (
+    EXCLUDE,
+    Schema,
+    ValidationError,
+    fields,
+    validate,
+    validates,
+)
 
+from .jira_url import (
+    DEFAULT_ALLOWED_HOST_SUFFIXES,
+    JiraUrlError,
+    validate_jira_base_url,
+)
 from .models import Priority, RelationKind, TaskStatus, LeaseState  # noqa: F401
+
+
+def _jira_allowed_suffixes():
+    """Effective Jira host allow-list (config-driven, defaulted). Read inside a
+    request/app context so a deployment can widen it via
+    ``JIRA_ALLOWED_HOST_SUFFIXES`` without touching code."""
+    try:
+        configured = current_app.config.get("JIRA_ALLOWED_HOST_SUFFIXES")
+    except RuntimeError:  # no app context (e.g. schema import at build time)
+        configured = None
+    return configured or DEFAULT_ALLOWED_HOST_SUFFIXES
 
 STATUS_VALUES = [s.value for s in TaskStatus]
 PRIORITY_VALUES = [p.value for p in Priority]
@@ -906,6 +930,14 @@ class JiraConfigIn(Schema):
     jira_project_key = fields.Str(required=True, metadata={"description": "Jira project key, e.g. PROJ."})
     enabled = fields.Bool(load_default=False)
 
+    @validates("base_url")
+    def _validate_base_url(self, value, **kwargs):
+        # SEC-FIX-1: SSRF guard — the server calls this URL server-side.
+        try:
+            validate_jira_base_url(value, _jira_allowed_suffixes())
+        except JiraUrlError as exc:
+            raise ValidationError(str(exc)) from exc
+
 
 class JiraConfigUpdate(Schema):
     base_url = fields.Str(metadata={"description": "Jira instance base URL."})
@@ -913,6 +945,15 @@ class JiraConfigUpdate(Schema):
     api_token = fields.Str(metadata={"description": "New API token (write-only, encrypted at rest)."})
     jira_project_key = fields.Str(metadata={"description": "Jira project key."})
     enabled = fields.Bool()
+
+    @validates("base_url")
+    def _validate_base_url(self, value, **kwargs):
+        # SEC-FIX-1: SSRF guard on update too (base_url is optional here, so this
+        # runs only when the field is present in the request body).
+        try:
+            validate_jira_base_url(value, _jira_allowed_suffixes())
+        except JiraUrlError as exc:
+            raise ValidationError(str(exc)) from exc
 
 
 class JiraConfigOut(Schema):

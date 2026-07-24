@@ -117,9 +117,9 @@ class TestJiraCfgParity:
     def test_unknown_project_404(self, client):
         base = "/api/v1/projects/nope/jira-config"
         assert client.get(base).status_code == 404
-        assert client.put(base, json={"base_url": "https://a.x"}).status_code == 404
+        assert client.put(base, json={"base_url": "https://a.atlassian.net"}).status_code == 404
         assert client.post(base, json={
-            "base_url": "https://a.x", "email": "a@x.com",
+            "base_url": "https://a.atlassian.net", "email": "a@x.com",
             "api_token": SECRET_TOKEN, "jira_project_key": "X",
         }).status_code == 404
 

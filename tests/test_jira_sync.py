@@ -180,7 +180,10 @@ class TestSyncTaskCreatedFailure:
             updated = current_app.storage.get_task(SLUG, sample_task)
             assert updated.jira_issue_key is None
             assert updated.jira_sync_error is not None
-            assert "sync_task_created failed" in updated.jira_sync_error
+            # SEC-FIX-1: bounded, reader-safe message — only the HTTP status is
+            # kept; the raw upstream body must NOT leak into the reader-visible field.
+            assert updated.jira_sync_error == "sync failed (HTTP 503)"
+            assert "Service Unavailable" not in updated.jira_sync_error
 
             # Check event was emitted (audit path), no secret leaked
             events = db.session.execute(
@@ -316,7 +319,9 @@ class TestSyncTaskCompletedFailure:
 
             updated = current_app.storage.get_task(SLUG, sample_task)
             assert updated.jira_sync_error is not None
-            assert "sync_task_completed failed" in updated.jira_sync_error
+            # SEC-FIX-1: bounded, reader-safe message (status only, no upstream body).
+            assert updated.jira_sync_error == "sync failed (HTTP 500)"
+            assert "Server Error" not in updated.jira_sync_error
 
             # Check event was emitted, no secret leaked
             events = db.session.execute(

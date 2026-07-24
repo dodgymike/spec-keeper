@@ -151,6 +151,21 @@ class Config:
         k.strip() for k in os.environ.get("API_KEYS", "").split(",") if k.strip()
     ]
 
+    # --- Jira integration SSRF guard (SEC-FIX-1) -----------------------------
+    # Allow-list of host suffixes a project's Jira `base_url` may target. The
+    # server calls that URL server-side (transition-cache warmup + on every task
+    # completion), so an unvalidated value is an authenticated SSRF primitive.
+    # Default is Jira Cloud (`.atlassian.net`); override (comma-separated) ONLY to
+    # deliberately permit a self-hosted Jira host, e.g.
+    # JIRA_ALLOWED_HOST_SUFFIXES=.atlassian.net,.jira.mycorp.com
+    # Regardless of this list, https is required and IP-literal
+    # private/loopback/link-local hosts (and `localhost`) are always rejected.
+    JIRA_ALLOWED_HOST_SUFFIXES = [
+        s.strip() for s in os.environ.get(
+            "JIRA_ALLOWED_HOST_SUFFIXES", ".atlassian.net"
+        ).split(",") if s.strip()
+    ]
+
     # --- Per-authenticated-principal API throttle (SEC-DOS-2) ----------------
     # A per-`sub` in-app rate limit layered AFTER the JWT is verified, on the
     # authenticated /api/v1 data-plane, so one token/tenant cannot starve the

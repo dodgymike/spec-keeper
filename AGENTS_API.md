@@ -856,6 +856,17 @@ curl -s -H 'Content-Type: application/json' \
 - The transition cache is populated lazily on first sync use; eager warmup on config save is wired
   as part of the Jira sync path (a warmup failure never blocks the config save).
 - Returns 409 if config already exists (use PUT to update).
+- **Authorization (SEC-FIX-1):** the jira-config endpoints are per-project scoped, not just
+  globally group-gated. Under project isolation, GET requires project **read** and POST/PUT require
+  project **write** on that project — a non-member GET is hidden (404) and a non-member write is 403.
+- **`base_url` SSRF guard (SEC-FIX-1):** because the server calls `base_url` server-side, it is
+  validated on create AND update. It **must be `https://`**, on the allowed host allow-list (default
+  `*.atlassian.net`, widen via `JIRA_ALLOWED_HOST_SUFFIXES`), with no embedded credentials and the
+  default https port; IP-literal private/loopback/link-local hosts and `localhost` are always
+  rejected (422). The same host check is re-enforced inside the Jira client as defense-in-depth.
+- **Bounded sync errors (SEC-FIX-1):** a failed sync persists only a generic, reader-safe
+  `jira_sync_error` (e.g. `sync failed (HTTP 500)`) — never the raw upstream response body; full
+  detail stays in the server log only.
 
 ```bash
 # Read config:

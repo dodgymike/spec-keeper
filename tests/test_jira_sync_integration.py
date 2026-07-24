@@ -180,7 +180,9 @@ class TestJiraDownOnCreateRecoversOnComplete:
             ).scalar_one()
             assert task.jira_issue_key is None
             assert task.jira_sync_error is not None
-            assert "sync_task_created failed" in task.jira_sync_error
+            # SEC-FIX-1: bounded reader-safe message (status only, no upstream body).
+            assert task.jira_sync_error == "sync failed (HTTP 503)"
+            assert "Service Unavailable" not in task.jira_sync_error
 
         # Now Jira recovers: complete triggers inline create + transition
         with patch(
@@ -250,7 +252,9 @@ class TestJiraDownOnCreateRecoversOnComplete:
             ).scalar_one()
             assert task.jira_issue_key == "INT-3"
             assert task.jira_sync_error is not None
-            assert "sync_task_completed failed" in task.jira_sync_error
+            # SEC-FIX-1: bounded reader-safe message (status only, no upstream body).
+            assert task.jira_sync_error == "sync failed (HTTP 500)"
+            assert "Internal Server Error" not in task.jira_sync_error
 
 
 class TestRetryEndpointFixesPriorFailure:
@@ -334,7 +338,9 @@ class TestRetryEndpointFixesPriorFailure:
             ).scalar_one()
             assert task.jira_issue_key == "INT-11"
             assert task.jira_sync_error is not None
-            assert "sync_task_completed failed" in task.jira_sync_error
+            # SEC-FIX-1: bounded reader-safe message (status only, no upstream body).
+            assert task.jira_sync_error == "sync failed (HTTP 500)"
+            assert "Server Error" not in task.jira_sync_error
             assert task.status.value == "done"
 
         # Step 3: Retry with Jira recovered

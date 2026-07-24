@@ -615,3 +615,19 @@ conditional put. This is safe because the forward item already exists durably; e
 independent and idempotent (`attribute_not_exists(PK) AND attribute_not_exists(SK)`), so a crash
 mid-run leaves a consistent partial state that a plain re-run completes without duplicates. No
 multi-item transaction is needed or used.
+
+**DECISION — SEC-FIX-1 jira-config ships per-project `write` (not `admin`) + an `.atlassian.net`
+allow-list default for the SSRF guard.** The jira-config CRUD stored integration credentials behind
+only the GLOBAL group gate, so under `PROJECT_ISOLATION_ENFORCED` any enrolled writer could
+read/overwrite ANOTHER project's config (cross-tenant IDOR + data-exfil). The fix moves the gate to
+`require_project_perm(slug, read|write)` — same convention as the sibling `jira_sync_retry`. We ship
+`write` (not `admin`) so legitimate project writers stay unblocked and for parity with the retry
+endpoint; a `# SEC: consider tightening to "admin"` note is left in code because the resource holds
+secrets. For SSRF, `base_url` is validated at BOTH the schema boundary and inside `JiraClient`
+(defense-in-depth): https-only, no userinfo, default port, no private/loopback/link-local IP literals
+or `localhost`, and the host must match `JIRA_ALLOWED_HOST_SUFFIXES` (default `.atlassian.net` — Jira
+Cloud). The allow-list — rather than a pure private-IP denylist — is the primary control because it
+also blunts DNS-rebinding to an allowed name; self-hosted Jira is a deliberate, config-gated opt-in.
+Pinning the resolved IP at connect time (full rebind defense) is OUT OF SCOPE. Persisted
+`jira_sync_error` is bounded to `sync failed (HTTP <code>)` so the raw upstream body never reaches
+`spec-readers`; full detail stays in the server log.
