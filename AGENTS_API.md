@@ -348,6 +348,17 @@ curl -s -X POST $B/projects/corsearch/import \
   their `key` (their `public_id` is minted fresh on import). Because a task's `public_id` is globally
   unique on Postgres, the JSON transport targets a **fresh** project/server; re-import into the same
   project is the idempotent no-op.
+- **Per-field validation is enforced on the JSON import too (SEC-FIX-7).** Each task's `status`,
+  `priority` and `section` must be one of the allowed enum values (same lists as `POST /tasks`), and
+  the free-text fields are length-capped (`title` ≤ 512, `description`/`status_note` ≤ 16384 — see
+  below). A document with an out-of-range enum or an over-cap field is rejected whole with **422**
+  (nothing is persisted), distinct from the per-row **207** used for structural task faults.
+
+**Free-text length caps (SEC-FIX-8).** Every write schema bounds its large free-text fields well
+under the 8 MiB body cap: `title` ≤ 512 characters; `description`, note `body`, `status_note` and a
+decision's `decision`/`context`/`consequences` ≤ 16384 characters. `section` is restricted to
+`backlog` / `to_do` / `in_progress` / `completed` on tasks and epics. An over-cap or out-of-range
+value is a **422** (the OpenAPI document carries these bounds, so clients see them in `/openapi.json`).
 
 ## Log your work and record decisions
 

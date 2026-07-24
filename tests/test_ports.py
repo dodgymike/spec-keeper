@@ -362,6 +362,57 @@ def test_json_import_dedupes_repeated_public_id(client, project):
     assert got[0]["title"] == "Last write wins"
 
 
+def _doc_with_task(**task_over):
+    task = {
+        "public_id": "44444444-4444-4444-4444-444444444444",
+        "key": "BAD-1", "title": "Crafted", "status": "todo",
+        "section": "backlog", "position": 1.0, "tags": [],
+    }
+    task.update(task_over)
+    return {
+        "format": "spec-server-full/v1",
+        "project": {"slug": "demo", "name": "Demo"},
+        "epics": [],
+        "tasks": [task],
+    }
+
+
+def test_json_import_rejects_bad_status_enum(client, project):
+    """SEC-FIX-7: the full-fidelity import schema now gates ``status`` with OneOf,
+    so an out-of-range enum is a clean 422 (whole doc rejected) and NOT persisted."""
+    B = "/api/v1/projects/demo"
+    r = client.post(f"{B}/import", json=_doc_with_task(status="pwned"))
+    assert r.status_code == 422, r.get_data(as_text=True)[:400]
+    assert client.get(f"{B}/tasks").get_json() == []
+
+
+def test_json_import_rejects_bad_priority_enum(client, project):
+    """SEC-FIX-7: ``priority`` is gated with OneOf like TaskIn."""
+    B = "/api/v1/projects/demo"
+    r = client.post(f"{B}/import", json=_doc_with_task(priority="P99"))
+    assert r.status_code == 422, r.get_data(as_text=True)[:400]
+    assert client.get(f"{B}/tasks").get_json() == []
+
+
+def test_json_import_rejects_bad_section_enum(client, project):
+    """SEC-FIX-7: ``section`` is now gated (it was validated nowhere before)."""
+    B = "/api/v1/projects/demo"
+    r = client.post(f"{B}/import", json=_doc_with_task(section="nonsense"))
+    assert r.status_code == 422, r.get_data(as_text=True)[:400]
+    assert client.get(f"{B}/tasks").get_json() == []
+
+
+def test_json_import_valid_enums_still_succeed(client, project):
+    """A valid full-fidelity doc (in-range status/priority/section) still imports."""
+    B = "/api/v1/projects/demo"
+    r = client.post(f"{B}/import", json=_doc_with_task(
+        status="in_progress", priority="P1", section="to_do"))
+    assert r.status_code == 200, r.get_data(as_text=True)[:400]
+    got = client.get(f"{B}/tasks").get_json()
+    assert len(got) == 1
+    assert got[0]["section"] == "to_do"
+
+
 def test_export_diff_detects_change(client, project):
     B = "/api/v1/projects/demo"
     client.post(f"{B}/import", data=SAMPLE,

@@ -37,6 +37,16 @@ STATUS_VALUES = [s.value for s in TaskStatus]
 PRIORITY_VALUES = [p.value for p in Priority]
 RELATION_VALUES = [r.value for r in RelationKind]
 ROLE_VALUES = ["reader", "writer", "admin"]  # project-membership roles (ISO-1)
+# SEC-FIX-7: the allowed board sections for tasks AND epics — the same four the
+# SPEC.md parser (``specmd._section_of``) resolves to and the storage layer persists
+# (services.py / dynamo.py default to "backlog"). Previously validated on epics but
+# NOWHERE on tasks or the full-fidelity import path.
+SECTION_VALUES = ["backlog", "to_do", "in_progress", "completed"]
+# SEC-FIX-8: length caps on free-text fields. Generous enough for real usage but
+# bounded well under MAX_CONTENT_LENGTH (8 MiB) to stop oversized-payload / storage
+# bloat / log-amplification. ``TITLE`` for one-line headings, ``TEXT`` for prose bodies.
+MAX_TITLE_LEN = 512
+MAX_TEXT_LEN = 16384
 
 
 # --------------------------------------------------------------------------- #
@@ -119,7 +129,7 @@ class EpicIn(Schema):
     description = fields.Str(allow_none=True)
     section = fields.Str(
         load_default="backlog",
-        validate=validate.OneOf(["backlog", "to_do", "in_progress", "completed"]),
+        validate=validate.OneOf(SECTION_VALUES),
     )
     position = fields.Float(load_default=1000.0)
 
@@ -137,7 +147,7 @@ class EpicPatch(Schema):
     title = fields.Str()
     description = fields.Str(allow_none=True)
     section = fields.Str(
-        validate=validate.OneOf(["backlog", "to_do", "in_progress", "completed"])
+        validate=validate.OneOf(SECTION_VALUES)
     )
     position = fields.Float()
 
@@ -153,7 +163,8 @@ class CommitRefOut(Schema):
 
 
 class NoteIn(Schema):
-    body = fields.Str(required=True, metadata={"description": "The note text."})
+    body = fields.Str(required=True, validate=validate.Length(max=MAX_TEXT_LEN),
+                      metadata={"description": "The note text."})
     author = fields.Str(allow_none=True, metadata={"description": "Agent slug who wrote it."})
 
 
@@ -221,27 +232,27 @@ class TaskOut(Schema):
 class TaskIn(Schema):
     key = fields.Str(allow_none=True, metadata={"description": "Human ID, e.g. 'P0-1'. Optional."})
     epic_key = fields.Str(allow_none=True)
-    title = fields.Str(required=True)
-    description = fields.Str(allow_none=True)
+    title = fields.Str(required=True, validate=validate.Length(max=MAX_TITLE_LEN))
+    description = fields.Str(allow_none=True, validate=validate.Length(max=MAX_TEXT_LEN))
     status = fields.Str(load_default="todo", validate=validate.OneOf(STATUS_VALUES))
     priority = fields.Str(allow_none=True, validate=validate.OneOf(PRIORITY_VALUES))
     component = fields.Str(allow_none=True)
     proof_cmd = fields.Str(allow_none=True)
-    section = fields.Str(load_default="backlog")
+    section = fields.Str(load_default="backlog", validate=validate.OneOf(SECTION_VALUES))
     position = fields.Float(load_default=1000.0)
     created_by = fields.Str(allow_none=True)
     tags = fields.List(fields.Str(), load_default=list)
 
 
 class TaskPatch(Schema):
-    title = fields.Str()
-    description = fields.Str(allow_none=True)
+    title = fields.Str(validate=validate.Length(max=MAX_TITLE_LEN))
+    description = fields.Str(allow_none=True, validate=validate.Length(max=MAX_TEXT_LEN))
     status = fields.Str(validate=validate.OneOf(STATUS_VALUES))
-    status_note = fields.Str(allow_none=True)
+    status_note = fields.Str(allow_none=True, validate=validate.Length(max=MAX_TEXT_LEN))
     priority = fields.Str(allow_none=True, validate=validate.OneOf(PRIORITY_VALUES))
     component = fields.Str(allow_none=True)
     proof_cmd = fields.Str(allow_none=True)
-    section = fields.Str()
+    section = fields.Str(validate=validate.OneOf(SECTION_VALUES))
     position = fields.Float()
     owner = fields.Str(allow_none=True)
     epic_key = fields.Str(allow_none=True)
@@ -279,7 +290,7 @@ class CompleteIn(Schema):
 
 class StatusIn(Schema):
     status = fields.Str(required=True, validate=validate.OneOf(STATUS_VALUES))
-    note = fields.Str(allow_none=True)
+    note = fields.Str(allow_none=True, validate=validate.Length(max=MAX_TEXT_LEN))  # -> status_note
 
 
 class ReleaseIn(Schema):
@@ -393,14 +404,19 @@ class ExportTaskOut(Schema):
         "description": "Stable id — the import dedup key. Preserved on import so re-import is a no-op."})
     key = fields.Str(allow_none=True, metadata={"description": "Human id, e.g. 'PORT-8'. Nullable (keyless tasks are carried too)."})
     epic_key = fields.Str(allow_none=True)
-    title = fields.Str()
-    description = fields.Str(allow_none=True)
-    status = fields.Str(metadata={"description": f"One of {STATUS_VALUES}."})
-    priority = fields.Str(allow_none=True, metadata={"description": f"One of {PRIORITY_VALUES} or null."})
+    title = fields.Str(validate=validate.Length(max=MAX_TITLE_LEN))
+    description = fields.Str(allow_none=True, validate=validate.Length(max=MAX_TEXT_LEN))
+    # SEC-FIX-7: this schema is the LOAD/validation boundary of the JSON import path
+    # (ports._import_json -> ExportDocOut().load). Gate the enums like TaskIn so a
+    # crafted import document cannot inject out-of-range status/priority/section.
+    status = fields.Str(validate=validate.OneOf(STATUS_VALUES),
+                        metadata={"description": f"One of {STATUS_VALUES}."})
+    priority = fields.Str(allow_none=True, validate=validate.OneOf(PRIORITY_VALUES),
+                          metadata={"description": f"One of {PRIORITY_VALUES} or null."})
     component = fields.Str(allow_none=True)
     proof_cmd = fields.Str(allow_none=True)
-    status_note = fields.Str(allow_none=True)
-    section = fields.Str()
+    status_note = fields.Str(allow_none=True, validate=validate.Length(max=MAX_TEXT_LEN))
+    section = fields.Str(validate=validate.OneOf(SECTION_VALUES))
     position = fields.Float()
     tags = fields.List(fields.Str())
     created_at = fields.DateTime(allow_none=True)
@@ -454,10 +470,10 @@ class EventQuery(Schema):
 
 class DecisionIn(Schema):
     key = fields.Str(allow_none=True, metadata={"description": "e.g. DEC-7"})
-    title = fields.Str(required=True)
-    decision = fields.Str(required=True)
-    context = fields.Str(allow_none=True)
-    consequences = fields.Str(allow_none=True)
+    title = fields.Str(required=True, validate=validate.Length(max=MAX_TITLE_LEN))
+    decision = fields.Str(required=True, validate=validate.Length(max=MAX_TEXT_LEN))
+    context = fields.Str(allow_none=True, validate=validate.Length(max=MAX_TEXT_LEN))
+    consequences = fields.Str(allow_none=True, validate=validate.Length(max=MAX_TEXT_LEN))
     agent = fields.Str(allow_none=True)
     task_key = fields.Str(allow_none=True)
 
