@@ -660,3 +660,17 @@ two backend apps (a `[postgres]` test leaves an aborted transaction that cascade
 untouched baseline and only ever hits tests unrelated to this change (relations/notes) — not a
 regression from the schema hardening, which passes cleanly on both backends when order is
 deterministic (80 passed) and in each single-backend run (41 each).
+
+**DECISION — the public rate-limiter client IP trusts `CF-Connecting-IP` only when origin-lock is
+enforcing, and never uses `X-Forwarded-For` (SEC-FIX-5).**
+The forwarding headers are only trustworthy when the request is GUARANTEED to have transited
+Cloudflare. We gate that on the SAME condition the origin-lock gate enforces on — `ORIGIN_LOCK_MODE
+== "enforce"` AND a non-empty `ORIGIN_LOCK_SECRET` — reusing the existing degrade-to-off rule so an
+`enforce`-without-secret deployment (gate disabled) does NOT trust the header. We prefer
+`CF-Connecting-IP` (a single value the trusted edge sets, overwriting any client-supplied copy) and
+deliberately DROP `X-Forwarded-For` even when enforcing, because XFF is a client-appendable list
+whose first hop is attacker-controllable. When not enforcing (or the CF header is absent while
+enforcing) we key on `request.remote_addr`, which is fail-safe: on the raw path it is the true peer,
+and behind Cloudflare it is the shared edge IP — stricter aggregation, never a per-IP bypass. The
+logic lives in one helper (`app/client_ip.py`) that both `signup` and `enroll` import so the two
+public surfaces can never drift.
