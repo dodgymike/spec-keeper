@@ -1158,3 +1158,41 @@ to the server's `/events` endpoint.
   conditional-put idempotency proven by the re-run test; full `LastEvaluatedKey` pagination; dry-run
   read-only; a non-conditional `ClientError` fails loudly (a one-shot re-run resumes idempotently).
 - **Safe to run against prod:** dry-run default + read-only; `--apply` is idempotent conditional writes.
+
+## SEC-FIX-10 / SEC-FIX-11 — UI CSP baseline + XSS review guardrail (2026-07-24)
+- **SEC-FIX-10:** added a `<meta http-equiv="Content-Security-Policy">` baseline to `ui/index.html`
+  mirroring the CloudFront edge policy (`infra/terraform/cloudfront.tf`), so any path serving the
+  built SPA outside that distribution (local/container preview, direct-origin fetch) still runs with
+  a CSP instead of none. Directives: `default-src 'self'; script-src 'self'
+  https://challenges.cloudflare.com; style-src 'self'; img-src 'self' data:; font-src 'self';
+  connect-src 'self' https://api.spec.elasticninja.com https://cognito-idp.eu-west-1.amazonaws.com
+  https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none';
+  base-uri 'self'; form-action 'self'`. `frame-ancestors`/`upgrade-insecure-requests` are omitted
+  (ignored in meta form; only the edge header can enforce them). The edge header stays the source of
+  truth — the meta is a subset-mirror (connect-src is the only directive marginally wider than edge,
+  by the Turnstile origin), so with both policies enforced it can never be MORE restrictive than
+  production, i.e. it cannot break anything the edge doesn't already block.
+- **SEC-FIX-11:** added `ui/SECURITY.md` (+ a pointer in `ui/README.md`) recording the standing
+  guardrail: because auth tokens live in-memory (no localStorage), any XSS = full session theft, so
+  introducing `dangerouslySetInnerHTML`/`innerHTML`, an untrusted markdown/HTML renderer, or
+  relaxing the CSP to `'unsafe-inline'`/`'unsafe-eval'` is an automatic **P0** requiring explicit
+  security review before merge.
+- **Origins verified against source:** `cognito-idp.eu-west-1.amazonaws.com` (`src/auth/cognito.ts`
+  `https://cognito-idp.${region()}.amazonaws.com/`, region default `eu-west-1`), the API base
+  (`VITE_API_BASE`, prod `api.spec.elasticninja.com` — `src/api/client.ts`), and
+  `challenges.cloudflare.com` (Turnstile script + widget iframe — `src/lib/turnstile.ts`). A repo-wide
+  grep confirms these are the ONLY outbound origins the SPA calls.
+- **img-src `data:`:** re-verified per the SEC-4b caveat — `vite build` emits NO image assets and the
+  built CSS contains 0 `data:` refs, so `data:` isn't strictly required; kept to mirror the edge
+  policy (harmless, allows future inline data: images).
+- **Verify (node:20 container; host has no node):** `npx tsc --noEmit` → clean (`TSC_OK`);
+  `npx vite build` → `✓ 84 modules transformed … ✓ built in 1.47s`, and the CSP meta is present in
+  `dist/index.html`. Build artifacts cleaned (gitignored, not committed).
+- **Chain:** implementer + reviewer + security + ui-reviewer performed inline by feature-runner
+  (single-agent worktree): reviewer = scope is exactly the two tasks, tsc+build green; security = no
+  secrets, no `unsafe-*`, `object-src 'none'`/`base-uri`/`form-action 'self'`, meta ⊆ edge; ui-reviewer
+  = CSP-clean (no inline styles/scripts introduced; Turnstile script+frame + Cognito + API all
+  permitted), copy in SECURITY.md/README concise and actionable.
+- **Follow-up (dev caveat):** the meta CSP does not list `http://localhost:8080`, so `npm run dev`
+  against a LOCAL open API is blocked by connect-src (by design — the baseline mirrors prod). Run dev
+  against the deployed API, or temporarily drop the meta locally. Not a production regression.

@@ -615,3 +615,14 @@ conditional put. This is safe because the forward item already exists durably; e
 independent and idempotent (`attribute_not_exists(PK) AND attribute_not_exists(SK)`), so a crash
 mid-run leaves a consistent partial state that a plain re-run completes without duplicates. No
 multi-item transaction is needed or used.
+
+## SEC-FIX-10 — meta CSP is a subset-mirror, not a replacement for the edge header
+The CloudFront response-header CSP (`infra/terraform/cloudfront.tf`) remains the authoritative
+policy. The `<meta>` in `ui/index.html` is a travelling defense-in-depth baseline for paths that
+serve the built SPA outside CloudFront. It deliberately stays a subset-mirror: browsers enforce all
+present CSPs (a resource must satisfy every one), so the meta can never be MORE restrictive than the
+deployed edge header and thus cannot break production. The one directive marginally wider than edge
+is `connect-src` (adds the Turnstile origin, per the task spec) — harmless because the edge header
+still gates production. `frame-ancestors` and `upgrade-insecure-requests` are omitted since they are
+ignored in meta form; only the edge header enforces those. Local dev against `http://localhost:8080`
+is intentionally NOT allowlisted (the baseline mirrors prod origins only).
