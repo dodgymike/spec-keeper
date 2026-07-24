@@ -432,3 +432,20 @@ one-request win.
 `GET /projects/heads` (Werkzeug ranks static > dynamic). This is isolation-safe (the batch is
 membership-scoped) and low-risk; if `heads` ever needs to be a real slug, reserve it or gate the batch
 behind a query flag.
+
+## 2026-07-24 — INFRA: keep the INFRA-7 rationale header when regenerating requirements.lock
+
+**Decision.** When regenerating `requirements.lock` with `pip-compile 7.6.0`, restore the
+hand-written INFRA-7 documentation header (the two-line `-P greenlet==3.2.5 -P psycopg==3.2.13`
+regeneration command and the prose explaining *why* greenlet/psycopg are pinned below latest) on
+top of the freshly-generated resolved section.
+
+**Why.** pip-compile 7.6.0 records only the persistent invocation in the header and strips the
+transient `--upgrade-package` (`-P`) flags, and it never emits explanatory prose. Left as-is, the
+regenerated lock would silently lose the record of *which* pins are load-bearing and *why* — so the
+next person regenerating (without the `-P` overrides) would resolve greenlet/psycopg to versions
+that ship no `manylinux2014_aarch64` wheel and break `scripts/build_lambda.sh`. The header is a
+comment: it does not affect pip's parsing or the `--generate-hashes` integrity (verified: the
+platform `pip download` resolves with `PIP_EXIT=0`), and the resolved package section is left
+byte-for-byte as pip-compile emitted it — so this stays a genuine pip-compile artifact while
+preserving the INFRA-7 pin rationale the task explicitly asked to keep.

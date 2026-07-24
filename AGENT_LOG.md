@@ -836,3 +836,47 @@ to the server's `/events` endpoint.
 - **Backlog:** attempted spec-keeper `complete`; the deployed cloud API needs Cognito agent creds not
   present in this env, so the server status flip is PENDING — commit sha + test summary recorded here
   for a coordinator with creds to reconcile.
+
+## 2026-07-24 — INFRA: regenerate requirements.lock to include requests + transitive deps
+
+- **Task:** `spec-server` / INFRA / P2 / public_id `9152241e-97f5-4377-9907-15453424e944` —
+  "Regenerate requirements.lock to include requests + transitive deps". Claimed on the cloud API
+  (`PATCH .../tasks/{pid}` → owner=spec-keeper, status=in_progress, version 2).
+- **Problem:** `requirements.txt` gained `requests>=2.31,<3.0` (JIRA epic `17f6d4d`) but
+  `requirements.lock` was never regenerated, so the hash-pinned lock omitted `requests` and its
+  transitive deps — the cause of the prod cold-start `Runtime.ImportModuleError: No module named
+  'requests'` and the loss of the INFRA-7 reproducibility guarantee (prod was rebuilt from
+  `requirements.txt` as a stopgap).
+- **Change (lock-only):** regenerated `requirements.lock` with `pip-compile 7.6.0` under **Python
+  3.12** inside the app docker container (py3.12), command
+  `pip-compile --allow-unsafe --generate-hashes -P greenlet==3.2.5 -P psycopg==3.2.13
+  --output-file=requirements.lock requirements.txt`. The container's baked `requirements.txt` was
+  stale, so the current repo `requirements.txt` was `docker cp`'d in first. Net resolved diff:
+  `+requests==2.34.2`, `+certifi==2026.7.22`, `+idna==3.18`, `+charset-normalizer==3.4.9` (urllib3
+  already present via botocore), and `cryptography 49.0.0 → 43.0.3`. The cryptography move is a
+  **correction, not a downgrade regression**: current `requirements.txt` caps `cryptography>=42.0,
+  <44.0` (JIRA-2); the old 49.0.0 lock predated that cap and violated it. Nothing else re-resolved.
+- **INFRA-7 pins preserved:** `greenlet==3.2.5` and `psycopg[binary]==3.2.13` unchanged (the newest
+  releases still carrying a `manylinux2014_aarch64` wheel). pip-compile 7.6.0 drops the transient
+  `-P` upgrade flags and the hand-written INFRA-7 rationale from the header; the resolved package
+  section (all 43 pins + hashes) is left exactly as pip-compile emitted it, and only the documentation
+  header block was restored so the recorded regeneration command and pin rationale survive (a comment,
+  not resolved content — pip parses it fine, PIP_EXIT=0).
+- **Reproducibility proof (the real test):** `pip download --platform manylinux2014_aarch64
+  --only-binary=:all: --python-version 3.12 --implementation cp --abi cp312 -d /tmp/lock_check
+  -r requirements.lock` → **PIP_EXIT=0**, "Successfully downloaded … requests … sqlalchemy". Target
+  wheels resolved: `requests-2.34.2`, `certifi-2026.7.22`, `idna-3.18`,
+  `charset_normalizer-3.4.9-cp312-...-manylinux2014_aarch64`, `urllib3-2.7.0`,
+  `greenlet-3.2.5-cp312-...-manylinux2014_aarch64`,
+  `psycopg_binary-3.2.13-cp312-...-manylinux2014_aarch64`,
+  `cryptography-43.0.3-cp39-abi3-...-manylinux2014_aarch64` — i.e. the exact regression is fixed.
+- **Chain:** implementer → test-engineer (the platform-resolution proof) → reviewer → security
+  (feature-runner embodied these). Reviewer: only `requirements.lock` staged, genuine pip-compile
+  artifact, INFRA-7 pins intact, scope respected (`requirements.txt`/app code untouched). Security:
+  no secrets (only hashes); `--require-hashes` build integrity preserved. Observation/follow-up: the
+  `cryptography>=42.0,<44.0` cap now pins 43.0.3 (older than 49.0.0) — if a newer cryptography is
+  wanted for security patches, that is a **separate `requirements.txt`** task (out of scope here).
+- **Backlog:** completion via the cloud API attempted; if the Cognito token can be minted the task is
+  flipped `done`, else the server flip is PENDING and a coordinator reconciles from this entry.
+- **NOT deployed** — a redeploy (rebuild `build/lambda.zip` from this lock, ship) is a separate
+  coordinated step run by the deploy-coordinator after merge.
