@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { isAdminUser } from "../auth/session";
+import { AutoRefreshControl } from "./AutoRefreshControl";
 import "./AppLayout.css";
 
 interface AppLayoutProps {
@@ -56,6 +57,7 @@ export function AppLayout({ children }: AppLayoutProps) {
             </NavLink>
           ) : null}
         </nav>
+        {status === "signed-in" ? <AutoRefreshControl /> : null}
         <div className="app-layout__auth" role="status" aria-live="polite">
           {status === "signed-in" ? (
             <>

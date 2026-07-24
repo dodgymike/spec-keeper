@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { AuthProvider } from "./auth/AuthContext";
+import { AutoRefreshProvider } from "./hooks/autoRefresh";
 import "./styles/tokens.css";
 import "./styles/base.css";
 
@@ -15,7 +16,9 @@ ReactDOM.createRoot(root).render(
   <React.StrictMode>
     <BrowserRouter>
       <AuthProvider>
-        <App />
+        <AutoRefreshProvider>
+          <App />
+        </AutoRefreshProvider>
       </AuthProvider>
     </BrowserRouter>
   </React.StrictMode>

@@ -5,6 +5,7 @@ import type { Project, Task, TaskStatus } from "../api/types";
 import { Badge } from "../components/Badge";
 import { Card } from "../components/Card";
 import { StatChip } from "../components/StatChip";
+import { formatRelativeTime, useLiveRefresh } from "../hooks/useLiveRefresh";
 import "./ProjectsPage.css";
 
 type LoadState =
@@ -65,37 +66,16 @@ function countStalled(tasks: Task[]): number {
   ).length;
 }
 
-/** How often the "Updated Ns ago" indicator re-renders to stay current. */
-const RELATIVE_TIME_TICK_MS = 1000;
-/** How often the project list auto-refreshes in the background. */
+/** How often the project list auto-refreshes in the background (page default). */
 const AUTO_REFRESH_MS = 30_000;
-
-/** Formats a millisecond duration as a short "Ns ago" / "Nm ago" string. */
-function formatRelativeTime(elapsedMs: number): string {
-  const seconds = Math.max(0, Math.round(elapsedMs / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.round(seconds / 60);
-  return `${minutes}m ago`;
-}
 
 export function ProjectsPage() {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [rollups, setRollups] = useState<Record<string, RollupState>>({});
-  // Bumping `reload` re-runs the fetch effect below - it backs both the
-  // manual Refresh/Retry controls and the 30s auto-refresh interval.
-  const [reload, setReload] = useState(0);
-  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), RELATIVE_TIME_TICK_MS);
-    return () => clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    const id = setInterval(() => setReload((r) => r + 1), AUTO_REFRESH_MS);
-    return () => clearInterval(id);
-  }, []);
+  // `reload` re-runs the fetch effect below - it backs both the manual
+  // Refresh/Retry controls and the background auto-refresh (cadence set by the
+  // header Auto-refresh control; "Off" stops the poll but Refresh still works).
+  const { reload, refresh, lastUpdated, markUpdated, now } = useLiveRefresh(AUTO_REFRESH_MS);
 
   useEffect(() => {
     let cancelled = false;
@@ -104,7 +84,7 @@ export function ProjectsPage() {
       .then((projects) => {
         if (cancelled) return;
         setState({ status: "ready", projects });
-        setLastUpdated(Date.now());
+        markUpdated();
       })
       .catch((error: unknown) => {
         if (!cancelled) {
@@ -117,6 +97,7 @@ export function ProjectsPage() {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reload]);
 
   useEffect(() => {
@@ -178,7 +159,7 @@ export function ProjectsPage() {
           <button
             type="button"
             className="projects-page__refresh-button"
-            onClick={() => setReload((r) => r + 1)}
+            onClick={refresh}
           >
             Refresh
           </button>
@@ -194,7 +175,7 @@ export function ProjectsPage() {
           <button
             type="button"
             className="projects-page__retry-button"
-            onClick={() => setReload((r) => r + 1)}
+            onClick={refresh}
           >
             Retry
           </button>

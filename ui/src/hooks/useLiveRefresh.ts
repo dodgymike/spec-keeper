@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { resolveAutoRefreshMs, useAutoRefreshPreference } from "./autoRefresh";
 
 /** How often the "Updated Ns ago" indicator re-renders to stay current. */
 const RELATIVE_TIME_TICK_MS = 1000;
@@ -20,8 +21,15 @@ export function formatRelativeTime(elapsedMs: number): string {
  * it; call `markUpdated()` once that fetch resolves so the "Updated Ns ago"
  * clock resets. `now` ticks every second so relative-time strings computed
  * from it stay live without extra intervals in the caller.
+ *
+ * `autoRefreshMs` is the page's built-in cadence; the user's dashboard-wide
+ * auto-refresh preference (header control, persisted in localStorage) overrides
+ * it: "Off" (0) stops background polling entirely, an explicit interval replaces
+ * it, and "Default" keeps this page cadence. The manual `refresh()` always works.
  */
 export function useLiveRefresh(autoRefreshMs: number) {
+  const { preference } = useAutoRefreshPreference();
+  const effectiveMs = resolveAutoRefreshMs(preference, autoRefreshMs);
   const [reload, setReload] = useState(0);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -32,9 +40,10 @@ export function useLiveRefresh(autoRefreshMs: number) {
   }, []);
 
   useEffect(() => {
-    const id = setInterval(() => setReload((r) => r + 1), autoRefreshMs);
+    if (effectiveMs <= 0) return; // Off: do not schedule any background poll.
+    const id = setInterval(() => setReload((r) => r + 1), effectiveMs);
     return () => clearInterval(id);
-  }, [autoRefreshMs]);
+  }, [effectiveMs]);
 
   return {
     reload,

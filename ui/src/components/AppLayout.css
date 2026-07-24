@@ -41,6 +41,12 @@
   border-bottom-color: var(--color-accent);
 }
 
+/* First right-aligned element in the header claims the free space so the
+   auto-refresh control + auth status sit together on the right. */
+.app-layout__header > .auto-refresh-control {
+  margin-left: auto;
+}
+
 .app-layout__auth {
   display: flex;
   align-items: center;
