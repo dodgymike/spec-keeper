@@ -173,6 +173,17 @@ npm run preview    # serve the production build locally
 npm run typecheck  # tsc --noEmit only
 ```
 
+## Security
+
+Auth tokens live **in memory only** (no `localStorage`), so any XSS is
+session-theft-grade. `ui/SECURITY.md` records the standing guardrail:
+`dangerouslySetInnerHTML` / `innerHTML`, an untrusted markdown/HTML renderer,
+or relaxing the CSP to `'unsafe-inline'` / `'unsafe-eval'` are each an
+automatic **P0** requiring explicit security review before merge. The CSP is
+enforced at the edge (CloudFront, `infra/terraform/cloudfront.tf`) with a
+travelling `<meta http-equiv="Content-Security-Policy">` baseline in
+`index.html` for any path that serves the built SPA outside CloudFront.
+
 ## Backend dependency: CORS
 
 The dev server runs on a different origin (`http://localhost:5173`) than the

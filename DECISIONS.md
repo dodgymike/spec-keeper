@@ -631,3 +631,13 @@ also blunts DNS-rebinding to an allowed name; self-hosted Jira is a deliberate, 
 Pinning the resolved IP at connect time (full rebind defense) is OUT OF SCOPE. Persisted
 `jira_sync_error` is bounded to `sync failed (HTTP <code>)` so the raw upstream body never reaches
 `spec-readers`; full detail stays in the server log.
+## SEC-FIX-10 — meta CSP is a subset-mirror, not a replacement for the edge header
+The CloudFront response-header CSP (`infra/terraform/cloudfront.tf`) remains the authoritative
+policy. The `<meta>` in `ui/index.html` is a travelling defense-in-depth baseline for paths that
+serve the built SPA outside CloudFront. It deliberately stays a subset-mirror: browsers enforce all
+present CSPs (a resource must satisfy every one), so the meta can never be MORE restrictive than the
+deployed edge header and thus cannot break production. The one directive marginally wider than edge
+is `connect-src` (adds the Turnstile origin, per the task spec) — harmless because the edge header
+still gates production. `frame-ancestors` and `upgrade-insecure-requests` are omitted since they are
+ignored in meta form; only the edge header enforces those. Local dev against `http://localhost:8080`
+is intentionally NOT allowlisted (the baseline mirrors prod origins only).
