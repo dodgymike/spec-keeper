@@ -805,3 +805,34 @@ to the server's `/events` endpoint.
 - **Backlog:** attempted spec-keeper `complete`; the deployed cloud API needs Cognito agent creds not
   present in this env, so the server flip is PENDING — commit sha + summary recorded here for a
   coordinator with creds to reconcile.
+
+---
+
+## UI-DELTA-12 — Measurement proof for the delta-loading epic (2026-07-24)
+
+- **Task:** produce a reproducible, LOCAL measurement proving the delta epic's target — replace
+  "refetch everything every tick" with a cheap idle head-poll + a small per-change delta.
+- **Branch:** `ui-delta-12-measurement` (off `main` @ `0ab85e0`).
+- **Files changed (measurement + doc only; NO app/ runtime code):**
+  - `tests/test_delta_measurement.py` (new) — seeds a backlog-sized project (120 tasks + 5 epics with
+    realistic multi-paragraph briefs) into the app test client and measures the ACTUAL serialized
+    HTTP response bytes of: (1) baseline full refetch `GET /tasks?limit=1000` + `/epics`; (2) idle
+    `GET /changes/head`; (3) single-change `GET /changes?since=<cursor>` after mutating ONE task.
+    Marked `postgres_only` — bytes measure the HTTP payload (Marshmallow→JSON), backend-independent;
+    endpoint parity is proven cross-backend in `test_changes_api.py`/`test_project_heads.py`.
+  - `UI_DATA_LOADING_DEEPDIVE.md` — appended §10 "UI-DELTA-12 — Measured results" with the verbatim
+    numbers, interpretation, and an explicit note that these are LOCAL and a prod confirmation follows
+    post-deploy.
+- **Measured (verbatim, run 2026-07-24, in-container throwaway DB):**
+  - BASELINE tick: 239,818 B (234.2 KB) — tasks 238,276 B for 120 tasks (1,986 B/task) + epics 1,542 B.
+  - IDLE tick: 36 B = 0.0150% of baseline (99.9850% reduction; 6,662× smaller).
+  - CHANGE tick: 2,271 B = 0.95% of baseline (99.05% reduction; 106× smaller).
+- **Verification:** `docker compose exec -T -e TEST_DATABASE_URL=...specserver_test app python -m
+  pytest tests/test_delta_measurement.py -s -q` → **1 passed, 1 pre-existing warning** (the Postgres
+  `Tag.tasks` autoflush SAWarning, unrelated to this change).
+- **Chain:** implementer → test-engineer → reviewer (feature-runner embodied these). Security review
+  recorded as a one-line justification: change is a test + Markdown doc only, adds no runtime/app code,
+  no SQL (only bound test-client calls), no secrets, no new route — no attack surface introduced.
+- **Backlog:** attempted spec-keeper `complete`; the deployed cloud API needs Cognito agent creds not
+  present in this env, so the server status flip is PENDING — commit sha + test summary recorded here
+  for a coordinator with creds to reconcile.

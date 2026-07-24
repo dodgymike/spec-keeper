@@ -451,3 +451,57 @@ on 7/8/10, **aws-infra** for the GSI in 4/11 (mutate) and **deploy-coordinator**
   write-amplification — defer until numbers justify it.
 - Multi-tab cache sharing (a `BroadcastChannel` could let tabs share one delta stream) — nice-to-have,
   not scoped here.
+
+---
+
+## 10. UI-DELTA-12 — Measured results
+
+The magnitude hypothesis in §1 is now **measured**, not just modelled. The harness
+`tests/test_delta_measurement.py` seeds a backlog-sized project (120 tasks + 5 epics, each task
+carrying a realistic multi-paragraph brief) into the app test client and measures the **actual
+serialized HTTP response bytes** (`Content-Length`) of the three loading strategies. It is
+Postgres-only because the numbers measure the HTTP payload (Marshmallow → JSON), which is
+**backend-independent** — the endpoints' behavioural parity is proven cross-backend elsewhere
+(`test_changes_api.py`, `test_project_heads.py`).
+
+Run: `pytest -s -k delta_measurement` (in-container, throwaway DB). Verbatim output from the run on
+`2026-07-24`:
+
+```
+================ UI-DELTA-12 measured results (local) ================
+  Seeded project      : 120 tasks, 5 epics
+  --------------------------------------------------------------
+  BASELINE tick (old) :  239,818 B  (234.2 KB)
+      tasks?limit=all :  238,276 B  (232.7 KB) for 120 tasks -> 1,986 B/task
+      /epics          :    1,542 B  (1.5 KB)
+  --------------------------------------------------------------
+  IDLE tick (new)     :       36 B  (0.0 KB)  = 0.0150% of baseline  (99.9850% reduction)
+  CHANGE tick (new)   :    2,271 B  (2.2 KB)  = 0.95% of baseline  (99.05% reduction)
+  --------------------------------------------------------------
+  Idle head-poll is  6,662x smaller than a full refetch
+  Single-change delta is 106x smaller than a full refetch
+=====================================================================
+```
+
+**Interpretation:**
+
+- **Baseline (old per-tick cost): ~234 KB/tick** for a 120-task backlog (~1,986 B/task + 1.5 KB of
+  epics). This is what the pre-delta `ProgressPage` refetched on *every* tick, idle or not. It scales
+  linearly with the backlog and is paid per tab; the production backlog (119 tasks, longer briefs)
+  measured ~374 KB, the same order of magnitude — these local seed descriptions are slightly leaner
+  (~2 KB vs ~3 KB/task).
+- **Idle tick (the common case): 36 bytes/tick** — a ~**99.99% reduction** (~6,662× smaller). The vast
+  majority of ticks change nothing, so this is the dominant saving: idle polling collapses from
+  hundreds of KB to a fixed-size head cursor.
+- **Single-change tick: 2.3 KB** to propagate one mutation — a **~99% reduction** (~106× smaller) vs.
+  refetching the whole backlog. The delta cost is ~one task snapshot, independent of backlog size.
+
+**Assertions (generous, non-flaky):** idle poll < 1% of baseline; single-change delta < 25% of
+baseline; delta strictly cheaper than a full refetch; idle strictly cheaper than a delta. The
+printed numbers show the far larger real-world margin.
+
+> **Scope of this proof:** these are **local** measurements against the app test client (the
+> HTTP payload is what egresses either way, so the byte counts transfer directly). A **production
+> confirmation** — real request counts + `Content-Length` from the deployed API — will follow
+> **post-deploy** and be recorded in the epic notes, closing out UI-DELTA-12's "then last as proof"
+> bracket.
