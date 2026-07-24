@@ -407,3 +407,28 @@ unchanged (the only new observable is a `changelog` counter appearing in `list_c
 delta/head HTTP endpoints, retained-window/`full_resync_required` semantics and the client cache are
 UI-DELTA-5+; this task lands only the write path plus a `changes_head(slug)` cursor read and a
 `list_changes(slug, since, limit)` storage method (GSI7 on DynamoDB) used to verify it.
+
+## UI-DELTA-10: batched head fan-out as a dedicated `/projects/heads` endpoint (not a `/projects` field)
+
+**Context.** A dashboard showing many projects would poll `/changes/head` once per project each tick
+(an N-request fan-out). The deep-dive (§5.1 item 4) suggested "optionally fold a per-project head map
+into `GET /projects`".
+
+**Decision.** Ship the head map as a SEPARATE batch endpoint `GET /api/v1/projects/heads` →
+`{"heads": {<slug>: {cursor, min_retained_seq}}}` rather than adding a `head_cursor` field to
+`ProjectOut`. It is isolation-scoped to the caller's visible projects using the exact same
+`_visible_projects()` filter as `GET /projects`, and takes NO caller-supplied slug list (the input is
+bounded by the visible set, so the fan-out can never be widened and a non-member slug can't be
+probed). It goes through a new `changes_heads_for(slugs)` storage port on BOTH adapters (Postgres
+grouped `max/min(seq)` read; DynamoDB reuses `changes_head` + base reads — no new GSI).
+
+**Why not fold into `/projects`.** Adding the head to every `ProjectOut` (a) changes a widely-consumed
+contract and (b) makes every `/projects` caller pay the per-project head cost even when it doesn't
+need cursors. A dedicated endpoint keeps `/projects` unchanged, makes the head poll opt-in for the
+fan-out pages, and isolates the extra read cost to exactly the callers that want it — lower-risk, same
+one-request win.
+
+**Consequence / caveat.** A project literally slugged `heads` is shadowed by the static route on
+`GET /projects/heads` (Werkzeug ranks static > dynamic). This is isolation-safe (the batch is
+membership-scoped) and low-risk; if `heads` ever needs to be a real slug, reserve it or gate the batch
+behind a query flag.

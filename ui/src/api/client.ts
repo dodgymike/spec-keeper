@@ -19,6 +19,7 @@ import type {
   Member,
   Project,
   ProjectEvent,
+  ProjectHeads,
   ProjectNote,
   ProjectNoteListParams,
   SignupRequestIn,
@@ -210,6 +211,16 @@ export function getChainRun(slug: string, runId: string): Promise<ChainRun> {
 /** Current tip of a project's change feed (cursor + oldest retained seq). */
 export function getChangesHead(slug: string): Promise<ChangesHead> {
   return request<ChangesHead>(`/api/v1/projects/${encodeURIComponent(slug)}/changes/head`);
+}
+
+/**
+ * Batched head-cursor map for the caller's visible projects (UI-DELTA-10). ONE
+ * request replaces the N per-project `getChangesHead` polls a multi-project
+ * dashboard would otherwise fan out; the server scopes the map to member projects
+ * (isolation), so a non-member's head is never present. Returns `slug -> head`.
+ */
+export function getProjectsHeads(): Promise<Record<string, ChangesHead>> {
+  return request<ProjectHeads>("/api/v1/projects/heads").then((r) => r.heads);
 }
 
 /**

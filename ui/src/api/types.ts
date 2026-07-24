@@ -352,6 +352,16 @@ export interface ChangesHead {
   min_retained_seq: number;
 }
 
+/**
+ * `GET /projects/heads` — the batched fan-out head map (UI-DELTA-10). One request
+ * carries the change-log head for each of the caller's visible projects, keyed by
+ * slug, so a multi-project dashboard decides which projects advanced without an
+ * N-request per-project `/changes/head` fan-out. Isolation-scoped server-side.
+ */
+export interface ProjectHeads {
+  heads: Record<string, ChangesHead>;
+}
+
 /** `GET .../changes?since=&limit=` — one ascending page of changes. */
 export interface ChangesPage {
   /** Highest `seq` in this page (advance the checkpoint to this after applying). */

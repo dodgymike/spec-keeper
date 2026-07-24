@@ -889,6 +889,34 @@ class PostgresBackend:
         ).scalars().all()
         return [_change_dto(c) for c in rows]
 
+    def changes_heads_for(self, slugs: list[str]) -> dict[str, dict]:
+        """Batched head map (UI-DELTA-10): ``{slug: {cursor, min_retained_seq}}`` for
+        each EXISTING project in ``slugs`` (unknown slugs omitted). One grouped read:
+        ``max(seq)`` is the head cursor (0 when the project has no changes) and
+        ``min(seq) - 1`` the retained watermark (0 when empty / nothing pruned) — the
+        SAME values ``changes_head`` and the delta-endpoint's ``_min_retained_seq``
+        produce per project, computed here in a single query for the whole fan-out."""
+        if not slugs:
+            return {}
+        rows = db.session.execute(
+            sa.select(
+                Project.slug,
+                sa.func.coalesce(sa.func.max(Change.seq), 0),
+                sa.func.min(Change.seq),
+            )
+            .select_from(Project)
+            .outerjoin(Change, Change.project_id == Project.id)
+            .where(Project.slug.in_(slugs))
+            .group_by(Project.slug)
+        ).all()
+        return {
+            slug: {
+                "cursor": int(maxseq),
+                "min_retained_seq": (int(minseq) - 1) if minseq is not None else 0,
+            }
+            for slug, maxseq, minseq in rows
+        }
+
     # ----- chains ------------------------------------------------------
     def _chain_run(self, project_id: int, run_pubid: str) -> ChainRun:
         run = db.session.execute(

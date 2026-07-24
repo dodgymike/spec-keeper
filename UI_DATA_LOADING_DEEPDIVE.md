@@ -271,6 +271,16 @@ and a **client cache with full-resync fallback**. Deletes are first-class tombst
 4. **Head endpoint:** `GET /projects/{slug}/changes/head` → `{cursor, min_retained_seq}` (tiny).
    Optionally fold a per-project head map into `GET /projects` so the fan-out pages poll **one**
    request to decide which projects to delta-fetch.
+   **DONE (UI-DELTA-10):** shipped as a dedicated batch endpoint `GET /api/v1/projects/heads` →
+   `{"heads": {<slug>: {cursor, min_retained_seq}, …}}`, isolation-scoped to the caller's visible
+   projects (same filter as `GET /projects`; a non-member's head is never present) — lower-risk than
+   changing the `GET /projects` contract and adds no per-project cost to the many `/projects` callers.
+   It goes through the `changes_heads_for(slugs)` storage port on BOTH adapters (Postgres grouped
+   `max(seq)`/`min(seq)` read; DynamoDB reuses the per-project `changes_head` + base reads — no new
+   GSI). Client: `getProjectsHeads()` + the pure `syncMultiHead` fan-out helper (`ui/src/lib/
+   multiHeadSync.ts`) — one head poll per tick decides which projects advanced, and ONLY those get a
+   per-project delta/rollup fetch (wired into `ProjectsPage`). The single-project `useDeltaRefresh`
+   path (ProgressPage) is unchanged.
 5. **`?updated_after` (optional, Option 2):** add to `list_tasks`/`list_epics` as an *efficiency*
    path for full-resync-avoidance on huge projects; requires an `updated_at` GSI on DynamoDB — defer
    unless payload numbers justify it.

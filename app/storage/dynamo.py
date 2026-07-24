@@ -1294,6 +1294,27 @@ class DynamoBackend:
         )
         return [self._change_dto(r) for r in rows]
 
+    def changes_heads_for(self, slugs: list[str]) -> dict[str, dict]:
+        """Batched head map (UI-DELTA-10): ``{slug: {cursor, min_retained_seq}}`` for
+        each EXISTING project in ``slugs`` (unknown slugs omitted). Per slug it reuses
+        the exact single-project reads — ``changes_head`` (the cheap descending base-
+        table read, 0 when empty) and the lowest retained ``seq`` for the watermark —
+        so a slug's value is byte-identical to the single ``/changes/head`` endpoint's.
+        Bounded by the caller's already isolation-scoped visible-project list, so the
+        fan-out over existing indexes needs no new GSI (reuses GSI7/base reads)."""
+        result: dict[str, dict] = {}
+        for slug in slugs:
+            try:
+                cursor = self.changes_head(slug)
+                first = self.list_changes(slug, 0, 1)
+            except NotFound:
+                continue
+            result[slug] = {
+                "cursor": cursor,
+                "min_retained_seq": (first[0].seq - 1) if first else 0,
+            }
+        return result
+
     # ----- events / notes-feed / decisions ----------------------------- #
     def _event_item(self, slug, event_type, ts, uid, *, agent=None, message=None,
                     payload=None, task_pubid=None, task_key=None):

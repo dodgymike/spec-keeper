@@ -483,6 +483,20 @@ class ChangesHeadOut(Schema):
     min_retained_seq = fields.Int()
 
 
+class ProjectHeadsOut(Schema):
+    """UI-DELTA-10 batched fan-out: one response carrying the change-log head for
+    EACH of the caller's visible projects, keyed by slug, so a many-project
+    dashboard decides which projects advanced in a SINGLE request instead of
+    polling ``/changes/head`` once per project. Each value mirrors
+    ``ChangesHeadOut`` (``cursor`` + ``min_retained_seq``). The map is
+    isolation-scoped server-side — a non-member's project head is never present."""
+    heads = fields.Dict(
+        keys=fields.Str(metadata={"description": "project slug"}),
+        values=fields.Nested(ChangesHeadOut),
+        metadata={"description": "slug -> {cursor, min_retained_seq}"},
+    )
+
+
 class ChangesPageOut(Schema):
     """A delta page: ascending ``changes``, the new ``cursor`` (max seq in the page,
     or the head when empty), ``truncated`` (page filled to ``limit`` — re-poll), and

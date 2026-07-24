@@ -387,6 +387,53 @@ def test_on_list_projects_is_filtered_to_memberships(app_on, rsa_key):
     assert c.get("/api/v1/projects", headers=_auth(stranger)).get_json() == []
 
 
+def test_on_projects_heads_is_isolation_scoped(app_on, rsa_key):
+    """UI-DELTA-10 isolation: the batched ``GET /projects/heads`` fan-out is scoped
+    to the SAME visible set as ``GET /projects``. A non-admin member sees only their
+    project's head — a non-member's project head is ABSENT from the map (never a
+    cross-project leak) — while a global spec-admin sees every project's head. Each
+    present value equals that project's own ``/changes/head``."""
+    c = app_on.test_client()
+    admin = _mint(rsa_key, sub=ADMIN_SUB, groups=[GROUP_ADMIN])
+    a = _mk_project(c, admin)
+    b = _mk_project(c, admin)
+    _add_member(c, admin, a, "reader-sub", "reader")
+    # Mutate BOTH projects so both have a non-zero head to (not) leak.
+    for slug in (a, b):
+        assert c.post(f"/api/v1/projects/{slug}/tasks", json={"title": "T"},
+                      headers=_auth(admin)).status_code == 201
+
+    reader = _mint(rsa_key, sub="reader-sub", groups=[GROUP_READ])
+    stranger = _mint(rsa_key, sub="nobody", groups=[GROUP_READ])
+
+    # The reader member sees ONLY project a — b's head must be absent.
+    reader_heads = c.get("/api/v1/projects/heads", headers=_auth(reader)).get_json()["heads"]
+    assert set(reader_heads) == {a}
+    assert b not in reader_heads
+    # The present value matches a's own /changes/head (same verified caller).
+    a_head = c.get(f"/api/v1/projects/{a}/changes/head", headers=_auth(reader)).get_json()
+    assert reader_heads[a] == a_head
+
+    # A member-of-nothing gets an empty map (fail-closed), never a leaked head.
+    assert c.get("/api/v1/projects/heads", headers=_auth(stranger)).get_json()["heads"] == {}
+
+    # A global spec-admin sees every project's head.
+    admin_heads = c.get("/api/v1/projects/heads", headers=_auth(admin)).get_json()["heads"]
+    assert {a, b} <= set(admin_heads)
+
+
+def test_off_projects_heads_shows_all(app_off, rsa_key):
+    """Flag OFF: the batched head map lists every project (membership ignored),
+    mirroring ``GET /projects`` behaviour under the dormant flag."""
+    c = app_off.test_client()
+    admin = _mint(rsa_key, sub=ADMIN_SUB, groups=[GROUP_ADMIN])
+    a = _mk_project(c, admin)
+    b = _mk_project(c, admin)
+    reader = _mint(rsa_key, sub="stranger-r", groups=[GROUP_READ])
+    heads = c.get("/api/v1/projects/heads", headers=_auth(reader)).get_json()["heads"]
+    assert {a, b} <= set(heads)
+
+
 def test_on_create_project_makes_creator_admin_member(app_on, rsa_key):
     """create_project records the VERIFIED creator as an ``admin`` member."""
     c = app_on.test_client()

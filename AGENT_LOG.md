@@ -757,3 +757,51 @@ to the server's `/events` endpoint.
 - **Backlog:** attempted spec-keeper `complete`; the deployed cloud API needs Cognito agent creds not
   present in this env, so the server flip is PENDING — commit sha + summary recorded here for a
   coordinator with creds to reconcile.
+
+## UI-DELTA-10 — batched fan-out head poll (both backends + UI) — 2026-07-24
+- **Task (one sentence):** fold a per-project change-log head map into one request so a
+  many-project dashboard replaces its N-per-tick `/changes/head` fan-out with a single call, and
+  delta-fetch only the projects that advanced.
+- **Server (BOTH backends — parity hard-rule, same task):**
+  - New endpoint `GET /api/v1/projects/heads` → `{"heads": {<slug>: {cursor, min_retained_seq}}}`,
+    isolation-scoped to the caller's VISIBLE projects via the SAME filter as `GET /projects`
+    (extracted into `_visible_projects()` so the two share one source of truth — a non-member's head
+    is never present). Input is bounded by that visible set (no caller-supplied slug list), so the
+    fan-out cannot be widened. (`app/blueprints/projects.py`.)
+  - New storage port `changes_heads_for(slugs)` on `app/storage/base.py` + BOTH adapters:
+    Postgres one grouped `max(seq)`/`min(seq)` read (`app/storage/postgres.py`); DynamoDB reuses the
+    per-project `changes_head` + base reads (`app/storage/dynamo.py`) — NO new GSI (reuses GSI7).
+    Each slug's value is identical to that project's single `/changes/head`.
+  - Marshmallow `ProjectHeadsOut` (map of slug→`ChangesHeadOut`) → in OpenAPI (`app/schemas.py`;
+    verified `/openapi.json` carries the path + schema with `additionalProperties: ChangesHeadOut`).
+- **Client:** `getProjectsHeads()` (`ui/src/api/client.ts`, `ui/src/api/types.ts`); pure fan-out
+  helper `syncMultiHead` + `selectAdvancedProjects` (`ui/src/lib/multiHeadSync.ts`) — one head poll
+  per tick decides which projects advanced; ONLY those get a per-project rollup/delta fetch. Wired
+  into `ProjectsPage` (background tick = one `/projects/heads` + only-advanced rollup refetch; full
+  load on mount/manual-refresh; single-project `useDeltaRefresh`/ProgressPage untouched).
+- **Tests (parity, both backends):** `tests/test_project_heads.py` (map == per-project head; empty
+  project present with cursor 0; advances after mutation; empty map when no projects) +
+  `tests/test_isolation.py` (`test_on_projects_heads_is_isolation_scoped`: non-member's head ABSENT,
+  member sees only theirs, admin sees all; `test_off_projects_heads_shows_all`). Client vitest
+  `ui/src/lib/multiHeadSync.test.ts` (only-advanced-are-delta-fetched, one head request, cold-start,
+  checkpoint advance, no-mutation, purity).
+- **Verification:**
+  - `TEST_BACKENDS=postgres,dynamodb pytest tests/test_project_heads.py tests/test_isolation.py -k "head or heads or changes or projects_heads"` → **14 passed** (postgres + dynamodb).
+  - Broader: `pytest tests/test_members.py tests/test_members_parity.py tests/test_isolation.py tests/test_project_heads.py tests/test_changes_api.py tests/test_changelog.py` (both backends) → **117 passed, 1 pre-existing warning**.
+  - `node:20` container (host has no node): `tsc --noEmit` → clean; `vitest run` → **41 passed (3 files)**.
+- **Scope guard honoured:** did NOT touch the client full-resync fallback (UI-DELTA-9): its files
+  (`useDeltaRefresh.ts`, `deltaCache.ts`/`.test`, `deltaSync.ts`/`.test`) were WIP in the shared
+  worktree and were left entirely unstaged/untouched (they returned to committed state before my
+  commit; only my files were staged).
+- **Chain:** implementer → test-engineer → reviewer → security → data-reviewer → reliability-reviewer
+  → ui-reviewer — feature-runner embodied all seven. Security: isolation-scoped (no cross-project
+  leak), no caller-supplied fan-out, SQL parameterized (`.in_(slugs)` bound), Dynamo values bound via
+  Key/Attr — no injection sink, no secret. data/reliability: adapter parity proven on both backends;
+  read-only idempotent GET; client tick has epoch-guarded late-write drops + checkpoint captured
+  before rollups (no lost update). ui: rendered output/a11y unchanged, background tick cheaper.
+- **Follow-up:** a project literally slugged `heads` is shadowed by the static `/projects/heads`
+  route on GET (isolation-safe; low risk) — reserve the slug or move the batch under a query flag if
+  ever needed.
+- **Backlog:** attempted spec-keeper `complete`; the deployed cloud API needs Cognito agent creds not
+  present in this env, so the server flip is PENDING — commit sha + summary recorded here for a
+  coordinator with creds to reconcile.

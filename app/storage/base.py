@@ -120,6 +120,14 @@ class StorageBackend(Protocol):
     # (its HTTP endpoint lands in UI-DELTA-5).
     def changes_head(self, slug: str) -> int: ...                             # NotFound
     def list_changes(self, slug: str, since: int, limit: int) -> list[ChangeDTO]: ...  # NotFound
+    # Batched fan-out head poll (UI-DELTA-10): the head map for MANY projects in one
+    # call, so a multi-project dashboard replaces N per-project ``changes_head`` polls
+    # with a single request. Returns ``{slug: {"cursor", "min_retained_seq"}}`` for
+    # each EXISTING slug in ``slugs`` (unknown slugs are omitted, never errored — the
+    # caller has already isolation-scoped the input to visible projects). Each value
+    # is identical to what ``changes_head`` + the ``min_retained_seq`` watermark yield
+    # for that project alone.
+    def changes_heads_for(self, slugs: list[str]) -> dict[str, dict]: ...
 
     # --- chains ---------------------------------------------------------
     def create_chain_run(self, slug: str, ident: str, started_by: str | None) -> ChainRunDTO: ...
