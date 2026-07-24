@@ -878,6 +878,13 @@ curl -s -H 'Content-Type: application/json' \
 - **Bounded sync errors (SEC-FIX-1):** a failed sync persists only a generic, reader-safe
   `jira_sync_error` (e.g. `sync failed (HTTP 500)`) — never the raw upstream response body; full
   detail stays in the server log only.
+- **Token-at-rest key (SEC-FIX-12):** the stored `api_token` is Fernet-encrypted at rest. The key
+  material comes from `JIRA_TOKEN_ENCRYPTION_KEY_SECRET_ARN` (an AWS Secrets Manager secret, loaded
+  once and cached — the production bar) when set, else the bare `JIRA_TOKEN_ENCRYPTION_KEY` env var
+  (local/dev). Either may be a **comma-separated list** of Fernet keys: the first encrypts, all
+  decrypt (MultiFernet), enabling zero-downtime rotation (prepend the new primary, re-encrypt lazily,
+  drop the retired key). With neither configured, encrypt/decrypt fail closed — Jira stays
+  prod-disabled-safe.
 
 ```bash
 # Read config:

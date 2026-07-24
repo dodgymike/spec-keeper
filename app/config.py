@@ -166,6 +166,26 @@ class Config:
         ).split(",") if s.strip()
     ]
 
+    # --- Jira token encryption key (SEC-FIX-12) ------------------------------
+    # The Fernet key(s) that encrypt a project's stored Jira API token. Two knobs
+    # (the ARN takes precedence; env is the local/dev fallback):
+    #   JIRA_TOKEN_ENCRYPTION_KEY_SECRET_ARN — when set, the key material is loaded
+    #     ONCE at first use from this Secrets Manager secret (CMK-encrypted like
+    #     agent-credentials) and cached in-process; the raw env var is ignored.
+    #   JIRA_TOKEN_ENCRYPTION_KEY — the direct value used when no ARN is set.
+    # Either source may hold a SINGLE key or a COMMA-SEPARATED list; with a list
+    # the FIRST key is primary (used to encrypt) and ALL keys can decrypt
+    # (cryptography's MultiFernet), which is how a zero-downtime key rotation
+    # works: prepend the new key, re-encrypt lazily, then drop the old one.
+    # Both UNSET (the local/dev default) => encrypt/decrypt fail closed with
+    # EncryptionKeyMissing, so Jira stays prod-disabled-safe. The key material is
+    # NEVER logged. app/crypto.py reads these from the environment directly (at
+    # call time) so tests can monkeypatch them; they are registered here for
+    # documentation and boot-guard visibility.
+    JIRA_TOKEN_ENCRYPTION_KEY_SECRET_ARN = (
+        os.environ.get("JIRA_TOKEN_ENCRYPTION_KEY_SECRET_ARN") or None
+    )
+
     # --- Per-authenticated-principal API throttle (SEC-DOS-2) ----------------
     # A per-`sub` in-app rate limit layered AFTER the JWT is verified, on the
     # authenticated /api/v1 data-plane, so one token/tenant cannot starve the
@@ -330,3 +350,6 @@ class TestConfig(Config):
     # API_RATELIMIT_TABLE env var can't flip the baseline; the throttle tests set
     # it explicitly on a subclass (and inject an in-memory counter table).
     API_RATELIMIT_TABLE = None
+    # Jira token-encryption secret ARN (SEC-FIX-12) OFF by default so a stray env
+    # var can't flip the baseline; the crypto tests set/patch it explicitly.
+    JIRA_TOKEN_ENCRYPTION_KEY_SECRET_ARN = None

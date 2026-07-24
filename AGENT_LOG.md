@@ -1357,3 +1357,42 @@ to the server's `/events` endpoint.
   headers read safely with `.strip()`, `remote_addr` fallback is fail-safe (stricter, never a bypass).
 - **Note:** the sibling SEC-DOS-1 items (fail-open limiter on the intake path, `TURNSTILE_SECRET=""`,
   WAFv2 rate rule) are out of scope for SEC-FIX-5 and remain open in `SECURITY_DEEPDIVE.md`.
+
+## SEC-FIX-12 — Harden Jira Fernet key: MultiFernet + optional Secrets Manager sourcing (2026-07-24)
+- **Task:** cloud Spec Server `SEC-FIX-12` (epic SECURITY, P2). Source the Jira token encryption key
+  above the bare-env-var bar and make key rotation possible, before Jira is enabled in prod.
+- **Change (code-only, no terraform apply):**
+  - `app/crypto.py`: `_get_fernet()` now builds a `MultiFernet` from the configured key material,
+    which may be a single key OR a comma-separated list (first = primary/encrypt, all = decrypt).
+    New `JIRA_TOKEN_ENCRYPTION_KEY_SECRET_ARN` source: when set, key material is fetched once from
+    Secrets Manager and cached in-process (ARN-keyed, lock-guarded); unset => falls back to the
+    `JIRA_TOKEN_ENCRYPTION_KEY` env var; neither => fail-closed `EncryptionKeyMissing`. Public API
+    (`encrypt`/`decrypt`/`DecryptionError`/`EncryptionKeyMissing`) unchanged; key material never
+    logged. Added `clear_key_cache()` for tests/rotation.
+  - `app/config.py`: registered `JIRA_TOKEN_ENCRYPTION_KEY_SECRET_ARN` (+ pinned off in TestConfig).
+  - Docs: `.env.example`, `README.md`, `AGENTS_API.md` updated. `DECISIONS.md` records the decision +
+    the DEFERRED terraform (CMK-wrapped SM secret + scoped Lambda GetSecretValue), tracked as backlog
+    follow-up **SEC-FIX-12-TF** (created via the API).
+- **Tests:** `tests/test_crypto.py` extended — MultiFernet rotation (old ciphertext still decrypts
+  after demotion to secondary; primary alone decrypts new ciphertext; retired key stops decrypting),
+  Secrets Manager sourcing via a boto3 stub (single + MultiFernet round-trip, ARN precedence over
+  env, fetch-once caching, env fallback), fail-closed with neither source. Used a lightweight boto3
+  stub, NOT moto (moto is not a container dependency; keeps the test image small).
+- **Verify (in-container, isolated DB):**
+  - `pytest tests/test_crypto.py` -> 27 passed.
+  - `pytest test_crypto + test_jira_config_endpoint + test_jira_sync + test_jiracfg_parity` -> 52 passed.
+  - Merged wave-1 regression slice (test_sec_hardening, test_client_ip, test_health, test_auth,
+    test_ports, test_tasks_api, test_sec_fix_1_jira_config, test_jira_config_{endpoint,model},
+    test_crypto) on BOTH backends (`TEST_BACKENDS=postgres,dynamodb`, DynamoDB Local) -> 181 passed,
+    13 skipped (postgres_only params self-skip on dynamodb). Note: the task's listed `test_jira_config.py`
+    does not exist; the real files are `test_jira_config_endpoint.py` / `test_jira_config_model.py`.
+  - App container rebuilt from current `main` (a537820) + working tree before the runs.
+- **Merged wave-1 verdict:** COHERENT. SEC-FIX-2..9 changes (config.py boot guards, AUTH_LEEWAY,
+  neutral backend errors, client-IP trust, import enum/length caps, agent-creds CMK doc) compose
+  cleanly with this change; no auto-merge incoherence in config.py/schemas.py; the only warning is a
+  pre-existing SAWarning in postgres.py:253 (unrelated).
+- **Chain:** implementer + test-engineer + reviewer + security ran (feature-runner). Reviewer:
+  exactly one task; public crypto API preserved; single-key path is byte-for-byte prior behaviour;
+  config var registered + pinned off in TestConfig. Security: key material never logged/echoed, broad
+  DecryptionError catch keeps the neutral message, SM fetch binds `SecretId` (no string-formatted
+  input), fail-closed default unchanged (Jira stays prod-disabled-safe), boto3 imported lazily.

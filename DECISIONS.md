@@ -712,3 +712,46 @@ against the LIVE key policy for CMK `fa2fe621-dcb3-4c6e-a413-f05fd1e74442` (no T
 **Residual risk (accepted):** a future broad `secretsmanager:GetSecretValue` (Resource `*`, or
 matching this secret's ARN) granted to any in-account principal would gain decrypt. Guardrail is
 procedural — treat any such new grant as a security-review item.
+
+---
+
+## SEC-FIX-12 — Jira Fernet key: MultiFernet + optional Secrets Manager sourcing (2026-07-24)
+
+**Context.** The Jira integration's Fernet key was sourced from a bare env var
+`JIRA_TOKEN_ENCRYPTION_KEY` (`app/crypto.py`), below this project's own secret bar (agent-credentials
+use a CMK-wrapped Secrets Manager secret). A single Fernet key also means a rotation renders all
+prior ciphertext undecryptable. Jira is currently prod-DISABLED (no key configured => encrypt/decrypt
+fail closed with `EncryptionKeyMissing`), so this is hardening for BEFORE Jira is enabled in prod.
+
+**DECISION — code-only hardening now; provisioning deferred.**
+1. `app/crypto.py` now builds a `MultiFernet` from the configured key material, which may be a
+   SINGLE key or a COMMA-SEPARATED list: the FIRST key is primary (encrypts), ALL keys decrypt. This
+   is the zero-downtime rotation primitive — prepend the new key, let old ciphertext decrypt under the
+   now-secondary key, re-encrypt lazily, then drop the retired key. The public API
+   (`encrypt`/`decrypt`/`DecryptionError`/fail-closed `EncryptionKeyMissing`) is unchanged; a single
+   key yields a one-element MultiFernet (byte-for-byte prior behaviour).
+2. New optional source `JIRA_TOKEN_ENCRYPTION_KEY_SECRET_ARN` (registered in `app/config.py`): when
+   set, the key material is loaded ONCE from that Secrets Manager secret and cached in-process
+   (keyed by ARN, lock-guarded), and the bare env var is ignored. Unset => fall back to the direct
+   `JIRA_TOKEN_ENCRYPTION_KEY` env var (keeps local/dev working). The secret value has the same
+   single-or-comma-separated format. Key material is NEVER logged or placed in an exception message.
+
+**DEFERRED TERRAFORM (do NOT provision until Jira is enabled in prod).** When Jira goes live in
+production, add — mirroring the `agent-credentials` pattern:
+- an `aws_secretsmanager_secret` for the Jira token key, **CMK-encrypted** with the same customer-
+  managed KMS key used for `agent-credentials` (not the AWS-managed `aws/secretsmanager` key);
+- a rotation-friendly initial value (a single Fernet key; rotations prepend a new primary);
+- an IAM grant on the **app Lambda exec role** of `secretsmanager:GetSecretValue` scoped to THAT
+  secret's ARN only (and `kms:Decrypt` via the CMK's ViaService/CallerAccount conditions, as with
+  agent-credentials) — nothing broader;
+- wire `JIRA_TOKEN_ENCRYPTION_KEY_SECRET_ARN` into the Lambda env from the new secret's ARN output.
+This is intentionally NOT done now: Jira is prod-disabled, no secret exists to grant on, and adding
+an unused secret + IAM grant is avoidable surface. Tracked as backlog follow-up **SEC-FIX-12-TF**.
+
+**Outcome.** Code + tests only; no `terraform apply`. Tests: `tests/test_crypto.py` (27 passed) —
+MultiFernet rotation (old ciphertext still decrypts after the key is demoted to secondary; primary
+alone decrypts new ciphertext; retired key stops decrypting), Secrets Manager sourcing via a boto3
+stub (single key + MultiFernet round-trip, ARN precedence over env, fetch-once caching, env
+fallback), and fail-closed with neither source set. **Residual risk (accepted):** until the deferred
+terraform lands, enabling Jira in prod with only the bare env var would keep the key off the
+Secrets-Manager/CMK bar — gated procedurally by this decision + the SEC-FIX-12-TF follow-up.

@@ -142,7 +142,9 @@ blocks the API response; the error is stored on the task and can be retried late
   encrypted API token, Jira project key, enabled flag) — the `jira_project_config` table on
   Postgres, the `JIRACFG` singleton item on DynamoDB; there is no global env-var-based config.
 - **Encrypted tokens** — API tokens are Fernet-encrypted at rest using the
-  `JIRA_TOKEN_ENCRYPTION_KEY` env var; the token is decrypted in-memory only at call time.
+  `JIRA_TOKEN_ENCRYPTION_KEY` env var (or, in production, key material sourced from a Secrets
+  Manager secret via `JIRA_TOKEN_ENCRYPTION_KEY_SECRET_ARN`); the token is decrypted in-memory only
+  at call time. Both accept a comma-separated key list (MultiFernet) for zero-downtime rotation.
 - **Transition cache** — Jira project statuses are fetched and cached in a JSONB column on config
   save (when enabled). A "refresh once before failing" strategy handles Jira workflow changes
   without hammering the API.
@@ -420,7 +422,8 @@ IAM scoped to exact ARNs, reusing the HA-6 SES send policy + configuration set. 
 **Deferred, not shipped:** an S3 WORM audit bucket and peppered ip/ua fingerprints — documented as
 a follow-up, tracked separately from this backend + infra slice.
 | `API_KEYS` | _(empty)_ | Comma-separated bearer tokens. Empty ⇒ auth off (local-only). |
-| `JIRA_TOKEN_ENCRYPTION_KEY` | _(empty)_ | Fernet key for encrypting Jira API tokens at rest. Required only if Jira sync is used. Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `JIRA_TOKEN_ENCRYPTION_KEY` | _(empty)_ | Fernet key(s) for encrypting Jira API tokens at rest. Required only if Jira sync is used. A single key or a **comma-separated list** (SEC-FIX-12): the first is primary (encrypts), all decrypt (MultiFernet) — prepend a new key for a zero-downtime rotation. Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `JIRA_TOKEN_ENCRYPTION_KEY_SECRET_ARN` | _(empty)_ | SEC-FIX-12: production source for the key above. When set, the key material is loaded once (cached in-process) from this AWS Secrets Manager secret (CMK-encrypted, like agent-credentials) and the bare env var is ignored; the secret value has the same single-or-comma-separated format. Unset ⇒ falls back to `JIRA_TOKEN_ENCRYPTION_KEY`. Both unset ⇒ encrypt/decrypt fail closed. |
 
 ## Backups
 
