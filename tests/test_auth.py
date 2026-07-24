@@ -109,6 +109,10 @@ def cognito_app():
         COGNITO_ISSUER=ISSUER,
         COGNITO_JWKS_URI=JWKS_URI,
         COGNITO_AUDIENCE=[AUDIENCE],
+        # Pin the clock-skew leeway to 0 so the expiry/nbf matrix is deterministic
+        # and independent of the shipped AUTH_LEEWAY default (45s, SEC-FIX-4); a
+        # token minted with exp_delta=-10 must read as genuinely expired here.
+        AUTH_LEEWAY=0,
     )
 
 
